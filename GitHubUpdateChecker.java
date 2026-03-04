@@ -23,8 +23,9 @@ public class GitHubUpdateChecker {
 	public static void checkForUpdates(Context context, File appFilesDir, UpdateCallback callback) {
 		new Thread(() -> {
 			try {
-				// 1. الاتصال بـ GitHub وجلب ملف JSON
-				URL url = new URL(UPDATE_JSON_URL);
+				// 1. الاتصال بـ GitHub وجلب ملف JSON (مع إضافة رقم عشوائي لتخطي الكاش)
+				String noCacheUrl = UPDATE_JSON_URL + "?t=" + System.currentTimeMillis();
+				URL url = new URL(noCacheUrl);
 				HttpURLConnection conn = (HttpURLConnection) url.openConnection();
 				conn.setRequestMethod("GET");
 				
@@ -42,32 +43,37 @@ public class GitHubUpdateChecker {
 				JSONObject updateJson = new JSONObject(sb.toString());
 				JSONArray filesArray = updateJson.getJSONArray("files");
 				
-				// 2. قراءة الإصدارات المحلية من ملف versions.json (الملف الذي طلبته)
+				// 2. قراءة الإصدارات المحلية من ملف versions.json
 				File versionsFile = new File(appFilesDir, "versions.json");
 				JSONObject localVersions = new JSONObject();
 				if (versionsFile.exists()) {
 					BufferedReader vr = new BufferedReader(new FileReader(versionsFile));
 					StringBuilder vrsb = new StringBuilder();
-					while ((line = vr.readLine()) != null) vrsb.append(line);
+					String vLine;
+					while ((vLine = vr.readLine()) != null) vrsb.append(vLine);
 					vr.close();
 					localVersions = new JSONObject(vrsb.toString());
 				}
 				
-				boolean anyFileUpdated = false; // متغير للتأكد هل حدث تغيير فعلي
+				boolean anyFileUpdated = false;
 				int totalFiles = filesArray.length();
 				
 				for (int i = 0; i < totalFiles; i++) {
 					JSONObject fileObj = filesArray.getJSONObject(i);
 					String fileName = fileObj.getString("file_name");
-					int latestVersion = fileObj.getInt("latest_version_code");
+					
+					// ✅ التعديل هنا: استخدام getDouble بدلاً من getInt لدعم الأرقام العشرية (مثل 1.2)
+					double latestVersion = fileObj.getDouble("latest_version_code");
 					String htmlUrl = fileObj.getString("html_url");
 					
-					int localVersion = localVersions.optInt(fileName, 0);
+					// ✅ التعديل هنا: استخدام optDouble
+					double localVersion = localVersions.optDouble(fileName, 0.0);
 					
 					// 3. المقارنة: التحديث يتم فقط إذا كان إصدار GitHub أكبر من المحلي
 					if (latestVersion > localVersion) {
-						Log.d(TAG, "تحديث وجد للملف: " + fileName);
+						Log.d(TAG, "تحديث وجد للملف: " + fileName + " (من " + localVersion + " إلى " + latestVersion + ")");
 						if (downloadFile(htmlUrl, new File(appFilesDir, fileName))) {
+							// ✅ حفظ الرقم العشري الجديد
 							localVersions.put(fileName, latestVersion);
 							anyFileUpdated = true;
 						}
@@ -82,9 +88,9 @@ public class GitHubUpdateChecker {
 					try (FileOutputStream fos = new FileOutputStream(versionsFile)) {
 						fos.write(localVersions.toString().getBytes());
 					}
-					callback.onUpdateFound(); // سيظهر "تم التحديث بنجاح"
+					callback.onUpdateFound();
 					} else {
-					callback.onNoUpdate(); // سيظهر "لا توجد تحديثات"
+					callback.onNoUpdate();
 				}
 				
 				} catch (Exception e) {
@@ -96,7 +102,13 @@ public class GitHubUpdateChecker {
 	
 	private static boolean downloadFile(String fileUrl, File destFile) {
 		try {
-			URL url = new URL(fileUrl);
+			// إضافة مانع الكاش لروابط تحميل الملفات أيضاً إذا كانت من GitHub Raw
+			String downloadUrl = fileUrl;
+			if(fileUrl.contains("raw.githubusercontent")) {
+				downloadUrl += "?t=" + System.currentTimeMillis();
+			}
+			
+			URL url = new URL(downloadUrl);
 			HttpURLConnection conn = (HttpURLConnection) url.openConnection();
 			if (conn.getResponseCode() != 200) return false;
 			
@@ -111,8 +123,8 @@ public class GitHubUpdateChecker {
 			is.close();
 			return true;
 			} catch (Exception e) {
+			Log.e(TAG, "فشل تحميل الملف: " + fileUrl, e);
 			return false;
 		}
 	}
-	
 }
