@@ -8,7 +8,7 @@
 font-family:'Tajawal';
 src:url('file:///data/data/com.S2/files/Tajawal-Regular.ttf') format('truetype');
 font-weight:400;
-}
+} 
 
 @font-face{
 font-family:'Tajawal';
