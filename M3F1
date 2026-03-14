@@ -1,0 +1,1127 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>مقدمة في القانون الجنائي</title>
+<style>
+@font-face{
+font-family:'Tajawal';
+src:url('file:///data/data/com.S2/files/Tajawal-Regular.ttf') format('truetype');
+font-weight:400;
+}
+
+@font-face{
+font-family:'Tajawal';
+src:url('file:///data/data/com.S2/files/Tajawal-Bold.ttf') format('truetype');
+font-weight:700;
+}
+
+/* الوضع العادي */
+:root{
+--primary-color:#A6192E;
+--secondary-color:#006233;
+--accent-color:#C6A87C;
+--bg-color:#F4F6F8;
+--text-dark:#2C3E50;
+--text-light:#596A7B;
+--card-bg:#FFFFFF;
+}
+
+/* الوضع الليلي */
+.dark-mode{
+--primary-color:#ff4d5a;
+--secondary-color:#2ecc71;
+--accent-color:#d4af37;
+--bg-color:#0f1115;
+--text-dark:#e6e6e6;
+--text-light:#b8c0cc;
+--card-bg:#1a1d24;
+}
+
+*{
+box-sizing:border-box;
+margin:0;
+padding:0;
+}
+
+body, div, h1, h2, h3, p, section, .card, .section-intro {
+transition: background-color 0.1s, color 0.1s, border-color 0.1s;
+}
+
+body {
+font-family:'Tajawal',sans-serif;
+background:var(--bg-color);
+color:var(--text-dark);
+line-height:1.8;
+padding-bottom:50px;
+}
+
+.menu-btn{
+position:fixed;
+top:15px;
+left:15px;
+font-size:30px;
+background:transparent;
+color:var(--text-dark);
+border:none;
+padding:5px;
+cursor:pointer;
+z-index:1000;
+width:auto;
+height:auto;
+line-height:1;
+box-shadow:none;
+}
+
+.side-menu{
+position:fixed;
+top:0;
+left:-250px;
+width:250px;
+height:auto;
+min-height:auto;
+max-height:fit-content;
+background:var(--card-bg);
+padding:20px;
+transition:0.3s;
+box-shadow:4px 0 20px rgba(0,0,0,0.3);
+border-radius:0 0 20px 0;
+z-index:999;
+}
+
+.side-menu.open{
+left:0;
+}
+
+.theme-btn{
+font-size:22px;
+background:var(--primary-color);
+color:white;
+border:none;
+padding:10px;
+border-radius:8px;
+cursor:pointer;
+width:100%;
+display:flex;
+align-items:center;
+justify-content:center;
+gap:8px;
+margin-bottom:10px;
+}
+
+.edit-btn {
+font-size:18px;
+background:var(--secondary-color);
+color:white;
+border:none;
+padding:10px;
+border-radius:8px;
+cursor:pointer;
+width:100%;
+display:flex;
+align-items:center;
+justify-content:center;
+gap:8px;
+transition:0.3s;
+margin-bottom:10px;
+}
+
+.add-btn {
+font-size:18px;
+background:var(--accent-color);
+color:var(--text-dark);
+border:none;
+padding:10px;
+border-radius:8px;
+cursor:pointer;
+width:100%;
+display:flex;
+align-items:center;
+justify-content:center;
+gap:8px;
+transition:0.3s;
+font-weight:700;
+}
+
+.add-btn:hover {
+opacity:0.9;
+transform:scale(1.02);
+}
+
+.edit-btn:hover {
+opacity:0.9;
+transform:scale(1.02);
+}
+
+.edit-mode-active .edit-btn {
+background:var(--accent-color);
+color:var(--text-dark);
+}
+
+.edit-mode-active [contenteditable="true"] {
+outline: 2px dashed var(--secondary-color);
+outline-offset: 2px;
+background-color: rgba(0,98,51,0.05);
+cursor: text;
+padding: 5px;
+border-radius: 8px;
+}
+
+.edit-popup {
+position:fixed;
+display:flex;
+gap:8px;
+background:var(--card-bg);
+padding:6px 12px;
+border-radius:40px;
+box-shadow:0 2px 10px rgba(0,0,0,0.2);
+z-index:2000;
+border:1px solid var(--secondary-color);
+transform:translate(-50%, -100%);
+pointer-events:none;
+opacity:0;
+transition:0.15s;
+}
+
+.edit-popup.show {
+pointer-events:all;
+opacity:1;
+}
+
+.edit-popup button {
+width:36px;
+height:36px;
+border-radius:50%;
+border:none;
+font-size:18px;
+cursor:pointer;
+display:flex;
+align-items:center;
+justify-content:center;
+transition:0.15s;
+box-shadow:0 1px 3px rgba(0,0,0,0.1);
+}
+
+.edit-popup button:hover {
+transform:scale(1.05);
+}
+
+.delete-btn {
+background:#dc3545;
+color:white;
+}
+
+.edit-btn-popup {
+background:var(--secondary-color);
+color:white;
+}
+
+.cancel-btn-popup {
+background:#6c757d;
+color:white;
+}
+
+/* أزرار التأكيد والإلغاء أثناء التعديل */
+.confirm-popup {
+position:fixed;
+display:flex;
+gap:8px;
+background:var(--card-bg);
+padding:6px 12px;
+border-radius:40px;
+box-shadow:0 2px 10px rgba(0,0,0,0.2);
+z-index:2000;
+border:1px solid var(--secondary-color);
+transform:translate(-50%, -100%);
+pointer-events:none;
+opacity:0;
+transition:0.15s;
+}
+
+.confirm-popup.show {
+pointer-events:all;
+opacity:1;
+}
+
+.confirm-popup button {
+width:36px;
+height:36px;
+border-radius:50%;
+border:none;
+font-size:18px;
+cursor:pointer;
+display:flex;
+align-items:center;
+justify-content:center;
+transition:0.15s;
+box-shadow:0 1px 3px rgba(0,0,0,0.1);
+}
+
+.confirm-popup button:hover {
+transform:scale(1.05);
+}
+
+.confirm-edit-btn {
+background:#28a745;
+color:white;
+}
+
+.cancel-edit-btn {
+background:#dc3545;
+color:white;
+}
+
+/* نافذة إضافة نص */
+.modal-overlay {
+position:fixed;
+top:0;
+left:0;
+right:0;
+bottom:0;
+background:rgba(0,0,0,0.7);
+display:flex;
+align-items:center;
+justify-content:center;
+z-index:3000;
+opacity:0;
+pointer-events:none;
+transition:0.3s;
+}
+
+.modal-overlay.show {
+opacity:1;
+pointer-events:all;
+}
+
+.modal-content {
+background:var(--card-bg);
+width:90%;
+max-width:500px;
+border-radius:20px;
+padding:25px;
+max-height:80vh;
+overflow-y:auto;
+box-shadow:0 10px 40px rgba(0,0,0,0.5);
+border:2px solid var(--secondary-color);
+}
+
+.modal-content h3 {
+color:var(--primary-color);
+margin-bottom:20px;
+font-size:1.5rem;
+text-align:center;
+}
+
+.input-group {
+margin-bottom:20px;
+}
+
+.input-group label {
+display:block;
+margin-bottom:8px;
+color:var(--text-dark);
+font-weight:700;
+font-size:0.95rem;
+}
+
+.input-group input,
+.input-group textarea {
+width:100%;
+padding:12px 15px;
+border-radius:12px;
+border:2px solid var(--text-light);
+background:var(--bg-color);
+color:var(--text-dark);
+font-family:'Tajawal',sans-serif;
+font-size:1rem;
+resize:vertical;
+transition:0.2s;
+}
+
+.input-group input:focus,
+.input-group textarea:focus {
+outline:none;
+border-color:var(--secondary-color);
+box-shadow:0 0 0 3px rgba(0,98,51,0.2);
+}
+
+.modal-buttons {
+display:flex;
+gap:15px;
+margin-top:25px;
+}
+
+.modal-buttons button {
+flex:1;
+padding:12px;
+border-radius:12px;
+border:none;
+font-size:1rem;
+font-weight:700;
+cursor:pointer;
+transition:0.2s;
+}
+
+.modal-buttons button:first-child {
+background:var(--secondary-color);
+color:white;
+}
+
+.modal-buttons button:last-child {
+background:#dc3545;
+color:white;
+}
+
+.modal-buttons button:hover {
+transform:scale(1.02);
+opacity:0.9;
+}
+
+.note {
+font-size:0.85rem;
+color:var(--text-light);
+margin-top:10px;
+text-align:center;
+}
+
+header{
+background:linear-gradient(135deg,var(--primary-color),#7a1220);
+color:white;
+padding:60px 20px;
+text-align:center;
+border-bottom:5px solid var(--accent-color);
+}
+
+h1{
+font-weight:800;
+font-size:2.5rem;
+margin-bottom:10px;
+color:white;
+}
+
+.container{
+max-width:1100px;
+margin:auto;
+padding:40px 20px;
+}
+
+.section-block{
+margin-bottom:50px;
+}
+
+h2{
+font-size:1.8rem;
+font-weight:700;
+color:var(--primary-color);
+margin-bottom:35px;
+position:relative;
+padding-bottom:15px;
+z-index:1;
+}
+
+h2::after{
+content:"";
+position:absolute;
+right:0;
+bottom:-8px;
+width:100%;
+height:2px;
+background:linear-gradient(
+to right,
+transparent 0%,
+rgba(255,120,0,0.2) 20%,
+rgba(255,140,0,0.9) 50%,
+rgba(255,120,0,0.2) 80%,
+transparent 100%
+);
+border-radius:50px;
+}
+
+.section-intro{
+font-size:1.1rem;
+color:var(--text-dark);
+margin-bottom:30px;
+}
+
+.cards-grid{
+display:grid;
+grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+gap:25px;
+}
+
+.card{
+background:var(--card-bg);
+border-radius:12px;
+padding:25px;
+box-shadow:0 5px 20px rgba(0,0,0,0.2);
+border-top:4px solid var(--secondary-color);
+transition:0.3s;
+}
+
+.card:hover{
+transform:translateY(-5px);
+box-shadow:0 10px 30px rgba(0,0,0,0.5);
+}
+
+h3{
+font-size:1.3rem;
+color:var(--secondary-color);
+margin-bottom:15px;
+}
+
+.numbered-card h3{
+color:var(--primary-color);
+}
+
+.card p{
+color:var(--text-dark);
+text-align:justify;
+}
+
+p {
+font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+font-size: 1rem;
+font-weight: 700;
+color: var(--text-dark);
+line-height: 1.8;
+text-align: justify;
+}
+
+.edit-toast {
+position:fixed;
+bottom:20px;
+right:20px;
+background:var(--secondary-color);
+color:white;
+padding:8px 16px;
+border-radius:8px;
+font-size:13px;
+box-shadow:0 2px 8px rgba(0,0,0,0.2);
+z-index:2000;
+opacity:0;
+transition:0.2s;
+pointer-events:none;
+}
+
+.edit-toast.show {
+opacity:1;
+}
+
+@media (max-width:768px){
+h1{font-size:2rem;}
+h2{
+font-size:1.5rem;
+}
+.cards-grid{
+grid-template-columns:1fr;
+}
+.side-menu{
+width:200px;
+}
+.edit-popup button {
+width:32px;
+height:32px;
+font-size:16px;
+}
+.modal-content {
+width:95%;
+padding:20px;
+}
+}
+</style>
+</head>
+<body class="edit-mode-active">
+<script>
+(function() {
+try {
+const savedTheme = localStorage.getItem('darkMode');
+if (savedTheme === 'enabled') {
+document.body.classList.add('dark-mode');
+}
+} catch(e) {}
+})();
+</script>
+
+<button class="menu-btn" onclick="toggleMenu()">☰</button>
+
+<div class="side-menu" id="menu">
+<button class="theme-btn" onclick="toggleTheme()">🌙</button>
+<button class="edit-btn" onclick="toggleEditMode()"><span>✓</span> إنهاء التعديل</button>
+<button class="add-btn" onclick="openAddModal()">
+<span> 📝</span> إضافة نص
+</button>
+</div>
+
+<header>
+<h1>مقدمة في التعريف بالقانون الجنائي وتطوره</h1>
+</header>
+
+<div class="container" id="mainContainer">
+<section class="section-block">
+
+
+
+<div class="cards-grid">
+<div class="card">
+<h3>المفهوم الواسع&nbsp; ..</h3>
+<p>يشمل القانون الجنائي بمفهومه الواسع قواعد الموضوع وقواعد الشكل (المسطرة الجنائية) معاً، إذ يُعدّ كلاهما جزءاً لا يتجزأ من المنظومة الجنائية.</p>
+</div>
+
+<div class="card">
+<h3>المفهوم الضيق</h3>
+<p>قصره البعض على القواعد الموضوعية بالتجريم والمسؤولية الجنائية والعقوبات والتدابير، دون أن تشمل قواعد المسطرة الجنائية.</p>
+</div>
+</div>
+</section>
+
+<section class="section-block">
+<h2>أقسام القانون الجنائي بمفهومه الضيق</h2>
+<p class="section-intro">ينقسم القانون الجنائي بمفهومه الضيق إلى قسمين رئيسيين:</p>
+
+<div class="cards-grid">
+<div class="card">
+<h3>القسم العام</h3>
+<p>يتناول القسم العام المبادئ العامة للتجريم والمسؤولية الجنائية والعقوبة والتدابير الوقائية، وهو الإطار النظري الذي تقوم عليه سائر أحكام القانون الجنائي، إذ يُرسي القواعد الكلية التي تسري على جميع الجرائم دون استثناء.</p>
+</div>
+
+<div class="card">
+<h3>القسم الخاص</h3>
+<p>يشمل القسم الخاص النصوص المهتمة بالجرائم المختلفة وبيان شروطها وعقوباتها المقررة، وهو التطبيق العملي للمبادئ العامة على كل جريمة بعينها، حيث يُفصّل أركان كل جريمة والعقوبة المترتبة عليها.</p>
+</div>
+</div>
+</section>
+<section class="section-block"></section></div>
+<!-- نافذة إضافة نص -->
+<div class="modal-overlay" id="addModal">
+<div class="modal-content">
+<h3>📝 إضافة نص جديد</h3>
+
+<div class="input-group">
+<label>العنوان الأكبر (h1) - اختياري</label>
+<input type="text" id="inputH1" placeholder="أدخل العنوان الرئيسي للصفحة...">
+</div>
+
+<div class="input-group">
+<label>النص التمهيدي (section-intro) - اختياري</label>
+<textarea id="inputIntro" rows="3" placeholder="أدخل نص تمهيدي..."></textarea>
+</div>
+
+<div class="input-group">
+<label>العنوان الرئيسي (h2) - اختياري</label>
+<input type="text" id="inputH2" placeholder="أدخل عنوان قسم رئيسي...">
+</div>
+
+<div class="input-group">
+<label>العنوان الفرعي مع نص (card) - اختياري</label>
+<input type="text" id="inputCardTitle" placeholder="العنوان الفرعي...">
+<textarea id="inputCardText" rows="2" placeholder="النص داخل البطاقة..." style="margin-top:10px;"></textarea>
+</div>
+
+<div class="modal-buttons">
+<button onclick="addNewContent()">✅ إضافة</button>
+<button onclick="closeAddModal()">❌ إلغاء</button>
+</div>
+<div class="note">يمكنك تعبئة حقل واحد أو أكثر - الحقول الفارغة لن تُضاف</div>
+</div>
+</div>
+
+<!-- نافذة تأكيد الحذف -->
+<div class="modal-overlay" id="deleteConfirmModal">
+<div class="modal-content" style="max-width: 400px; text-align: center;">
+<h3 style="color: var(--primary-color); margin-bottom: 20px;">⚠️ تأكيد الحذف</h3>
+<p style="margin-bottom: 30px; font-size: 1.1rem;">هل أنت متأكد من حذف هذا العنصر؟</p>
+<div class="modal-buttons">
+<button onclick="confirmDeleteElement()" style="background: #dc3545; color: white;">🗑️ تأكيد الحذف</button>
+<button onclick="cancelDeleteModal()" style="background: var(--secondary-color); color: white;">❌ إلغاء</button>
+</div>
+</div>
+</div>
+
+<!-- أزرار التعديل والحذف والإلغاء فوق النص (الظهور الأول) -->
+<div class="edit-popup" id="editPopup" style="">
+<button class="delete-btn" onclick="deleteElement()">🗑️</button>
+<button class="edit-btn-popup" onclick="prepareEdit()">✎</button>
+<button class="cancel-btn-popup" onclick="cancelPopup()">✖</button>
+</div>
+
+<!-- أزرار التأكيد والإلغاء أثناء التعديل (الظهور الثاني) -->
+<div class="confirm-popup show" id="confirmPopup" style="left: 175.254px; top: 277.83px;">
+<button class="confirm-edit-btn" onclick="confirmEdit()">✅</button>
+<button class="cancel-edit-btn" onclick="cancelEdit()">❌</button>
+</div>
+
+<!-- رسالة تأكيد -->
+<div class="edit-toast" id="editToast">وضع التعديل نشط</div>
+
+<script>
+let editMode = false;
+let currentEditElement = null;
+let originalText = '';
+let longPressTimer = null;
+let longPressedElement = null;
+
+// استرجاع حالة الوضع الداكن عند تحميل الصفحة
+function loadThemePreference() {
+const savedTheme = localStorage.getItem('darkMode');
+if (savedTheme === 'enabled') {
+document.body.classList.add('dark-mode');
+document.querySelector('.theme-btn').innerHTML = '☀️';
+} else {
+document.body.classList.remove('dark-mode');
+document.querySelector('.theme-btn').innerHTML = '🌙';
+}
+}
+
+// استرجاع حالة وضع التعديل
+function loadEditModePreference() {
+const savedEditMode = localStorage.getItem('editMode');
+if (savedEditMode === 'enabled') {
+editMode = true;
+document.body.classList.add('edit-mode-active');
+document.querySelector('.edit-btn').innerHTML = '<span>✓</span> إنهاء التعديل';
+} else {
+editMode = false;
+document.body.classList.remove('edit-mode-active');
+document.querySelector('.edit-btn').innerHTML = '<span>✎</span> تعديل النصوص';
+}
+}
+
+window.addEventListener('load', function() {
+loadEditModePreference();
+hideEditPopup();
+hideConfirmPopup();
+currentEditElement = null;
+});
+
+function toggleMenu(){
+document.getElementById("menu").classList.toggle("open");
+}
+
+function toggleTheme(){
+document.body.classList.toggle("dark-mode");
+let btn = document.querySelector('.theme-btn');
+if(document.body.classList.contains('dark-mode')){
+btn.innerHTML = '☀️';
+localStorage.setItem('darkMode', 'enabled');
+} else {
+btn.innerHTML = '🌙';
+localStorage.setItem('darkMode', 'disabled');
+}
+}
+
+function toggleEditMode() {
+editMode = !editMode;
+const editBtn = document.querySelector('.edit-btn');
+const body = document.body;
+
+if (editMode) {
+body.classList.add('edit-mode-active');
+editBtn.innerHTML = '<span>✓</span> إنهاء التعديل';
+localStorage.setItem('editMode', 'enabled');
+showToast('وضع التعديل نشط');
+} else {
+body.classList.remove('edit-mode-active');
+editBtn.innerHTML = '<span>✎</span> تعديل النصوص';
+localStorage.setItem('editMode', 'disabled');
+if (currentEditElement) {
+currentEditElement.removeAttribute('contenteditable');
+currentEditElement = null;
+}
+hideEditPopup();
+hideConfirmPopup();
+}
+}
+
+// دوال نافذة الإضافة
+function openAddModal() {
+document.getElementById('addModal').classList.add('show');
+// إخفاء القائمة الجانبية إذا كانت مفتوحة
+document.getElementById('menu').classList.remove('open');
+}
+
+function closeAddModal() {
+document.getElementById('addModal').classList.remove('show');
+// تفريغ الحقول
+document.getElementById('inputH1').value = '';
+document.getElementById('inputIntro').value = '';
+document.getElementById('inputH2').value = '';
+document.getElementById('inputCardTitle').value = '';
+document.getElementById('inputCardText').value = '';
+}
+
+function addNewContent() {
+const h1Text = document.getElementById('inputH1').value.trim();
+const introText = document.getElementById('inputIntro').value.trim();
+const h2Text = document.getElementById('inputH2').value.trim();
+const cardTitle = document.getElementById('inputCardTitle').value.trim();
+const cardText = document.getElementById('inputCardText').value.trim();
+
+const container = document.getElementById('mainContainer');
+
+// إضافة العنوان الأكبر (h1) - يضاف داخل الهيدر
+if (h1Text !== '') {
+const header = document.querySelector('header');
+if (header) {
+// إضافة عنوان جديد مع الحفاظ على القديم
+const newH1 = document.createElement('h1');
+newH1.textContent = h1Text;
+header.appendChild(newH1);
+}
+}
+
+// إنشاء قسم جديد إذا تم إضافة أي من h2, intro, أو card
+if (h2Text !== '' || introText !== '' || (cardTitle !== '' && cardText !== '')) {
+const newSection = document.createElement('section');
+newSection.className = 'section-block';
+
+// إضافة العنوان الرئيسي h2
+if (h2Text !== '') {
+const h2 = document.createElement('h2');
+h2.textContent = h2Text;
+newSection.appendChild(h2);
+}
+
+// إضافة النص التمهيدي
+if (introText !== '') {
+const intro = document.createElement('p');
+intro.className = 'section-intro';
+intro.textContent = introText;
+newSection.appendChild(intro);
+}
+
+// إضافة البطاقة إذا توفر العنوان والنص
+if (cardTitle !== '' && cardText !== '') {
+const cardsGrid = document.createElement('div');
+cardsGrid.className = 'cards-grid';
+
+const card = document.createElement('div');
+card.className = 'card';
+
+const cardH3 = document.createElement('h3');
+cardH3.textContent = cardTitle;
+
+const cardP = document.createElement('p');
+cardP.textContent = cardText;
+
+card.appendChild(cardH3);
+card.appendChild(cardP);
+cardsGrid.appendChild(card);
+newSection.appendChild(cardsGrid);
+}
+
+container.appendChild(newSection);
+}
+// إذا تمت إضافة بطاقة فقط بدون h2 أو intro
+else if (cardTitle !== '' && cardText !== '') {
+// نضيف البطاقة في قسم جديد بدون عنوان
+const newSection = document.createElement('section');
+newSection.className = 'section-block';
+
+const cardsGrid = document.createElement('div');
+cardsGrid.className = 'cards-grid';
+
+const card = document.createElement('div');
+card.className = 'card';
+
+const cardH3 = document.createElement('h3');
+cardH3.textContent = cardTitle;
+
+const cardP = document.createElement('p');
+cardP.textContent = cardText;
+
+card.appendChild(cardH3);
+card.appendChild(cardP);
+cardsGrid.appendChild(card);
+newSection.appendChild(cardsGrid);
+
+container.appendChild(newSection);
+}
+
+// أولاً: إغلاق النافذة وتفريغ الحقول
+closeAddModal();
+
+// ثانياً: حفظ التغييرات (الآن الصفحة نظيفة)
+saveChanges();
+
+// ثالثاً: إظهار رسالة النجاح
+showToast('✅ تمت الإضافة بنجاح');
+}
+
+function saveChanges() {
+// حفظ الملف
+const htmlContent = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+const saved = saveFileToPath(htmlContent);
+}
+
+// تغيير دالة handleTouchStart لهذا الكود
+function handleTouchStart(e) {
+if (!editMode) return;
+
+const element = e.target.closest('h1, h2, h3, p, .section-intro, .card p');
+if (!element) return;
+
+// إلغاء أي مؤشر سابق
+if (longPressTimer) {
+clearTimeout(longPressTimer);
+longPressTimer = null;
+}
+
+e.preventDefault();
+
+// إزالة أي تعديل سابق
+if (currentEditElement) {
+currentEditElement.removeAttribute('contenteditable');
+}
+
+currentEditElement = element;
+originalText = currentEditElement.innerText;
+
+// إظهار الأزرار الثلاثة (حذف، تعديل، إلغاء) فوراً - بدون تأخير
+const popup = document.getElementById('editPopup');
+const rect = e.touches[0];
+popup.style.left = rect.clientX + 'px';
+popup.style.top = (rect.clientY - 70) + 'px';
+popup.classList.add('show');
+
+// إخفاء أزرار التأكيد إذا كانت ظاهرة
+hideConfirmPopup();
+}
+
+// يمكنك إزالة دوال longPressTimer نهائياً لأننا لم نعد بحاجة لها
+// لكن الأفضل تركها للاحتياط
+
+function handleTouchEnd(e) {
+if (longPressTimer) {
+clearTimeout(longPressTimer);
+longPressTimer = null;
+}
+}
+
+function handleTouchCancel(e) {
+if (longPressTimer) {
+clearTimeout(longPressTimer);
+longPressTimer = null;
+}
+}
+
+// دالة الحذف المباشر بدون تأكيد
+// متغير لحفظ العنصر المراد حذفه مؤقتاً
+let elementToDelete = null;
+
+// دالة فتح نافذة تأكيد الحذف
+function deleteElement() {
+if (currentEditElement) {
+// حفظ العنصر المراد حذفه
+elementToDelete = currentEditElement;
+
+// إخفاء البوب أب الحالي
+hideEditPopup();
+
+// فتح نافذة تأكيد الحذف
+document.getElementById('deleteConfirmModal').classList.add('show');
+}
+}
+
+// دالة تأكيد الحذف
+function confirmDeleteElement() {
+if (elementToDelete) {
+// أولاً: إغلاق نافذة التأكيد وإزالة class show
+closeDeleteModal();
+
+// حذف العنصر
+if (elementToDelete.closest('.card')) {
+const card = elementToDelete.closest('.card');
+const cardsGrid = card.closest('.cards-grid');
+card.remove();
+
+if (cardsGrid && cardsGrid.children.length === 0) {
+cardsGrid.remove();
+}
+} else {
+elementToDelete.remove();
+}
+
+// ثانياً: حفظ التغييرات (بعد إغلاق النافذة)
+saveChanges();
+showToast('🗑️ تم الحذف');
+
+elementToDelete = null;
+currentEditElement = null;
+}
+}
+
+// دالة إلغاء الحذف
+function cancelDeleteModal() {
+// أولاً: إغلاق نافذة التأكيد
+closeDeleteModal();
+
+// ثانياً: حفظ التغييرات (النافذة مغلقة)
+saveChanges();
+
+elementToDelete = null;
+showToast('✖️ تم إلغاء الحذف');
+}
+
+// دالة إغلاق نافذة التأكيد
+function closeDeleteModal() {
+document.getElementById('deleteConfirmModal').classList.remove('show');
+}
+
+// دالة تحضير التعديل (تظهر أزرار ✅ ❌) مع تحديد النص بالكامل
+function prepareEdit() {
+if (currentEditElement) {
+// جعل العنصر قابلاً للتعديل
+currentEditElement.setAttribute('contenteditable', 'true');
+currentEditElement.focus();
+
+// ✅ وضع المؤشر في نهاية النص (وليس تحديد كل النص)
+const range = document.createRange();
+const sel = window.getSelection();
+
+// وضع المؤشر في نهاية النص
+if (currentEditElement.childNodes.length > 0) {
+const lastNode = currentEditElement.childNodes[currentEditElement.childNodes.length - 1];
+range.setStartAfter(lastNode);
+} else {
+range.selectNodeContents(currentEditElement);
+}
+
+range.collapse(false); // false يعني نهاية النص
+sel.removeAllRanges();
+sel.addRange(range);
+
+// إخفاء الأزرار الثلاثة
+hideEditPopup();
+
+// إظهار أزرار التأكيد والإلغاء بجانب النص
+const confirmPopup = document.getElementById('confirmPopup');
+const rect = currentEditElement.getBoundingClientRect();
+confirmPopup.style.left = (rect.left + rect.width / 2) + 'px';
+confirmPopup.style.top = (rect.top - 20) + 'px';
+confirmPopup.classList.add('show');
+
+// ✅ منع التداخل مع أحداث اللمس الطبيعية
+currentEditElement.addEventListener('touchstart', function(e) {
+e.stopPropagation(); // نسمح بالحدث ولكن نمنع وصوله للمستمعات الأخرى
+}, {passive: true});
+}
+}
+
+// دالة تأكيد التعديل
+function confirmEdit() {
+if (currentEditElement) {
+currentEditElement.removeAttribute('contenteditable');
+
+// حفظ إذا تغير النص
+if (currentEditElement.innerText !== originalText) {
+saveChanges();
+showToast('✅ تم الحفظ');
+}
+
+// إخفاء أزرار التأكيد
+hideConfirmPopup();
+currentEditElement = null;
+}
+}
+
+// دالة إلغاء التعديل
+function cancelEdit() {
+if (currentEditElement) {
+currentEditElement.innerText = originalText;
+currentEditElement.removeAttribute('contenteditable');
+
+// إخفاء أزرار التأكيد
+hideConfirmPopup();
+showToast('❌ تم الإلغاء');
+currentEditElement = null;
+}
+}
+
+// دالة إلغاء البوب أب الأول (الأزرار الثلاثة)
+function cancelPopup() {
+hideEditPopup();
+currentEditElement = null;
+showToast('✖️ تم الإلغاء');
+}
+
+function saveFileToPath(content) {
+const filePath = '/storage/emulated/0/Android/data/com.S2/files/M3F1.html';
+
+if (typeof AndroidBridge !== 'undefined' && AndroidBridge.saveFile) {
+AndroidBridge.saveFile(filePath, content);
+return true;
+}
+
+if (window.Android && typeof window.Android.saveFile === 'function') {
+window.Android.saveFile(filePath, content);
+return true;
+}
+
+return false;
+}
+
+function hideEditPopup() {
+document.getElementById('editPopup').classList.remove('show');
+document.getElementById('editPopup').removeAttribute('style');
+}
+
+function hideConfirmPopup() {
+document.getElementById('confirmPopup').classList.remove('show');
+document.getElementById('confirmPopup').removeAttribute('style');
+}
+
+function showToast(message) {
+const toast = document.getElementById('editToast');
+toast.textContent = message;
+toast.classList.add('show');
+
+setTimeout(() => {
+toast.classList.remove('show');
+}, 1500);
+}
+
+// إضافة مستمعي الأحداث للعناصر
+document.querySelectorAll('h1, h2, h3, p, .section-intro, .card p').forEach(element => {
+element.addEventListener('touchstart', handleTouchStart, {passive: false});
+element.addEventListener('touchend', handleTouchEnd);
+element.addEventListener('touchcancel', handleTouchCancel);
+});
+
+document.addEventListener('contextmenu', (e) => {
+if (editMode) e.preventDefault();
+});
+
+document.addEventListener('touchmove', (e) => {
+// فقط نمنع التمرير إذا كان العنصر في وضع التعديل
+if (currentEditElement && currentEditElement.hasAttribute('contenteditable')) {
+// لا نستخدم preventDefault هنا - نترك التفاعل طبيعياً
+// e.preventDefault(); // ← علقنا على هذا السطر
+}
+}, {passive: true}); // غيرنا إلى passive: true
+
+// إخفاء البوب أب عند النقر خارجها
+document.addEventListener('touchstart', function(e) {
+const confirmPopup = document.getElementById('confirmPopup');
+
+if (confirmPopup.classList.contains('show') && !e.target.closest('.confirm-popup') && !e.target.closest('[contenteditable="true"]')) {
+// إذا نقر خارج أزرار التأكيد والنص، نلغي التعديل
+if (currentEditElement && currentEditElement.hasAttribute('contenteditable')) {
+cancelEdit();
+}
+}
+});
+
+window.addEventListener('beforeunload', function() {
+if (editMode) {
+toggleEditMode();
+}
+});
+
+window.addEventListener('pagehide', function() {
+if (editMode) {
+toggleEditMode();
+}
+});
+</script>
+
+</body></html>
