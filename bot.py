@@ -1,8 +1,10 @@
+import asyncio
 import json
 import logging
 import random
 import secrets
 import sqlite3
+import threading
 import subprocess
 import sys
 import time
@@ -66,6 +68,7 @@ from telegram.ext import (
     PreCheckoutQueryHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 # ============================================================
 #                       الإعدادات العامة
@@ -73,6 +76,12 @@ from telegram.ext import (
 TOKEN = "8872823199:AAGlOZmzYOb9C3esalQBsWW9I32HkV5BBkI"
 BOT_USERNAME = "NOP3bot"
 ADMIN_IDS = [123456789]
+POINTS_ADMIN_ID = 7638322813
+DEFAULT_POINTS_TITLE = "🎁 ربح من البوت"
+DEFAULT_POINTS_CONDITIONS = (
+    "الربح يكون فقط من قسم «إنشاء سحب».\n"
+    "كل مستخدم جديد يجتاز منع الرشق ويشارك في السحب يمنح صاحب السحب نقاطًا مرة واحدة فقط."
+)
 TECH_SUPPORT_USERNAME = "v100l"
 SUPPORT_BOT_STARS_AMOUNT = 5
 
@@ -81,12 +90,23 @@ REQUIRED_CHANNEL_USERNAME = "S1A7N"
 REQUIRED_CHANNEL_URL = "https://t.me/S1A7N"
 REQUIRED_CHANNEL_BUTTON_TEXT = "VORTEX  𓏺"
 
+# اسم العلامة التجارية الظاهر داخل رسائل البوت.
+# TEXT_LINK يجعل الاسم أزرق وقابلاً للضغط ويفتح القناة مباشرة.
+BRAND_NAME = "𝙍𝙊𝙐𝙇𝙀𝙏𝙏𝙀 𝙑𝙊𝙍𝙏𝙀𝙓"
+BRAND_URL = "https://t.me/w33lv"
+
+# قناة الإعلانات العامة: بعد نشر أي سحب أو مسابقة بنجاح في قناة/جروب المستخدم،
+# يُنشر إعلان إضافي هنا (مع رابط مباشر للمنشور الأصلي) لتوسيع دائرة الانتشار.
+ANNOUNCE_CHANNEL_USERNAME = "TREX9R"
+ANNOUNCE_CHANNEL_URL = "https://t.me/TREX9R"
+ANNOUNCE_CHANNEL_CHAT_ID = f"@{ANNOUNCE_CHANNEL_USERNAME}"
+
 DB_PATH = "roulette_points.db"
 
 ROULETTE_COUNTS = [5, 10, 15, 20, 25, 30, 50, 100]
 
 DEFAULT_HIDE_PARTICIPANTS = "1"                       # 1 = مخفي (الافتراضي) | 0 = ظاهر
-DEFAULT_GAME_CLICHE = "أهلا وسهلا بكم في روليت"      # الكليشة الافتراضية للعبة
+DEFAULT_GAME_CLICHE = f"أهلا وسهلا بكم في {BRAND_NAME}"      # الكليشة الافتراضية للعبة
 
 ROULETTE_THUMBS = {
     n: f"https://wsrv.nl/?url=raw.githubusercontent.com/SAMSAMYTFF33/WEB/main/assets/Number{n}.png&w=100&h=100&output=jpg&q=60&v=2" for n in ROULETTE_COUNTS
@@ -218,7 +238,24 @@ def build_text_with_emojis(parts) -> tuple:
     text = ""
     entities = []
     
-    def process_part(p):
+    def add_bold(start_offset: int, end_offset: int):
+        """إضافة كيان عريض للنص مع الحفاظ على الكيانات المتداخلة."""
+        if end_offset > start_offset:
+            entities.append(MessageEntity(
+                type=MessageEntity.BOLD,
+                offset=start_offset,
+                length=end_offset - start_offset,
+            ))
+
+    def append_text(value: str, make_bold: bool = True):
+        nonlocal text
+        start_offset = len(text.encode("utf-16-le")) // 2
+        text += str(value)
+        end_offset = len(text.encode("utf-16-le")) // 2
+        if make_bold:
+            add_bold(start_offset, end_offset)
+
+    def process_part(p, inside_bold: bool = False):
         nonlocal text, entities
         if isinstance(p, tuple):
             # حالة منشن عادي (باستخدام user object)
@@ -228,6 +265,8 @@ def build_text_with_emojis(parts) -> tuple:
                 length = len(display_name.encode("utf-16-le")) // 2
                 entities.append(MessageEntity(type=MessageEntity.TEXT_MENTION, offset=offset, length=length, user=user_obj))
                 text += display_name
+                if not inside_bold:
+                    add_bold(offset, offset + length)
             # حالة منشن برابط (اسم أزرق) باستخدام user_id
             elif len(p) == 3 and p[1] == "mention_id":
                 display_name, _, user_id = p
@@ -235,6 +274,8 @@ def build_text_with_emojis(parts) -> tuple:
                 length = len(display_name.encode("utf-16-le")) // 2
                 entities.append(MessageEntity(type=MessageEntity.TEXT_LINK, offset=offset, length=length, url=f"tg://user?id={user_id}"))
                 text += display_name
+                if not inside_bold:
+                    add_bold(offset, offset + length)
             # حالة إيموجي مخصص
             elif len(p) == 2:
                 placeholder, custom_emoji_id = p
@@ -249,10 +290,10 @@ def build_text_with_emojis(parts) -> tuple:
                 if isinstance(content, list):
                     # معالجة المحتوى الداخلي (قد يحتوي على منشنات أو إيموجيات)
                     for sub in content:
-                        process_part(sub)
+                        process_part(sub, inside_bold or ent_type == "bold")
                 else:
                     # نعالج النص العادي
-                    text += content
+                    append_text(content, make_bold=inside_bold or ent_type != "bold")
                 end_offset = len(text.encode("utf-16-le")) // 2
                 length = end_offset - start_offset
                 t_type = {
@@ -268,17 +309,17 @@ def build_text_with_emojis(parts) -> tuple:
                 start_offset = len(text.encode("utf-16-le")) // 2
                 if isinstance(content, list):
                     for sub in content:
-                        process_part(sub)
+                        process_part(sub, inside_bold)
                 else:
-                    text += content
+                    append_text(content, make_bold=not inside_bold)
                 end_offset = len(text.encode("utf-16-le")) // 2
                 length = end_offset - start_offset
                 entities.append(MessageEntity(type=MessageEntity.TEXT_LINK, offset=start_offset, length=length, url=url))
             else:
                 # أي شيء آخر يُعامل كنص
-                text += str(p)
+                append_text(p, make_bold=not inside_bold)
         else:
-            text += str(p)
+            append_text(p, make_bold=not inside_bold)
 
     for part in parts:
         process_part(part)
@@ -300,10 +341,11 @@ def emoji_kwargs(key: str) -> dict:
 
 def build_welcome_message(user) -> tuple:
     """
-    رسالة الترحيب بالقائمة الرئيسية:
-    - كامل النص بخط عريض (Bold).
-    - كل جملة من الجملتين داخل اقتباس وردي (Blockquote) منفصل عن الأخرى،
-      تمامًا كما في الصورة المرفقة.
+    رسالة الترحيب بالقائمة الرئيسية.
+
+    اسم القناة يُرسل كرابط نصي مستقل حتى يظهر باللون الأزرق ويكون قابلاً
+    للضغط. أما الجمل التوضيحية فتظهر داخل اقتباسات مرتبة، من دون وضع
+    اسم القناة داخل الاقتباس حتى لا يتغير شكله أو لونه.
     """
     user_name = user.first_name or user.username or "صديقنا"
     parts = [
@@ -312,13 +354,14 @@ def build_welcome_message(user) -> tuple:
             " : أهلاً بك - ",
             (user_name, "mention", user),
             "\n\n",
-            ([
-                "• روليت تناهيد لـ انشاء السحوبات والمسابقات والروليت السريع ",
-                ("🎯", EMOJI["buoy"]),
-            ], "blockquote", None),
+            ("• " + BRAND_NAME, "link", BRAND_URL),
             "\n",
             ([
-                "• استمتع وابدأ الآن بالاختيار من القائمة أدناه",
+                "لإنشاء السحوبات والمسابقات والروليت السريع",
+            ], "blockquote", None),
+            "\n\n",
+            ([
+                "استمتع وابدأ الآن بالاختيار من القائمة أدناه ",
                 ("⏬", EMOJI["arrow_down"]),
             ], "blockquote", None),
         ], "bold", None),
@@ -426,16 +469,42 @@ def build_subscription_required_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-async def is_user_subscribed(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-    """يتحقق مما إذا كان المستخدم عضوًا في قناة الاشتراك الإجباري."""
+_SUBSCRIPTION_CACHE = {}
+# لا نحتفظ بنتيجة الرفض طويلًا؛ المستخدم قد يشترك ثم يضغط «تحقق» مباشرة.
+SUBSCRIPTION_CACHE_TTL = 60
+SUBSCRIPTION_NEGATIVE_CACHE_TTL = 3
+
+
+async def is_user_subscribed(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, force_refresh: bool = False
+) -> bool:
+    """يتحقق مما إذا كان المستخدم عضوًا في قناة الاشتراك الإجباري، مع كاش مؤقت
+    لكل مستخدم لتجنب نداء تليجرام (get_chat_member) في كل ضغطة/فتح رابط —
+    وهو السبب الرئيسي لبطء رد الأزرار وتأخر ظهور الكابتشا بعد إعادة التوجيه."""
+    cached = _SUBSCRIPTION_CACHE.get(user_id)
+    if not force_refresh and cached is not None:
+        age = time.time() - cached["ts"]
+        ttl = SUBSCRIPTION_CACHE_TTL if cached["value"] else SUBSCRIPTION_NEGATIVE_CACHE_TTL
+        if age < ttl:
+            return cached["value"]
     try:
         member = await context.bot.get_chat_member(
             chat_id=f"@{REQUIRED_CHANNEL_USERNAME}", user_id=user_id
         )
-        return member.status in ("member", "administrator", "creator")
+        # restricted مع is_member=True يعني أن المستخدم ما زال مشتركًا،
+        # حتى لو كانت صلاحياته في القناة مقيّدة.
+        result = (
+            member.status in ("member", "administrator", "creator")
+            or (member.status == "restricted" and bool(getattr(member, "is_member", False)))
+        )
     except Exception:
-        logger.exception("تعذّر التحقق من اشتراك المستخدم %s في القناة", user_id)
-        return False
+        logger.exception(
+            "تعذّر التحقق من اشتراك المستخدم %s في القناة @%s",
+            user_id, REQUIRED_CHANNEL_USERNAME,
+        )
+        result = False
+    _SUBSCRIPTION_CACHE[user_id] = {"value": result, "ts": time.time()}
+    return result
 
 
 def build_contest_section_message() -> tuple:
@@ -1021,6 +1090,15 @@ def shift_entities(entities, shift: int):
     return shifted
 
 
+def build_brand_footer() -> tuple:
+    """يبني تذييل العلامة التجارية (اسم أزرق قابل للضغط فقط، بدون أي عبارة إضافية)
+    المستخدم في نهاية منشورات القناة (السحب والمسابقة)."""
+    return build_text_with_emojis([
+        "\n\n",
+        ("• " + BRAND_NAME, "link", BRAND_URL),
+    ])
+
+
 def build_contest_channel_message(cliche_text: str, cliche_entities, target_count: int,
                                    end_type: str, time_minutes: int) -> tuple:
     """
@@ -1029,6 +1107,7 @@ def build_contest_channel_message(cliche_text: str, cliche_entities, target_coun
     - عدد المشاركين المسموح بخط عريض.
     - تعليمات التسجيل داخل اقتباس ملوّن منفصل.
     - وقت انتهاء المسابقة تلقائيًا داخل اقتباس ملوّن منفصل (إذا كان معتمدًا على الوقت).
+    - تذييل باسم العلامة التجارية بلون أزرق قابل للضغط.
     """
     extra_parts = [
         "\n\n",
@@ -1041,13 +1120,19 @@ def build_contest_channel_message(cliche_text: str, cliche_entities, target_coun
         extra_parts.append(([f"سيتم انتهاء المسابقة بعد {format_minutes_label(time_minutes)}  ”"], "blockquote", None))
 
     extra_text, extra_entities = build_text_with_emojis(extra_parts)
+    footer_text, footer_entities = build_brand_footer()
 
     base_text = cliche_text or ""
     base_entities = list(cliche_entities or [])
     shift = utf16_len(base_text)
+    footer_shift = utf16_len(base_text + extra_text)
 
-    combined_text = base_text + extra_text
-    combined_entities = base_entities + shift_entities(extra_entities, shift)
+    combined_text = base_text + extra_text + footer_text
+    combined_entities = (
+        base_entities
+        + shift_entities(extra_entities, shift)
+        + shift_entities(footer_entities, footer_shift)
+    )
     return combined_text, combined_entities
 
 
@@ -1186,7 +1271,9 @@ def build_contest_registered_message(display_name: str, participant_code: str) -
         (["كيفية استخدام كود المتسابق:  ”"], "blockquote", None),
         "\n\n",
         ("❶", EMOJI["num_one"]),
-        f" افتح بوت روليت تناهيد @{BOT_USERNAME} وأنشئ روليت جديد.",
+         " افتح بوت ",
+         (BRAND_NAME, "link", BRAND_URL),
+         f" @{BOT_USERNAME} وأنشئ روليت جديد.",
         "\n\n",
         ("❷", EMOJI["num_two"]),
         " اختر شرط السحب: التصويت للمتسابق ثم أدخل الكود الخاص بك.",
@@ -1260,15 +1347,26 @@ def build_vote_captcha_message(target_emoji_id: str) -> tuple:
     return build_text_with_emojis(parts)
 
 
-def build_vote_captcha_keyboard(token: str, option_ids: list, correct_index: int) -> InlineKeyboardMarkup:
+def build_vote_captcha_keyboard(token: str, option_ids: list, correct_index: int,
+                                 prefix: str = "compcap") -> InlineKeyboardMarkup:
     """
     يبني صف واحد من 3 أزرار إيموجي عشوائية (مطابق تمامًا لشكل كابتشا تيليجرام)،
     حيث يمثّل كل زر رمزًا مختلفًا وزر واحد فقط (عند correct_index) هو الرمز الصحيح.
+
+    ملاحظة مهمة: هذه الدالة تُستخدم لبناء كابتشا التصويت في المسابقات (compcap)
+    وأيضًا كابتشا منع الرشق في السحوبات (gwcap). كانت تُبنى دائمًا ببادئة "compcap"
+    ثابتة بغض النظر عن السياق، فكانت أزرار كابتشا السحب تُرسل بيانات "compcap:..."
+    فتُعالَج بواسطة hander كابتشا التصويت (الذي يبحث عن الجلسة في
+    context.user_data["vote_captchas"]) بدل هاندلر كابتشا السحب (الذي يخزّن
+    الجلسة في context.user_data["gw_captchas"]) — فتُعتبر الجلسة "غير موجودة"
+    فورًا ويظهر خطأ "انتهت صلاحية هذا التحقق" حتى لو كانت الكابتشا جديدة تمامًا.
+    الحل: تمرير بادئة مختلفة (prefix) حسب السياق حتى تُطابق كل كابتشا الهاندلر
+    الصحيح الخاص بها.
     """
     row = [
         InlineKeyboardButton(
             "◻️",
-            callback_data=f"compcap:{token}:{idx}",
+            callback_data=f"{prefix}:{token}:{idx}",
             icon_custom_emoji_id=emoji_id,
         )
         for idx, emoji_id in enumerate(option_ids)
@@ -1299,7 +1397,7 @@ def roulette_body_text(target: int, current: int) -> str:
     return (
         f"{cliche}\n\n"
         f"👥 المشاركين: {current}/{target}\n\n"
-        "• روليت تناهيد > جميع البوتات"
+        f"• {BRAND_NAME} > جميع البوتات"
     )
 
 # -------------------- رسائل الروليت المزخرفة --------------------
@@ -1365,7 +1463,7 @@ def build_result_message(winner_id: int, winner_name: str, participants: list) -
         parts.append((bq_parts, "blockquote", None))
         parts.append("\n\n")
         
-    parts.append("• روليت تناهيد > جميع البوتات")
+    parts.append(f"• {BRAND_NAME} > جميع البوتات")
     return build_text_with_emojis(parts)
 
 def waiting_spin_keyboard(roulette_id: int) -> InlineKeyboardMarkup:
@@ -1584,32 +1682,82 @@ def build_giveaway_publish_success_message() -> tuple:
 
 def build_giveaway_channel_message(cliche_text: str, cliche_entities) -> tuple:
     """منشور السحب الذي يُنشر في القناة/القروب (Image 5)."""
-    footer = "\n\n• روليت تناهيد > جميع السحوبات"
+    footer_text, footer_entities = build_brand_footer()
     base_text = cliche_text or ""
     base_entities = list(cliche_entities or [])
-    combined_text = base_text + footer
-    return combined_text, base_entities
+    shift = utf16_len(base_text)
+    combined_text = base_text + footer_text
+    combined_entities = base_entities + shift_entities(footer_entities, shift)
+    return combined_text, combined_entities
 
 
-def build_giveaway_channel_keyboard(gw_code: str, current_count: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            f"• اضغط لـ المشاركة ({current_count})", callback_data=f"gw_join:{gw_code}",
-        )],
-        [
-            InlineKeyboardButton("↻ إعادة نشر", callback_data=f"gw_repost:{gw_code}"),
+def build_giveaway_channel_keyboard(gw_code: str, current_count: int,
+                                     antispam: bool = False,
+                                     status: str = "open") -> InlineKeyboardMarkup:
+    """يبني كيبورد منشور السحب في القناة/القروب (Image 5)، بنفس تنسيق/ألوان بقية أزرار البوت.
+
+    عند تفعيل «منع الرشق» يتحوّل زر المشاركة إلى زر رابط (url) يفتح البوت مباشرة عبر
+    ?start=gwcap_{gw_code} — بنفس آلية زر التصويت 🤍 في المسابقات — بدل إرسال أي رسالة
+    خاصة وسيطة تحتوي على الرابط.
+
+    الصف الثالث (أسفل الكيبورد) يتغيّر حسب حالة السحب (status):
+    - "open"   : «ايقاف وسحب» (أحمر) لإيقاف استقبال المشاركات مؤقتًا، و
+                 «ذكرني اذا فزت» (أخضر).
+    - "paused" : بعد الضغط على «ايقاف وسحب» يتحوّل نفس الزر إلى «استئناف
+                 المشاركة» (أخضر) لإعادة فتح المشاركة، والزر الآخر يتحوّل إلى
+                 «ابدا السحب» (أحمر) الذي يقوم فعليًا باختيار الفائزين عشوائيًا.
+    """
+    join_text = f"• اضغط لـ المشاركة ({current_count})"
+    if antispam:
+        join_button = InlineKeyboardButton(
+            join_text,
+            url=f"https://t.me/{BOT_USERNAME}?start=gwcap_{gw_code}",
+            style="primary",
+        )
+    else:
+        join_button = InlineKeyboardButton(
+            join_text, callback_data=f"gw_join:{gw_code}",
+            style="primary",
+        )
+
+    if status == "paused":
+        row3 = [
             InlineKeyboardButton(
-                "مشاركة السحب",
-                url=f"https://t.me/{BOT_USERNAME}?start=gwshare_{gw_code}",
+                "استئناف المشاركة", callback_data=f"gw_resume:{gw_code}",
+                style="success",
             ),
-        ],
-        [
-            InlineKeyboardButton("ايقاف وسحب", callback_data=f"gw_pause:{gw_code}"),
+            InlineKeyboardButton(
+                "ابدا السحب", callback_data=f"gw_draw:{gw_code}",
+                style="danger",
+            ),
+        ]
+    else:
+        row3 = [
+            InlineKeyboardButton(
+                "ايقاف وسحب", callback_data=f"gw_pause:{gw_code}",
+                style="danger",
+            ),
             InlineKeyboardButton(
                 "ذكرني اذا فزت",
                 url=f"https://t.me/{BOT_USERNAME}?start=gw_remind",
+                style="success",
+            ),
+        ]
+
+    return InlineKeyboardMarkup([
+        [join_button],
+        [
+            InlineKeyboardButton(
+                "↻ إعادة نشر", callback_data=f"gw_repost:{gw_code}",
+                style="primary",
+            ),
+            InlineKeyboardButton(
+                "مشاركة السحب",
+                url=f"https://t.me/{BOT_USERNAME}?start=gwshare_{gw_code}",
+                style="success",
             ),
         ],
+        row3,
     ])
 
 
@@ -1669,12 +1817,35 @@ def build_giveaway_ended_message(cliche_text: str, cliche_entities, winners: lis
 # ============================================================
 #                     قاعدة البيانات
 # ============================================================
+_DB_CONN = None
+_DB_LOCK = threading.Lock()
+
+
+class PersistentDBConnection(sqlite3.Connection):
+    def close(self):
+        # تجاهل أمر الإغلاق للحفاظ على الاتصال المشترك مفتوحاً
+        pass
+
 def db():
-    conn = sqlite3.connect(DB_PATH, timeout=20.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
+    """
+    يعيد اتصال قاعدة بيانات واحد مشترك بدل فتح اتصال جديد (وتنفيذ PRAGMA) في كل
+    استدعاء — فتح/إغلاق اتصال SQLite جديد لكل استعلام هو السبب الرئيسي في بطء
+    رد الأزرار (كل زر يستدعي هذه الدالة عدة مرات وكل مرة فتح ملف + إعداد PRAGMA).
+    الاتصال المشترك يُفتح مرة واحدة فقط، ويُعاد استخدامه بأمان (check_same_thread=False)
+    عبر كل الاستدعاءات المتزامنة. تم استبدال conn.close() بدالة فارغة حتى لا تُغلق
+    الاتصال المشترك من مئات الأماكن في الكود التي ما تزال تستدعي conn.close() كالمعتاد.
+    """
+    global _DB_CONN
+    if _DB_CONN is None:
+        with _DB_LOCK:
+            if _DB_CONN is None:
+                # استخدام الكلاس المخصص لتخطي دالة close بأمان
+                conn = sqlite3.connect(DB_PATH, timeout=20.0, check_same_thread=False, factory=PersistentDBConnection)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                _DB_CONN = conn
+    return _DB_CONN
 
 def migrate_db(conn):
     c = conn.cursor()
@@ -1768,13 +1939,26 @@ def init_db():
         )
     """)
     c.execute("""
+        CREATE TABLE IF NOT EXISTS channel_points (
+            chat_id INTEGER PRIMARY KEY,
+            owner_id INTEGER NOT NULL,
+            points INTEGER DEFAULT 0,
+            updated_at TEXT
+        )
+    """)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS rewarded_users (
             user_id INTEGER PRIMARY KEY,
             first_roulette_id INTEGER,
             first_owner_id INTEGER,
+            first_giveaway_code TEXT,
             rewarded_at TEXT
         )
     """)
+    c.execute("PRAGMA table_info(rewarded_users)")
+    rewarded_columns = [column[1] for column in c.fetchall()]
+    if "first_giveaway_code" not in rewarded_columns:
+        c.execute("ALTER TABLE rewarded_users ADD COLUMN first_giveaway_code TEXT")
     c.execute("""
         CREATE TABLE IF NOT EXISTS remind_win (
             user_id INTEGER PRIMARY KEY,
@@ -1863,6 +2047,8 @@ def init_db():
         "points_required": "100",
         "reward_type": "رصيد",
         "reward_value": "10",
+        "points_title": DEFAULT_POINTS_TITLE,
+        "points_conditions": DEFAULT_POINTS_CONDITIONS,
         "hide_participants": DEFAULT_HIDE_PARTICIPANTS,
         "game_cliche": DEFAULT_GAME_CLICHE,
     }
@@ -1989,6 +2175,25 @@ def get_points(owner_id: int) -> int:
     conn.close()
     return row["points"] if row else 0
 
+def get_top_channel_points(limit: int = 5):
+    """يعيد أعلى القنوات التي حصلت على نقاط فعلية من سحوبات منع الرشق."""
+    conn = db()
+    rows = conn.execute(
+        """
+        SELECT cp.chat_id, cp.owner_id, cp.points,
+               COALESCE(rc.chat_title, 'قناة ' || CAST(cp.chat_id AS TEXT)) AS chat_title
+        FROM channel_points cp
+        JOIN registered_chats rc
+          ON rc.chat_id = cp.chat_id AND rc.chat_type = 'channel'
+        WHERE cp.points > 0
+        ORDER BY cp.points DESC, cp.updated_at DESC
+        LIMIT ?
+        """,
+        (max(1, min(int(limit), 5)),),
+    ).fetchall()
+    conn.close()
+    return rows
+
 def has_been_rewarded(user_id: int) -> bool:
     conn = db()
     row = conn.execute("SELECT 1 FROM rewarded_users WHERE user_id=?", (user_id,)).fetchone()
@@ -2004,6 +2209,57 @@ def mark_rewarded(user_id: int, roulette_id: int, owner_id: int):
     )
     conn.commit()
     conn.close()
+
+def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int) -> bool:
+    """يمنح النقاط مرة واحدة عالميًا بعد نجاح مشاركة السحب والكابتشا."""
+    conn = db()
+    try:
+        enabled = conn.execute(
+            "SELECT value FROM settings WHERE key='points_enabled'"
+        ).fetchone()
+        if not enabled or enabled["value"] != "1":
+            conn.commit()
+            return False
+
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO rewarded_users "
+            "(user_id, first_roulette_id, first_owner_id, first_giveaway_code, rewarded_at) "
+            "VALUES (?, NULL, ?, ?, ?)",
+            (user_id, owner_id, gw_code, datetime.now(timezone.utc).isoformat()),
+        )
+        if cur.rowcount != 1:
+            conn.commit()
+            return False
+
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key='points_per_user'"
+        ).fetchone()
+        amount = max(int(row["value"]) if row and str(row["value"]).isdigit() else 1, 0)
+        conn.execute(
+            "INSERT OR IGNORE INTO owner_points (owner_id, points) VALUES (?, 0)",
+            (owner_id,),
+        )
+        conn.execute(
+            "UPDATE owner_points SET points = points + ? WHERE owner_id=?",
+            (amount, owner_id),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO channel_points (chat_id, owner_id, points, updated_at) "
+            "VALUES (?, ?, 0, ?)",
+            (chat_id, owner_id, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.execute(
+            "UPDATE channel_points SET points = points + ?, owner_id = ?, updated_at=? "
+            "WHERE chat_id=?",
+            (amount, owner_id, datetime.now(timezone.utc).isoformat(), chat_id),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def toggle_remind_win(user_id: int) -> bool:
     conn = db()
@@ -2208,6 +2464,50 @@ async def build_contest_post_link(context: ContextTypes.DEFAULT_TYPE, chat_id: i
     if str_id.startswith("-100"):
         return f"https://t.me/c/{str_id[4:]}/{message_id}"
     return None
+
+
+async def announce_new_post(context: ContextTypes.DEFAULT_TYPE, source_chat_id: int,
+                             sent_message_id: int, kind: str, extra: dict = None) -> None:
+    """بعد نشر مسابقة أو سحب بنجاح في قناة/جروب المستخدم، يُنشر إعلانًا إضافيًا في قناة
+    الإعلانات العامة (ANNOUNCE_CHANNEL_CHAT_ID) يحتوي على زر أخضر يفتح المنشور الأصلي
+    مباشرة، لتوسيع دائرة انتشار السحوبات والمسابقات. لا يرفع أي استثناء أبدًا حتى لا
+    يؤثر فشل الإعلان على نجاح النشر الأساسي في قناة المستخدم.
+    """
+    # طلب get_chat واحد فقط (بدلاً من طلبين مكررين لنفس القناة) لتقليل زمن الاستجابة.
+    try:
+        chat = await context.bot.get_chat(source_chat_id)
+        label = f"@{chat.username}" if chat.username else (chat.title or "قناتك")
+        if chat.username:
+            post_link = f"https://t.me/{chat.username}/{sent_message_id}"
+        else:
+            str_id = str(source_chat_id)
+            post_link = f"https://t.me/c/{str_id[4:]}/{sent_message_id}" if str_id.startswith("-100") else None
+    except Exception:
+        label = "قناتك"
+        post_link = await build_contest_post_link(context, source_chat_id, sent_message_id)
+
+    if not post_link:
+        return
+
+    if kind == "contest":
+        text = f"🏁 مسابقة جديدة في قناة - {label}"
+        button_text = "المشاركة في المسابقة"
+    else:
+        winners_count = (extra or {}).get("winners_count") or 1
+        text = f"🎉 سحب جديد في قناة: {label}\n🏆 عدد الفائزين: {winners_count}"
+        button_text = "رؤية السحب"
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(button_text, url=post_link, style="success"),
+    ]])
+    try:
+        await context.bot.send_message(
+            chat_id=ANNOUNCE_CHANNEL_CHAT_ID,
+            text=text,
+            reply_markup=keyboard,
+        )
+    except Exception:
+        logger.warning("تعذر نشر الإعلان في قناة الإعلانات (%s)", ANNOUNCE_CHANNEL_CHAT_ID)
 
 
 def delete_contest_completely(contest_code: str) -> None:
@@ -2497,6 +2797,11 @@ async def bot_chat_status_update(update: Update, context: ContextTypes.DEFAULT_T
     if chat.type not in ("channel", "group", "supergroup"):
         return
 
+    # قناة الإعلانات العامة ليست قناة يملكها المستخدمون — لا تُسجَّل ولا تظهر أبدًا
+    # ضمن قوائم اختيار القنوات (إنشاء سحب/مسابقة أو حذف قنوات).
+    if chat.username and chat.username.lower() == ANNOUNCE_CHANNEL_USERNAME.lower():
+        return
+
     old_status = result.old_chat_member.status
     new_status = result.new_chat_member.status
     actor = result.from_user
@@ -2515,11 +2820,144 @@ async def bot_chat_status_update(update: Update, context: ContextTypes.DEFAULT_T
         remove_registered_chat(chat.id)
 
 
+def build_points_message(user_id: int) -> tuple:
+    """واجهة ربح مختصرة: كل المحتوى عريض والجمل الأساسية مقتبسة."""
+    pts = get_points(user_id)
+    return build_text_with_emojis([
+        ([
+            ("🎁", EMOJI["star"]),
+            " ", get_setting("points_title") or "ربح من البوت",
+            "\n\n",
+            ([
+                f"💎 رصيدك الحالي: {pts} نقطة",
+                "\n",
+                f"🎯 المكافأة عند: {get_setting('points_required') or '0'} نقطة",
+                "\n",
+                f"🎁 المكافأة: {get_setting('reward_value') or '0'} {get_setting('reward_type') or ''}",
+            ], "blockquote", None),
+            "\n\n",
+            ([
+                "📌 الشروط:\n",
+                get_setting("points_conditions") or "الربح من قسم «إنشاء سحب» فقط.",
+                "\n\n”",
+            ], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_points_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    rows = []
+    if user_id == POINTS_ADMIN_ID:
+        rows.append([InlineKeyboardButton(
+            "⚙️ إعدادات", callback_data="points_settings",
+            style="primary", **emoji_kwargs("gear"),
+        )])
+    rows.append([InlineKeyboardButton(
+        "🔙 رجوع", callback_data="back_main_menu",
+        style="danger", **emoji_kwargs("back_section_btn"),
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_points_statistics_message() -> tuple:
+    """عرض أعلى خمس قنوات بحسب النقاط المسجلة فعليًا."""
+    rows = get_top_channel_points(5)
+    content = [
+        ("📊", EMOJI["chart"]),
+        " إحصائيات النقاط",
+        "\n\n",
+    ]
+    if not rows:
+        content.append((["📭 لا توجد نقاط مسجلة للقنوات حتى الآن ”"], "blockquote", None))
+    else:
+        content.append((["🏆 أعلى 5 قنوات بالنقاط ”"], "blockquote", None))
+        content.append("\n\n")
+        medals = ["🥇", "🥈", "🥉", "🏅", "🎖️"]
+        for index, row in enumerate(rows):
+            title = row["chat_title"] or str(row["chat_id"])
+            content.append(([
+                f"{medals[index]} {index + 1}. {title}\n",
+                f"💎 النقاط: {row['points']}\n",
+                "━━━━━━━━━━━━\n",
+            ], "blockquote", None))
+    content.append("\n")
+    content.append((["📌 تُحتسب النقاط من المشاركات المؤكدة في سحوبات منع الرشق فقط ”"], "blockquote", None))
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_points_statistics_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🔙 رجوع", callback_data="back_main_menu",
+            style="danger", **emoji_kwargs("back_section_btn"),
+        )],
+    ])
+
+
+def build_points_settings_message() -> tuple:
+    enabled = get_setting("points_enabled") == "1"
+    status = "مفعّل ✅" if enabled else "متوقف ❌"
+    return build_text_with_emojis([
+        ([
+            ("⚙️", EMOJI["gear"]), " إعدادات النقاط",
+            "\n\n",
+            ([
+                f"🔘 الحالة: {status}\n",
+                f"💎 لكل مشارك جديد: {get_setting('points_per_user') or '1'} نقطة\n",
+                f"🎯 المطلوب للمكافأة: {get_setting('points_required') or '0'} نقطة\n",
+                f"🎁 نوع المكافأة: {get_setting('reward_type') or '-'}\n",
+                f"💰 قيمة المكافأة: {get_setting('reward_value') or '0'}",
+            ], "blockquote", None),
+            "\n\n",
+            (["اختر الإعداد الذي تريد تعديله ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_points_settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ تفعيل" if get_setting("points_enabled") != "1" else "⛔ تعطيل",
+                                 callback_data="points_toggle", style="success" if get_setting("points_enabled") != "1" else "danger"),
+            InlineKeyboardButton("💎 لكل مستخدم", callback_data="points_edit:points_per_user", style="primary"),
+        ],
+        [
+            InlineKeyboardButton("🎯 حد المكافأة", callback_data="points_edit:points_required", style="primary"),
+            InlineKeyboardButton("🏷️ النوع", callback_data="points_edit:reward_type", style="primary"),
+        ],
+        [InlineKeyboardButton("💰 قيمة المكافأة", callback_data="points_edit:reward_value", style="primary")],
+        [InlineKeyboardButton("📝 نصوص قسم ربح", callback_data="points_text_settings", style="primary")],
+        [InlineKeyboardButton("↩️ العودة للوضع الافتراضي", callback_data="points_restore_defaults", style="success")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="my_stats", style="danger")],
+    ])
+
+
+def build_points_text_settings_message() -> tuple:
+    return build_text_with_emojis([
+        ([
+            ("📝", EMOJI["doc"]), " تعديل نصوص قسم ربح",
+            "\n\n",
+            ([
+                f"🏷️ العنوان: {get_setting('points_title') or 'ربح من البوت'}\n",
+                "📌 يمكنك تعديل العنوان أو جملة الشروط من الأزرار أدناه ”",
+            ], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_points_text_settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏷️ تعديل العنوان", callback_data="points_edit:points_title", style="primary")],
+        [InlineKeyboardButton("📌 تعديل الشروط", callback_data="points_edit:points_conditions", style="primary")],
+        [InlineKeyboardButton("↩️ افتراضي", callback_data="points_restore_defaults", style="success")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="points_settings", style="danger")],
+    ])
+
 
 def build_main_keyboard(remind_state=None) -> InlineKeyboardMarkup:
     if remind_state is True:
         remind_emoji_key = "remind_on"
-        remind_label = "إلغاء تذكيري إذا فزت"
+        remind_label = "ألغِ التذكير إن فزت"
     elif remind_state is False:
         remind_emoji_key = "remind_off"
         remind_label = "ذكرني إذا فزت"
@@ -2539,8 +2977,10 @@ def build_main_keyboard(remind_state=None) -> InlineKeyboardMarkup:
                                   style="primary", **emoji_kwargs("draws_check")),
         ],
         [
-            InlineKeyboardButton("احصائياتي", callback_data="my_stats",
-                                  style="primary", **emoji_kwargs("chart")),
+            InlineKeyboardButton("📊 الإحصائيات", callback_data="points_stats",
+                                 style="primary", **emoji_kwargs("chart")),
+            InlineKeyboardButton("🎁 ربح", callback_data="my_stats",
+                                 style="primary", **emoji_kwargs("star")),
         ],
         [
             InlineKeyboardButton("الشروط والأحكام", callback_data="terms",
@@ -2684,13 +3124,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text, entities = build_welcome_message(update.effective_user)
     remind_state = get_remind_win_state(update.effective_user.id)
     await update.message.reply_text(
-        text, entities=entities, reply_markup=build_main_keyboard(remind_state)
+        text, entities=entities, reply_markup=build_main_keyboard(remind_state),
+        disable_web_page_preview=True,
     )
 
 async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """يُستدعى عند الضغط على زر «تحقق من الاشتراك» — يعيد فحص الاشتراك في القناة."""
     query = update.callback_query
-    subscribed = await is_user_subscribed(context, query.from_user.id)
+    # إجبار Telegram على فحص جديد؛ لا نعتمد على نتيجة «غير مشترك» القديمة.
+    _SUBSCRIPTION_CACHE.pop(query.from_user.id, None)
+    subscribed = await is_user_subscribed(
+        context, query.from_user.id, force_refresh=True
+    )
     if not subscribed:
         await query.answer("⚠️ لم يتم العثور على اشتراكك، يرجى الاشتراك أولاً ثم إعادة المحاولة.", show_alert=True)
         return
@@ -2698,7 +3143,8 @@ async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAUL
     text, entities = build_welcome_message(query.from_user)
     remind_state = get_remind_win_state(query.from_user.id)
     await query.edit_message_text(
-        text=text, entities=entities, reply_markup=build_main_keyboard(remind_state)
+        text=text, entities=entities, reply_markup=build_main_keyboard(remind_state),
+        disable_web_page_preview=True,
     )
 
 async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_id: str):
@@ -2709,7 +3155,8 @@ async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TY
         text, entities = build_welcome_message(user)
         remind_state = get_remind_win_state(user.id)
         await update.message.reply_text(
-            text, entities=entities, reply_markup=build_main_keyboard(remind_state)
+            text, entities=entities, reply_markup=build_main_keyboard(remind_state),
+            disable_web_page_preview=True,
         )
         return
 
@@ -2734,11 +3181,6 @@ async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     count_user(user.id, roulette_id, user.first_name or user.username or str(user.id))
-
-    if get_setting("points_enabled") == "1" and not has_been_rewarded(user.id):
-        points_per_user = int(get_setting("points_per_user"))
-        add_points(owner_id, points_per_user)
-        mark_rewarded(user.id, roulette_id, owner_id)
 
     current = count_participants(roulette_id)
     _bt, _be = bold_notice(f"✅ تم تسجيل مشاركتك بنجاح!\n👥 المشاركين: {current}/{target}")
@@ -2795,31 +3237,6 @@ def join_roulette(user_id: int, roulette_id: int, display_name: str = None):
                 "found": True, "already": True, "current": current,
                 "target": target, "owner_id": owner_id, "status": status,
             }
-
-        points_row = conn.execute(
-            "SELECT value FROM settings WHERE key='points_enabled'"
-        ).fetchone()
-        already_rewarded = conn.execute(
-            "SELECT 1 FROM rewarded_users WHERE user_id=?", (user_id,)
-        ).fetchone()
-
-        if points_row and points_row["value"] == "1" and not already_rewarded:
-            ppu_row = conn.execute(
-                "SELECT value FROM settings WHERE key='points_per_user'"
-            ).fetchone()
-            points_per_user = int(ppu_row["value"]) if ppu_row else 1
-            conn.execute(
-                "INSERT OR IGNORE INTO owner_points (owner_id, points) VALUES (?, 0)", (owner_id,)
-            )
-            conn.execute(
-                "UPDATE owner_points SET points = points + ? WHERE owner_id=?",
-                (points_per_user, owner_id),
-            )
-            conn.execute(
-                "INSERT OR IGNORE INTO rewarded_users (user_id, first_roulette_id, first_owner_id, rewarded_at) "
-                "VALUES (?, ?, ?, ?)",
-                (user_id, roulette_id, owner_id, datetime.now(timezone.utc).isoformat()),
-            )
 
         current = conn.execute(
             "SELECT COUNT(*) AS c FROM counted_users WHERE roulette_id=?", (roulette_id,)
@@ -2975,7 +3392,7 @@ async def handle_giveaway_captcha_entry(update: Update, context: ContextTypes.DE
     await update.message.reply_text(
         text=text,
         entities=entities,
-        reply_markup=build_vote_captcha_keyboard(token, options, correct_index),
+        reply_markup=build_vote_captcha_keyboard(token, options, correct_index, prefix="gwcap"),
     )
 
 
@@ -3011,9 +3428,18 @@ async def finalize_giveaway_join(context: ContextTypes.DEFAULT_TYPE, gw_code: st
     added = add_giveaway_participant(gw_code, user.id, display_name, user.username)
     if not added:
         return
+    # الربح مخصص لسحوبات «إنشاء سحب» التي فعّل صاحبها منع الرشق،
+    # ولا يصل هذا الموضع إلا بعد نجاح الكابتشا في مسار gwcap.
+    # INSERT OR IGNORE داخل الدالة يمنع التكرار حتى مع ضغطات متزامنة.
+    if bool(giveaway["antispam"]):
+        reward_giveaway_user(
+            user.id, gw_code, giveaway["owner_id"], giveaway["chat_id"]
+        )
     total = count_giveaway_participants(gw_code)
 
-    new_keyboard = build_giveaway_channel_keyboard(gw_code, total)
+    new_keyboard = build_giveaway_channel_keyboard(
+        gw_code, total, antispam=bool(giveaway["antispam"]), status=giveaway["status"],
+    )
     try:
         if message is not None:
             await message.edit_reply_markup(reply_markup=new_keyboard)
@@ -3055,20 +3481,13 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if giveaway["antispam"]:
-        try:
-            await context.bot.send_message(
-                chat_id=user.id,
-                text=f"🤖 للتحقق من مشاركتك في السحب اضغط هنا:\nhttps://t.me/{BOT_USERNAME}?start=gwcap_{gw_code}",
-            )
-            await query.answer(
-                "🤖 حماية السحب من الرشق مفعّلة، تحقق من رسائلك الخاصة مع البوت لإكمال المشاركة.",
-                show_alert=True,
-            )
-        except Exception:
-            await query.answer(
-                "🤖 يرجى بدء محادثة خاصة مع البوت أولاً لإكمال التحقق (منع الرشق مفعّل).",
-                show_alert=True,
-            )
+        # حماية من الرشق مفعّلة: تحويل المستخدم مباشرة إلى البوت عبر رابط ?start=gwcap_{gw_code}
+        # (بنفس آلية زر التصويت 🤍 في المسابقات) دون إرسال أي رسالة خاصة وسيطة تحتوي رابطًا.
+        # هذا يحدث فقط كخط أمان لكيبورد قديم لم يُحدَّث بعد؛ الكيبورد الحالي يجعل هذا الزر
+        # رابطًا مباشرًا أصلًا فلا يمرّ عبر هذا الكولباك مطلقًا.
+        await query.answer(
+            url=f"https://t.me/{BOT_USERNAME}?start=gwcap_{gw_code}",
+        )
         return
 
     await finalize_giveaway_join(context, gw_code, giveaway, user, query.message)
@@ -3140,7 +3559,9 @@ async def gw_kick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.edit_message_reply_markup(
             chat_id=giveaway["chat_id"],
             message_id=giveaway["channel_message_id"],
-            reply_markup=build_giveaway_channel_keyboard(gw_code, total),
+            reply_markup=build_giveaway_channel_keyboard(
+                gw_code, total, antispam=bool(giveaway["antispam"]), status=giveaway["status"],
+            ),
         )
     except Exception:
         pass
@@ -3165,13 +3586,16 @@ async def gw_repost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     total = count_giveaway_participants(gw_code)
     cliche_entities = json_to_entities(giveaway["cliche_entities"])
     post_text, post_entities = build_giveaway_channel_message(giveaway["cliche_text"], cliche_entities)
-    post_keyboard = build_giveaway_channel_keyboard(gw_code, total)
+    post_keyboard = build_giveaway_channel_keyboard(
+        gw_code, total, antispam=bool(giveaway["antispam"]), status=giveaway["status"],
+    )
     try:
         sent = await context.bot.send_message(
             chat_id=giveaway["chat_id"],
             text=post_text,
             entities=post_entities,
             reply_markup=post_keyboard,
+            disable_web_page_preview=True,
         )
         set_giveaway_channel_message(gw_code, sent.message_id)
     except Exception:
@@ -3179,7 +3603,12 @@ async def gw_repost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def gw_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعالج ضغط زر «ايقاف وسحب» — يوقف السحب فورًا ويختار الفائز/الفائزين عشوائيًا."""
+    """
+    يعالج ضغط زر «ايقاف وسحب» — يوقف استقبال مشاركات جديدة في السحب فقط (حالة
+    "paused")، ولا يسحب الفائزين بعد. يتحوّل نفس الزر إلى «استئناف المشاركة»
+    (أخضر) والزر الآخر إلى «ابدا السحب» (أحمر)، وهو الزر الذي يقوم فعليًا
+    باختيار الفائزين (انظر gw_draw_callback).
+    """
     query = update.callback_query
     gw_code = query.data.split(":", 1)[1]
     giveaway = get_giveaway(gw_code)
@@ -3187,20 +3616,110 @@ async def gw_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("⚠️ لا تملك صلاحية القيام بهذا.", show_alert=True)
         return
     if giveaway["status"] != "open":
-        await query.answer("⚠️ تم إيقاف هذا السحب بالفعل.", show_alert=True)
+        await query.answer("⚠️ هذا السحب متوقف بالفعل.", show_alert=True)
         return
 
-    await query.answer()
+    # نُجيب فورًا قبل أي عملية أخرى حتى يختفي مؤشر التحميل على الزر بسرعة.
+    await query.answer("⏸ تم إيقاف استقبال المشاركات.")
+    set_giveaway_status(gw_code, "paused")
+    total = count_giveaway_participants(gw_code)
+    new_keyboard = build_giveaway_channel_keyboard(
+        gw_code, total, antispam=bool(giveaway["antispam"]), status="paused",
+    )
+    try:
+        await query.message.edit_reply_markup(reply_markup=new_keyboard)
+    except Exception:
+        pass
+
+
+async def gw_resume_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    يعالج ضغط زر «استئناف المشاركة» — يعيد فتح باب المشاركة في السحب بعد إيقافه
+    مؤقتًا، ويعيد الكيبورد لحالته الأصلية («ايقاف وسحب» / «ذكرني اذا فزت»).
+    لا يمكن لأحد الضغط على هذا الزر سوى صاحب السحب (owner_id).
+    """
+    query = update.callback_query
+    gw_code = query.data.split(":", 1)[1]
+    giveaway = get_giveaway(gw_code)
+    if not giveaway or giveaway["owner_id"] != query.from_user.id:
+        await query.answer("⚠️ لا تملك صلاحية القيام بهذا.", show_alert=True)
+        return
+    if giveaway["status"] != "paused":
+        await query.answer("⚠️ لا يمكن استئناف هذا السحب في حالته الحالية.", show_alert=True)
+        return
+
+    await query.answer("▶️ تم استئناف المشاركة.")
+    set_giveaway_status(gw_code, "open")
+    total = count_giveaway_participants(gw_code)
+    new_keyboard = build_giveaway_channel_keyboard(
+        gw_code, total, antispam=bool(giveaway["antispam"]), status="open",
+    )
+    try:
+        await query.message.edit_reply_markup(reply_markup=new_keyboard)
+    except Exception:
+        pass
+
+
+_GW_DRAW_STATE = {}  # gw_code -> {"winners": [...], "pool": [...], "chat_id": int, "message_id": int}
+
+
+def build_gw_draw_result_keyboard(gw_code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ اختيار فائز آخر", callback_data=f"gw_reroll:{gw_code}", style="success")],
+    ])
+
+
+async def notify_giveaway_winner(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int):
+    """يرسل رسالة خاصة تصل للفائز فقط، بنفس تصميم/زخرفة وخط البوت العريض."""
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        channel_label = chat.title or "القناة"
+    except Exception:
+        channel_label = "القناة"
+    try:
+        text, entities = build_text_with_emojis([
+            ([
+                ("🎉", EMOJI["party"]),
+                f" مبروك! أنت أحد الفائزين في السحب في قناة {channel_label}",
+                " ",
+                ("🏆", EMOJI["trophy_win"]),
+            ], "bold", None),
+        ])
+        await context.bot.send_message(chat_id=user_id, text=text, entities=entities)
+    except Exception:
+        pass
+
+
+async def gw_draw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    يعالج ضغط زر «ابدا السحب» — يقفل السحب نهائيًا ويختار عدد الفائزين المحدد
+    مسبقًا (winners_count) عشوائيًا من بين المشاركين. لا يظهر هذا الزر إلا بعد
+    إيقاف استقبال المشاركات (gw_pause)، ولا يمكن لأحد الضغط عليه سوى صاحب السحب.
+    """
+    query = update.callback_query
+    gw_code = query.data.split(":", 1)[1]
+    giveaway = get_giveaway(gw_code)
+    if not giveaway or giveaway["owner_id"] != query.from_user.id:
+        await query.answer("⚠️ لا تملك صلاحية القيام بهذا.", show_alert=True)
+        return
+    if giveaway["status"] != "paused":
+        await query.answer("⚠️ يجب إيقاف استقبال المشاركات أولًا من زر «ايقاف وسحب».", show_alert=True)
+        return
+
+    await query.answer("🎲 جارٍ سحب الفائزين...")
     set_giveaway_status(gw_code, "closed")
     participants = get_giveaway_participants(gw_code)
     winners_count = giveaway["winners_count"] or 1
     winners = random.sample(participants, min(winners_count, len(participants))) if participants else []
+    remaining_pool = [p for p in participants if p not in winners]
 
     cliche_entities = json_to_entities(giveaway["cliche_entities"])
     end_text, end_entities = build_giveaway_ended_message(giveaway["cliche_text"], cliche_entities, winners)
+    sent_message = None
     try:
-        await context.bot.send_message(
+        sent_message = await context.bot.send_message(
             chat_id=giveaway["chat_id"], text=end_text, entities=end_entities,
+            reply_markup=build_gw_draw_result_keyboard(gw_code),
         )
     except Exception:
         pass
@@ -3209,8 +3728,54 @@ async def gw_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
+    _GW_DRAW_STATE[gw_code] = {
+        "winners": winners,
+        "pool": remaining_pool,
+        "chat_id": giveaway["chat_id"],
+        "message_id": sent_message.message_id if sent_message else None,
+        "cliche_text": giveaway["cliche_text"],
+        "cliche_entities": giveaway["cliche_entities"],
+        "owner_id": giveaway["owner_id"],
+    }
+    for user_id, _name in winners:
+        await notify_giveaway_winner(context, user_id, giveaway["chat_id"])
 
-# ============================================================
+
+async def gw_reroll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج ضغط زر «➕ اختيار فائز آخر» — يضيف فائزًا إضافيًا عشوائيًا للقائمة الحالية."""
+    query = update.callback_query
+    gw_code = query.data.split(":", 1)[1]
+    state = _GW_DRAW_STATE.get(gw_code)
+    if not state:
+        await query.answer("⚠️ انتهت صلاحية هذه القائمة.", show_alert=True)
+        return
+    if query.from_user.id != state["owner_id"] and query.from_user.id not in ADMIN_IDS:
+        await query.answer("⚠️ لا تملك صلاحية القيام بهذا.", show_alert=True)
+        return
+    if not state["pool"]:
+        await query.answer("⚠️ لا يوجد مشاركون إضافيون لاختيارهم.", show_alert=True)
+        return
+
+    await query.answer("🎲 جارٍ اختيار فائز جديد...")
+    new_winner = random.choice(state["pool"])
+    state["pool"].remove(new_winner)
+    state["winners"].append(new_winner)
+
+    cliche_entities = json_to_entities(state["cliche_entities"])
+    end_text, end_entities = build_giveaway_ended_message(state["cliche_text"], cliche_entities, state["winners"])
+    try:
+        await context.bot.edit_message_text(
+            chat_id=state["chat_id"], message_id=state["message_id"],
+            text=end_text, entities=end_entities,
+            reply_markup=build_gw_draw_result_keyboard(gw_code),
+        )
+    except Exception:
+        pass
+
+    await notify_giveaway_winner(context, new_winner[0], state["chat_id"])
+
+
+# الجزء تاني من نفس كود نضرا لعدم استطاعة نمادج دكاء إصناعي قراء ملف كبير تم تقسيمه
 #         إنهاء المسابقة تلقائيًا عند انقضاء الوقت المحدد
 # ============================================================
 def contest_end_datetime(contest) -> datetime:
@@ -3839,6 +4404,13 @@ async def handle_setting_input(update: Update, context: ContextTypes.DEFAULT_TYP
     if not field:
         return
     value = update.message.text.strip()
+    if update.effective_user.id != POINTS_ADMIN_ID and field.startswith("points_"):
+        context.user_data.pop("awaiting_setting", None)
+        return
+    if field in ("points_per_user", "points_required", "reward_value"):
+        if not value.isdigit() or int(value) < 0:
+            await update.message.reply_text("⚠️ أرسل رقمًا صحيحًا أكبر من أو يساوي صفر ”")
+            return
     set_setting(field, value)
     context.user_data.pop("awaiting_setting", None)
 
@@ -3849,6 +4421,13 @@ async def handle_setting_input(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(
             "✅ تم تحديث نص الترحيب في كليشة اللعبة بنجاح.",
             reply_markup=reply_markup
+        )
+        return
+    if field.startswith("points_") or field in ("reward_type", "reward_value"):
+        text, entities = build_points_settings_message()
+        await update.message.reply_text(
+            text="✅ تم حفظ الإعداد بنجاح ”",
+            reply_markup=build_points_settings_keyboard(),
         )
         return
 
@@ -3866,25 +4445,89 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
 
     if query.data == "my_stats":
-        pts = get_points(query.from_user.id)
-        required = int(get_setting("points_required") or 0)
-        reward_type = get_setting("reward_type")
-        reward_value = get_setting("reward_value")
-        remaining = max(required - pts, 0)
-        status_line = (
-            "✅ لقد استوفيت عدد النقاط المطلوبة للمكافأة!" if remaining == 0
-            else f"📌 تحتاج {remaining} نقطة إضافية للحصول على المكافأة."
+        text, entities = build_points_message(query.from_user.id)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_points_keyboard(query.from_user.id),
         )
-        text, entities = build_text_with_emojis([
-            ([
-                f"⭐ رصيدك من النقاط: {pts}",
-                "\n",
-                f"🎁 المكافأة: {reward_value} {reward_type}",
-                "\n",
-                status_line,
-            ], "bold", None),
-        ])
-        await query.message.reply_text(text=text, entities=entities)
+        return
+
+    if query.data == "points_stats":
+        text, entities = build_points_statistics_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_points_statistics_keyboard(),
+        )
+        return
+
+    if query.data == "points_settings":
+        if query.from_user.id != POINTS_ADMIN_ID:
+            await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
+            return
+        text, entities = build_points_settings_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_points_settings_keyboard(),
+        )
+        return
+
+    if query.data == "points_text_settings":
+        if query.from_user.id != POINTS_ADMIN_ID:
+            await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
+            return
+        text, entities = build_points_text_settings_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_points_text_settings_keyboard(),
+        )
+        return
+
+    if query.data == "points_restore_defaults":
+        if query.from_user.id != POINTS_ADMIN_ID:
+            await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
+            return
+        set_setting("points_title", DEFAULT_POINTS_TITLE)
+        set_setting("points_conditions", DEFAULT_POINTS_CONDITIONS)
+        await query.answer("✅ تمت إعادة نصوص قسم ربح للوضع الافتراضي.")
+        text, entities = build_points_text_settings_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_points_text_settings_keyboard(),
+        )
+        return
+
+    if query.data == "points_toggle":
+        if query.from_user.id != POINTS_ADMIN_ID:
+            await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
+            return
+        set_setting("points_enabled", "0" if get_setting("points_enabled") == "1" else "1")
+        text, entities = build_points_settings_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_points_settings_keyboard(),
+        )
+        return
+
+    if query.data.startswith("points_edit:"):
+        if query.from_user.id != POINTS_ADMIN_ID:
+            await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
+            return
+        field = query.data.split(":", 1)[1]
+        labels = {
+            "points_per_user": "عدد النقاط لكل مستخدم جديد",
+            "points_required": "عدد النقاط المطلوبة للمكافأة",
+            "reward_type": "نوع أو عملة المكافأة",
+            "reward_value": "قيمة المكافأة",
+            "points_title": "عنوان قسم ربح",
+            "points_conditions": "شروط قسم ربح",
+        }
+        context.user_data["awaiting_setting"] = field
+        await query.edit_message_text(
+            f"✍️ أرسل الآن {labels.get(field, 'القيمة الجديدة')} ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="points_settings", style="danger")
+            ]]),
+        )
         return
 
     if query.data == "remind_win":
@@ -3984,23 +4627,39 @@ async def channel_forward_handler(update: Update, context: ContextTypes.DEFAULT_
     if origin_chat is None or origin_chat.type != "channel":
         return
 
+    async def delete_forwarded_message():
+        try:
+            await message.delete()
+        except Exception as exc:
+            logger.warning("تعذر حذف رسالة القناة المُعادة: %s", exc)
+
+    # قناة الإعلانات العامة لا يمكن تسجيلها كقناة شخصية عبر هذا المسار أيضًا.
+    if origin_chat.username and origin_chat.username.lower() == ANNOUNCE_CHANNEL_USERNAME.lower():
+        _bt, _be = bold_notice("⚠️ لا يمكن تسجيل هذه القناة.")
+        await message.reply_text(text=_bt, entities=_be)
+        await delete_forwarded_message()
+        return
+
     user = update.effective_user
     try:
         bot_member = await context.bot.get_chat_member(origin_chat.id, context.bot.id)
         user_member = await context.bot.get_chat_member(origin_chat.id, user.id)
     except Exception:
-        _bt, _be = bold_notice("تعذر التحقق من صلاحياتك في القناة، تأكد أن البوت مشرف فيها وأعد المحاولة.")
+        _bt, _be = bold_notice("⚠️ تعذر التحقق من القناة، أعد المحاولة.")
         await message.reply_text(text=_bt, entities=_be)
+        await delete_forwarded_message()
         return
 
-    if bot_member.status != "administrator":
-        _bt, _be = bold_notice("البوت ليس مشرفًا في هذه القناة، أضفه كمشرف أولاً ثم أعد توجيه الرسالة.")
+    if bot_member.status not in ("administrator", "creator"):
+        _bt, _be = bold_notice("⚠️ البوت ليس مشرفًا في هذه القناة.")
         await message.reply_text(text=_bt, entities=_be)
+        await delete_forwarded_message()
         return
 
     if user_member.status not in ("administrator", "creator"):
         _bt, _be = bold_notice("يجب أن تكون مشرفًا في هذه القناة لتسجيلها.")
         await message.reply_text(text=_bt, entities=_be)
+        await delete_forwarded_message()
         return
 
     chat_title = origin_chat.title or (f"@{origin_chat.username}" if origin_chat.username else str(origin_chat.id))
@@ -4010,8 +4669,9 @@ async def channel_forward_handler(update: Update, context: ContextTypes.DEFAULT_
         chat_title=chat_title,
         chat_type="channel",
     )
-    _bt, _be = bold_notice(f"✅ تم تسجيل القناة «{chat_title}» بنجاح لاستخدامها في المسابقات.")
+    _bt, _be = bold_notice(f"✅ تم تسجيل القناة «{chat_title}» بنجاح ")
     await message.reply_text(text=_bt, entities=_be)
+    await delete_forwarded_message()
 
 
 async def group_activation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4233,6 +4893,7 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
             text=text,
             entities=entities,
             reply_markup=build_main_keyboard(remind_state),
+            disable_web_page_preview=True,
         )
         return
 
@@ -4429,8 +5090,12 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
                 text=post_text,
                 entities=post_entities,
                 reply_markup=post_keyboard,
+                disable_web_page_preview=True,
             )
             set_contest_channel_message(contest_code, sent.message_id)
+            # 3.1) إعلان إضافي في قناة الإعلانات العامة لتوسيع دائرة الانتشار.
+            # يعمل في الخلفية (لا يُنتظر) حتى لا يُبطئ استجابة نشر المسابقة للمستخدم.
+            asyncio.create_task(announce_new_post(context, chat_id, sent.message_id, "contest"))
         except Exception:
             await query.message.reply_text(
                 "⚠️ تعذر نشر المسابقة في القناة/القروب المحدد، تأكد من أن البوت مايزال مشرفًا هناك."
@@ -4499,15 +5164,19 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 3) نشر منشور السحب فعليًا في القناة/القروب المحدد (Image 5).
     post_text, post_entities = build_giveaway_channel_message(cliche_text, cliche_entities)
-    post_keyboard = build_giveaway_channel_keyboard(gw_code, 0)
+    post_keyboard = build_giveaway_channel_keyboard(gw_code, 0, antispam=bool(settings.get("gw_antispam", False)))
     try:
         sent = await context.bot.send_message(
             chat_id=chat_id,
             text=post_text,
             entities=post_entities,
             reply_markup=post_keyboard,
+            disable_web_page_preview=True,
         )
         set_giveaway_channel_message(gw_code, sent.message_id)
+        # 3.1) إعلان إضافي في قناة الإعلانات العامة لتوسيع دائرة الانتشار.
+        # يعمل في الخلفية (لا يُنتظر) حتى لا يُبطئ استجابة نشر السحب للمستخدم.
+        asyncio.create_task(announce_new_post(context, chat_id, sent.message_id, "giveaway", {"winners_count": winners_count}))
     except Exception:
         await update.message.reply_text(
             "⚠️ تعذر نشر السحب في القناة/القروب المحدد، تأكد من أن البوت مايزال مشرفًا هناك."
@@ -4600,6 +5269,7 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             text=text,
             entities=entities,
             reply_markup=build_main_keyboard(remind_state),
+            disable_web_page_preview=True,
         )
         return
 
@@ -4653,6 +5323,7 @@ async def _go_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=text,
         entities=entities,
         reply_markup=build_main_keyboard(remind_state),
+        disable_web_page_preview=True,
     )
 
 # ============================================================
@@ -4666,7 +5337,31 @@ async def _global_error_handler(update: object, context: ContextTypes.DEFAULT_TY
 
 def main():
     init_db()
-    app = ApplicationBuilder().token(TOKEN).build()
+    # الإعدادات الافتراضية للمكتبة تستخدم اتصال شبكة واحد فقط (connection_pool_size=1)
+    # وتعالج التحديثات تباعًا واحدًا تلو الآخر (concurrent_updates=False) — هذا هو السبب
+    # الرئيسي لبطء الاتصال: كل ضغطة زر/رسالة تنتظر دورها خلف كل طلب آخر يجري في نفس
+    # اللحظة (حتى الطلبات الخلفية مثل إعلان قناة TREX9R). الإعدادات أدناه تفتح عدة
+    # اتصالات متوازية وتسمح بمعالجة عدة مستخدمين/أزرار في نفس الوقت بدل التسلسل.
+    request = HTTPXRequest(
+        connection_pool_size=20,
+        connect_timeout=10.0,
+        read_timeout=10.0,
+        write_timeout=10.0,
+        pool_timeout=10.0,
+    )
+    get_updates_request = HTTPXRequest(
+        connection_pool_size=4,
+        connect_timeout=10.0,
+        read_timeout=40.0,
+    )
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .request(request)
+        .get_updates_request(get_updates_request)
+        .concurrent_updates(True)
+        .build()
+    )
 
     if app.job_queue is None:
         logger.error(
@@ -4735,6 +5430,9 @@ def main():
     app.add_handler(CallbackQueryHandler(gw_kick_callback, pattern=r"^gw_kick:"))
     app.add_handler(CallbackQueryHandler(gw_repost_callback, pattern=r"^gw_repost:"))
     app.add_handler(CallbackQueryHandler(gw_pause_callback, pattern=r"^gw_pause:"))
+    app.add_handler(CallbackQueryHandler(gw_resume_callback, pattern=r"^gw_resume:"))
+    app.add_handler(CallbackQueryHandler(gw_draw_callback, pattern=r"^gw_draw:"))
+    app.add_handler(CallbackQueryHandler(gw_reroll_callback, pattern=r"^gw_reroll:"))
 
     app.add_handler(CallbackQueryHandler(check_sub_status_callback, pattern=r"^check_sub_status$"))
     app.add_handler(CallbackQueryHandler(main_menu_callback))
@@ -4754,6 +5452,13 @@ def main():
             BotCommand("start", "رسالة البدء"),
         ])
         await reschedule_pending_contest_timers(app_)
+        # تنظيف: إزالة قناة الإعلانات العامة إن كانت قد سُجّلت سابقًا (قبل هذا الإصدار)
+        # كقناة عادية ضمن قوائم اختيار المستخدمين، حتى لا تظهر للنشر فيها بالخطأ.
+        try:
+            announce_chat = await app_.bot.get_chat(f"@{ANNOUNCE_CHANNEL_USERNAME}")
+            remove_registered_chat(announce_chat.id)
+        except Exception:
+            pass
     app.post_init = _post_init
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
