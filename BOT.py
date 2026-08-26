@@ -157,7 +157,9 @@ from telegram import (
     CopyTextButton,
     LabeledPrice,
     BotCommand,
+    LinkPreviewOptions,
 )
+from telegram.error import RetryAfter
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -190,7 +192,7 @@ SUPPORT_BOT_STARS_AMOUNT = 5
 
 # اسم العلامة التجارية الظاهر داخل رسائل البوت.
 # TEXT_LINK يجعل الاسم أزرق وقابلاً للضغط ويفتح القناة مباشرة.
-BRAND_NAME = "𝙍𝙊𝙐𝙇𝙀𝙏𝙏𝙀 𝙑𝙊𝙍𝙏𝙀𝙓"
+BRAND_NAME = "𝚁𝙾𝚄𝙻𝙴𝚃𝚃𝙴 𝚅𝙾𝚁𝚃𝙴𝚇"
 BRAND_URL = "https://t.me/e_ggf"
 
 # رابط كلمة «السحوبات» التي تظهر بجانب اسم العلامة التجارية (بصيغة:
@@ -646,24 +648,79 @@ async def is_user_subscribed(
         if age < ttl:
             return cached["value"]
     channel_username = get_required_channel_username()
-    try:
-        member = await context.bot.get_chat_member(
-            chat_id=f"@{channel_username}", user_id=user_id
-        )
-        # restricted مع is_member=True يعني أن المستخدم ما زال مشتركًا،
-        # حتى لو كانت صلاحياته في القناة مقيّدة.
-        result = (
-            member.status in ("member", "administrator", "creator")
-            or (member.status == "restricted" and bool(getattr(member, "is_member", False)))
-        )
-    except Exception:
-        logger.exception(
-            "تعذّر التحقق من اشتراك المستخدم %s في القناة @%s",
-            user_id, channel_username,
-        )
-        result = False
+    result = False
+    # محاولتان كحد أقصى: إن حدّد تيليجرام عدد الطلبات (Flood control) — وهو وارد
+    # جدًا مباشرة بعد تبديل القناة عندما يضغط عدد كبير من المستخدمين "تحقق" في
+    # نفس اللحظة — ننتظر المدة التي يطلبها تيليجرام (إن كانت قصيرة) ونعيد
+    # المحاولة مرة واحدة بدل الحكم فورًا بأن المستخدم غير مشترك.
+    for attempt in range(2):
+        try:
+            member = await context.bot.get_chat_member(
+                chat_id=f"@{channel_username}", user_id=user_id
+            )
+            # restricted مع is_member=True يعني أن المستخدم ما زال مشتركًا،
+            # حتى لو كانت صلاحياته في القناة مقيّدة.
+            result = (
+                member.status in ("member", "administrator", "creator")
+                or (member.status == "restricted" and bool(getattr(member, "is_member", False)))
+            )
+            break
+        except RetryAfter as exc:
+            if attempt == 0 and exc.retry_after <= 5:
+                logger.warning(
+                    "تيليجرام حدّد عدد الطلبات أثناء التحقق من اشتراك %s في @%s — "
+                    "إعادة محاولة واحدة بعد %s ثانية بدل رفض المستخدم فورًا",
+                    user_id, channel_username, exc.retry_after,
+                )
+                await asyncio.sleep(exc.retry_after)
+                continue
+            logger.warning(
+                "تيليجرام حدّد عدد الطلبات أثناء التحقق من اشتراك %s في @%s "
+                "(retry_after=%s) — تعذّر إعادة المحاولة الآن، سيُعامَل كغير مشترك مؤقتًا",
+                user_id, channel_username, exc.retry_after,
+            )
+            result = False
+            break
+        except Exception:
+            # أي خطأ آخر هنا (القناة غير موجودة، أو البوت ليس مشرفًا فيها...) يُعامَل
+            # حاليًا كـ"غير مشترك" لنفس هذا المستخدم فقط، لكنه في الواقع قد يعني أن
+            # التحقق سيفشل لكل المستخدمين وليس هذا المستخدم تحديدًا — راجع دالة
+            # _check_bot_can_verify_channel التي تُنبّه المالكين عند تغيير القناة
+            # بالضبط لهذا السبب.
+            logger.exception(
+                "تعذّر التحقق من اشتراك المستخدم %s في القناة @%s",
+                user_id, channel_username,
+            )
+            result = False
+            break
     _SUBSCRIPTION_CACHE[user_id] = {"value": result, "ts": time.time()}
     return result
+
+
+async def _check_bot_can_verify_channel(context: ContextTypes.DEFAULT_TYPE, username: str) -> str:
+    """يتحقق من أن البوت نفسه مُضاف كمشرف (Admin) في قناة الاشتراك الإجباري
+    الجديدة. هذا شرط ضروري لعمل get_chat_member بشكل صحيح — إن لم يكن البوت
+    مشرفًا هناك، ستفشل عملية التحقق من الاشتراك لكل المستخدمين (حتى المشتركين
+    الحقيقيين فعليًا)، وهو ما يظهر للمستخدم كخطأ "لم يتم العثور على اشتراكك"
+    رغم أنه مشترك فعلاً. تُعيد نص تحذير جاهزًا للإرسال للمالكين، أو '' إن كان
+    كل شيء سليمًا."""
+    try:
+        me = await context.bot.get_chat_member(chat_id=f"@{username}", user_id=context.bot.id)
+    except Exception as exc:
+        return (
+            f"⚠️ تنبيه: تعذّر على البوت الوصول إلى @{username} ({exc}).\n"
+            f"على الأغلب البوت غير مُضاف لهذه القناة إطلاقًا. أضِف البوت إليها كمشرف "
+            f"(Admin) فورًا، وإلا فسيفشل التحقق من اشتراك جميع المستخدمين ويظهر لهم "
+            f"خطأ «لم يتم العثور على اشتراكك» حتى لو كانوا مشتركين بالفعل."
+        )
+    if me.status not in ("administrator", "creator"):
+        return (
+            f"⚠️ تنبيه: البوت عضو في @{username} لكنه ليس مشرفًا (Admin) فيها.\n"
+            f"يجب ترقية البوت إلى مشرف في هذه القناة الآن، وإلا فسيفشل التحقق من "
+            f"اشتراك جميع المستخدمين ويظهر لهم خطأ «لم يتم العثور على اشتراكك» حتى "
+            f"لو كانوا مشتركين بالفعل."
+        )
+    return ""
 
 
 async def check_required_channel_auto_switch(context: ContextTypes.DEFAULT_TYPE):
@@ -699,6 +756,7 @@ async def check_required_channel_auto_switch(context: ContextTypes.DEFAULT_TYPE)
         "تم تغيير قناة الاشتراك الإجباري تلقائيًا من @%s إلى @%s بعد وصول عدد المشتركين إلى %s",
         current_username, next_username, count,
     )
+    warning = await _check_bot_can_verify_channel(context, next_username)
     for owner_id in OWNER_IDS:
         try:
             await context.bot.send_message(
@@ -708,6 +766,7 @@ async def check_required_channel_auto_switch(context: ContextTypes.DEFAULT_TYPE)
                     f"من: @{current_username}\n"
                     f"إلى: @{next_username}\n"
                     f"(بعد وصولها إلى {count} مشترك)"
+                    + (f"\n\n{warning}" if warning else "")
                 ),
             )
         except Exception:
@@ -3285,7 +3344,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         text, entities=entities,
         reply_markup=build_main_keyboard(remind_state, update.effective_user.id),
-        disable_web_page_preview=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3305,7 +3364,7 @@ async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAUL
     await query.edit_message_text(
         text=text, entities=entities,
         reply_markup=build_main_keyboard(remind_state, query.from_user.id),
-        disable_web_page_preview=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_id: str):
@@ -3317,7 +3376,7 @@ async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TY
         remind_state = get_remind_win_state(user.id)
         await update.message.reply_text(
             text, entities=entities, reply_markup=build_main_keyboard(remind_state, user.id),
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         return
 
@@ -4585,8 +4644,10 @@ async def handle_setting_input(update: Update, context: ContextTypes.DEFAULT_TYP
         set_setting("required_channel_url", f"https://t.me/{username}")
         _SUBSCRIPTION_CACHE.clear()
         context.user_data.pop("awaiting_setting", None)
+        warning = await _check_bot_can_verify_channel(context, username)
         await update.message.reply_text(
-            f"✅ تم تغيير قناة الاشتراك الإجباري إلى @{username} بنجاح.",
+            f"✅ تم تغيير قناة الاشتراك الإجباري إلى @{username} بنجاح."
+            + (f"\n\n{warning}" if warning else ""),
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_section", style="danger")
             ]]),
@@ -5202,7 +5263,7 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
             text=text,
             entities=entities,
             reply_markup=build_main_keyboard(remind_state, query.from_user.id),
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         return
 
@@ -5640,7 +5701,7 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             text=text,
             entities=entities,
             reply_markup=build_main_keyboard(remind_state, query.from_user.id),
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         return
 
@@ -5694,7 +5755,7 @@ async def _go_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=text,
         entities=entities,
         reply_markup=build_main_keyboard(remind_state, query.from_user.id),
-        disable_web_page_preview=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 # ============================================================
@@ -5711,7 +5772,7 @@ def main():
     # الإعدادات الافتراضية للمكتبة تستخدم اتصال شبكة واحد فقط (connection_pool_size=1)
     # وتعالج التحديثات تباعًا واحدًا تلو الآخر (concurrent_updates=False) — هذا هو السبب
     # الرئيسي لبطء الاتصال: كل ضغطة زر/رسالة تنتظر دورها خلف كل طلب آخر يجري في نفس
-    # اللحظة (حتى الطلبات الخلفية مثل إعلان قناة السحوبات). الإعدادات أدناه تفتح عدة
+    # اللحظة (حتى الطلبات الخلفية مثل إعلان قناة TREX9R). الإعدادات أدناه تفتح عدة
     # اتصالات متوازية وتسمح بمعالجة عدة مستخدمين/أزرار في نفس الوقت بدل التسلسل.
     request = HTTPXRequest(
         connection_pool_size=20,
