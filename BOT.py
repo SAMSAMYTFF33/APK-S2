@@ -479,7 +479,7 @@ def build_welcome_message(user) -> tuple:
             *build_brand_giveaways_parts(),
             "\n",
             ([
-                "لإنشاء السحوبات والمسابقات والروليت السريع",
+                "روليت 𝚅𝙾𝚁𝚃𝙴𝚇 لإنشاء السحوبات والمسابقات والروليت السريع",
             ], "blockquote", None),
             "\n\n",
             ([
@@ -1936,6 +1936,11 @@ GIVEAWAY_SETTINGS_DEFAULTS = {
     "gw_boost": False,
     "gw_premium": False,
     "gw_antispam": False,
+    # شرط «تصويت متسابق»: يُملأ بعد ربط كود متسابق صالح (انظر gw_opt_vote).
+    "gw_vote_contest_code": None,
+    "gw_vote_participant_id": None,
+    "gw_vote_participant_code": None,
+    "gw_vote_display_name": None,
 }
 
 
@@ -1973,6 +1978,21 @@ def build_giveaway_settings_keyboard(user_data: dict) -> InlineKeyboardMarkup:
     premium = user_data.get("gw_premium", GIVEAWAY_SETTINGS_DEFAULTS["gw_premium"])
     antispam = user_data.get("gw_antispam", GIVEAWAY_SETTINGS_DEFAULTS["gw_antispam"])
 
+    # زر «تصويت متسابق»: إن كان هناك كود متسابق مربوط فعليًا، يتغيّر اسم الزر
+    # ليعرض اسم المتسابق (وعدد أصواته الحالي) بدل النص الافتراضي (Image 4).
+    vote_contest_code = user_data.get("gw_vote_contest_code")
+    vote_participant_id = user_data.get("gw_vote_participant_id")
+    if vote_contest_code and vote_participant_id:
+        vote_display_name = user_data.get("gw_vote_display_name") or "متسابق"
+        votes = get_participant_votes(vote_contest_code, vote_participant_id)
+        vote_btn = InlineKeyboardButton(
+            f"🤍 {votes}   {vote_display_name}", callback_data="gw_opt_vote",
+            style="success", **emoji_kwargs("gw_vote_icon"),
+        )
+    else:
+        vote_btn = InlineKeyboardButton("تصويت متسابق", callback_data="gw_opt_vote",
+                                         style="primary", **emoji_kwargs("gw_vote_icon"))
+
     return InlineKeyboardMarkup([
         [
             toggle_btn("تعزيز القناة", boost, "gw_toggle_boost"),
@@ -1981,8 +2001,7 @@ def build_giveaway_settings_keyboard(user_data: dict) -> InlineKeyboardMarkup:
         ],
         [
             toggle_btn("مشتركين المميز", premium, "gw_toggle_premium"),
-            InlineKeyboardButton("تصويت متسابق", callback_data="gw_opt_vote",
-                                  style="primary", **emoji_kwargs("gw_vote_icon")),
+            vote_btn,
         ],
         [
             toggle_btn("منع الرشق", antispam, "gw_toggle_antispam"),
@@ -1998,6 +2017,53 @@ def build_giveaway_settings_keyboard(user_data: dict) -> InlineKeyboardMarkup:
             style="danger", **emoji_kwargs("back_section_btn"),
         )],
     ])
+
+
+def build_giveaway_vote_code_message() -> tuple:
+    """شاشة طلب كود المتسابق لجعل التصويت له شرطًا للمشاركة في السحب (Image 2)."""
+    parts = [
+        ([("📌", EMOJI["pin_note"]), " يرجى ارسال كود المتسابق الذي تريد جعله شرطًا"], "bold", None),
+        "\n\n",
+        ("📌", EMOJI["pin_note"]), " مثال على الكود: C12345678",
+        "\n\n",
+        (["⚠️ ملاحظة: لن يتمكن أي شخص من المشاركة في السحب قبل إتمام التصويت للمتسابق المحدد"],
+         "blockquote", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_giveaway_vote_code_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "رجوع", callback_data="gw_back_to_options",
+            style="danger", **emoji_kwargs("back_section_btn"),
+        )],
+    ])
+
+
+def build_giveaway_vote_code_error_message() -> tuple:
+    """رسالة الخطأ عند إرسال كود متسابق غير صحيح أو مسابقة منتهية (Image 5)."""
+    parts = [
+        (["❌ كود المتسابق غير صحيح أو المسابقة انتهت!"], "bold", None),
+        "\n\n",
+        "تأكد من الكود وحاول مجدداً.",
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_giveaway_vote_code_error_keyboard() -> InlineKeyboardMarkup:
+    return build_giveaway_vote_code_keyboard()
+
+
+def build_giveaway_vote_linked_message(participant_code: str) -> tuple:
+    """رسالة تأكيد ربط كود المتسابق بشرط السحب بنجاح (Image 4)."""
+    parts = [
+        (["✅ تم ربط كود المتسابق:"], "bold", None),
+        f"\n{participant_code}",
+        "\n\n",
+        "كل مشارك سيتحقق من تصويته قبل المشاركة في السحب.",
+    ]
+    return build_text_with_emojis(parts)
 
 
 def build_giveaway_winners_message() -> tuple:
@@ -2026,14 +2092,43 @@ def build_giveaway_publish_success_message() -> tuple:
     return build_text_with_emojis(parts)
 
 
-def build_giveaway_channel_message(cliche_text: str, cliche_entities) -> tuple:
-    """منشور السحب الذي يُنشر في القناة/القروب (Image 5)."""
+def build_giveaway_vote_condition_link(vote_contest_code: str, vote_participant_id) -> str:
+    """يبني رابط التصويت المخفي (نفس رابط زر 🤍 أسفل منشور المتسابق) الذي تحمله
+    كلمة «هنا» داخل اقتباس شرط التصويت في منشور السحب."""
+    return f"https://t.me/{BOT_USERNAME}?start=compvote_{vote_contest_code}_{vote_participant_id}"
+
+
+def build_giveaway_channel_message(cliche_text: str, cliche_entities, vote_link: str = None) -> tuple:
+    """منشور السحب الذي يُنشر في القناة/القروب (Image 5).
+
+    إذا كان السحب مشروطًا بالتصويت لمتسابق (vote_link)، يُضاف أعلى تذييل العلامة
+    التجارية اقتباس مزخرف «شرط تصويت» تحمل فيه كلمة «هنا» رابطًا مخفيًا يفتح
+    نفس مسار التصويت للمتسابق مباشرة عبر البوت (Image 6)."""
+    extra_parts = []
+    if vote_link:
+        quote_content = [
+            "شرط تصويت", "\n\n",
+            "• الشرط ", ("⬇️", EMOJI["arrow_down"]), "\n",
+            (["تصويت"], "bold", None),
+            " ›› ",
+            (["هـــنـــا"], "link", vote_link),
+        ]
+        extra_parts = ["\n\n", (quote_content, "blockquote", None)]
+
+    extra_text, extra_entities = build_text_with_emojis(extra_parts) if extra_parts else ("", [])
     footer_text, footer_entities = build_brand_footer()
+
     base_text = cliche_text or ""
     base_entities = list(cliche_entities or [])
     shift = utf16_len(base_text)
-    combined_text = base_text + footer_text
-    combined_entities = base_entities + shift_entities(footer_entities, shift)
+    footer_shift = utf16_len(base_text + extra_text)
+
+    combined_text = base_text + extra_text + footer_text
+    combined_entities = (
+        base_entities
+        + shift_entities(extra_entities, shift)
+        + shift_entities(footer_entities, footer_shift)
+    )
     return combined_text, combined_entities
 
 
@@ -2753,6 +2848,15 @@ def add_vote(contest_code: str, voter_id: int, participant_user_id: int):
         })
 
 
+def has_voted_for(contest_code: str, voter_id: int, participant_user_id: int) -> bool:
+    """يتحقق من أن المستخدم صوّت تحديدًا لهذا المتسابق (وليس لأي متسابق آخر في نفس
+    المسابقة) — يُستخدم للتحقق من شرط «تصويت متسابق» قبل السماح بالمشاركة في السحب."""
+    doc = fs_db().collection("contest_votes").document(f"{contest_code}_{voter_id}").get()
+    if not doc.exists:
+        return False
+    return doc.to_dict().get("participant_user_id") == participant_user_id
+
+
 def get_participant_votes(contest_code: str, participant_user_id: int) -> int:
     docs = fs_db().collection("contest_votes").where("contest_code", "==", contest_code).stream()
     return sum(1 for d in docs if d.to_dict().get("participant_user_id") == participant_user_id)
@@ -2814,6 +2918,10 @@ def create_giveaway(gw_code: str, owner_id: int, chat_id: int, cliche_text: str,
         "boost_required": int(bool(settings.get("gw_boost", False))),
         "premium_only": int(bool(settings.get("gw_premium", False))),
         "antispam": int(bool(settings.get("gw_antispam", False))),
+        "vote_contest_code": settings.get("gw_vote_contest_code"),
+        "vote_participant_id": settings.get("gw_vote_participant_id"),
+        "vote_participant_code": settings.get("gw_vote_participant_code"),
+        "vote_display_name": settings.get("gw_vote_display_name"),
         "channel_message_id": None,
         "status": "open",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -3698,6 +3806,15 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
         return
 
+    vote_contest_code = giveaway.get("vote_contest_code")
+    vote_participant_id = giveaway.get("vote_participant_id")
+    vote_required = bool(vote_contest_code and vote_participant_id)
+    if vote_required and not has_voted_for(vote_contest_code, user.id, vote_participant_id):
+        await query.answer(
+            "❌ يجب عليك التصويت للمتسابق أولاً قبل المشاركة في السحب", show_alert=True,
+        )
+        return
+
     if giveaway["antispam"]:
         # حماية من الرشق مفعّلة: تحويل المستخدم مباشرة إلى البوت عبر رابط ?start=gwcap_{gw_code}
         # (بنفس آلية زر التصويت 🤍 في المسابقات) دون إرسال أي رسالة خاصة وسيطة تحتوي رابطًا.
@@ -3709,7 +3826,10 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await finalize_giveaway_join(context, gw_code, giveaway, user, query.message)
-    await query.answer("✅ تم تسجيل مشاركتك بنجاح!")
+    if vote_required:
+        await query.answer("✅ تم اشتراكك في السحب", show_alert=True)
+    else:
+        await query.answer("✅ تم تسجيل مشاركتك بنجاح!")
 
 
 async def gw_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3745,6 +3865,16 @@ async def gw_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if is_giveaway_participant(gw_code, query.from_user.id):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
+        return
+
+    vote_contest_code = giveaway.get("vote_contest_code")
+    vote_participant_id = giveaway.get("vote_participant_id")
+    if vote_contest_code and vote_participant_id and not has_voted_for(
+        vote_contest_code, query.from_user.id, vote_participant_id,
+    ):
+        await query.answer(
+            "❌ يجب عليك التصويت للمتسابق أولاً قبل المشاركة في السحب", show_alert=True,
+        )
         return
 
     await finalize_giveaway_join(
@@ -3806,7 +3936,15 @@ async def gw_repost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     total = count_giveaway_participants(gw_code)
     cliche_entities = json_to_entities(giveaway["cliche_entities"])
-    post_text, post_entities = build_giveaway_channel_message(giveaway["cliche_text"], cliche_entities)
+    vote_contest_code = giveaway.get("vote_contest_code")
+    vote_participant_id = giveaway.get("vote_participant_id")
+    vote_link = (
+        build_giveaway_vote_condition_link(vote_contest_code, vote_participant_id)
+        if vote_contest_code and vote_participant_id else None
+    )
+    post_text, post_entities = build_giveaway_channel_message(
+        giveaway["cliche_text"], cliche_entities, vote_link=vote_link,
+    )
     post_keyboard = build_giveaway_channel_keyboard(
         gw_code, total, antispam=bool(giveaway["antispam"]), status=giveaway["status"],
     )
@@ -5158,6 +5296,38 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if awaiting == "gw_vote_code":
+        raw_code = (update.message.text or "").strip()
+        participant = get_participant_by_code(raw_code) if raw_code else None
+        contest = get_contest(participant["contest_code"]) if participant else None
+        if not participant or not contest or contest["status"] != "open":
+            text, entities = build_giveaway_vote_code_error_message()
+            await update.message.reply_text(
+                text=text,
+                entities=entities,
+                reply_markup=build_giveaway_vote_code_error_keyboard(),
+            )
+            return
+
+        context.user_data["gw_vote_contest_code"] = contest["contest_code"]
+        context.user_data["gw_vote_participant_id"] = participant["user_id"]
+        context.user_data["gw_vote_participant_code"] = raw_code
+        context.user_data["gw_vote_display_name"] = participant.get("display_name") or "متسابق"
+        context.user_data.pop("awaiting", None)
+        for key, default in GIVEAWAY_SETTINGS_DEFAULTS.items():
+            context.user_data.setdefault(key, default)
+
+        confirm_text, confirm_entities = build_giveaway_vote_linked_message(raw_code)
+        await update.message.reply_text(text=confirm_text, entities=confirm_entities)
+
+        settings_text, settings_entities = build_giveaway_settings_message()
+        await update.message.reply_text(
+            text=settings_text,
+            entities=settings_entities,
+            reply_markup=build_giveaway_settings_keyboard(context.user_data),
+        )
+        return
+
     if awaiting == "gw_winners_count":
         raw = (update.message.text or "").strip()
         if not raw.isdigit() or int(raw) <= 0:
@@ -5532,7 +5702,13 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # 3) نشر منشور السحب فعليًا في القناة/القروب المحدد (Image 5).
-    post_text, post_entities = build_giveaway_channel_message(cliche_text, cliche_entities)
+    vote_contest_code = settings.get("gw_vote_contest_code")
+    vote_participant_id = settings.get("gw_vote_participant_id")
+    vote_link = (
+        build_giveaway_vote_condition_link(vote_contest_code, vote_participant_id)
+        if vote_contest_code and vote_participant_id else None
+    )
+    post_text, post_entities = build_giveaway_channel_message(cliche_text, cliche_entities, vote_link=vote_link)
     post_keyboard = build_giveaway_channel_keyboard(gw_code, 0, antispam=bool(settings.get("gw_antispam", False)))
     try:
         sent = await context.bot.send_message(
@@ -5718,8 +5894,19 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    if data in ("gw_opt_condition", "gw_opt_vote", "gw_opt_autospin"):
-        # قناة الشرط / التصويت لمتسابق / السحب التلقائي: قيد التطوير حاليًا.
+    if data == "gw_opt_vote":
+        # شرط «تصويت متسابق»: نطلب من المستخدم إرسال كود المتسابق ليتم ربطه بالسحب.
+        context.user_data["awaiting"] = "gw_vote_code"
+        text, entities = build_giveaway_vote_code_message()
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_vote_code_keyboard(),
+        )
+        return
+
+    if data in ("gw_opt_condition", "gw_opt_autospin"):
+        # قناة الشرط / السحب التلقائي: قيد التطوير حاليًا.
         await query.answer("🚧 جاري تجهيز هذه الميزة قريبًا.", show_alert=True)
         return
 
