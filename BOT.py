@@ -106,7 +106,7 @@ DEFAULT_POINTS_CONDITIONS = (
     "الربح يكون فقط من قسم «إنشاء سحب».\n"
     "كل مستخدم جديد يجتاز منع الرشق ويشارك في السحب يمنح صاحب السحب نقاطًا مرة واحدة فقط."
 )
-TECH_SUPPORT_USERNAME = "v100l"
+TECH_SUPPORT_USERNAME = "y66vlBOT"
 SUPPORT_BOT_STARS_AMOUNT = 5
 
 # قناة الاشتراك الإجباري: يجب أن يكون المستخدم مشتركًا فيها قبل استخدام البوت.
@@ -2847,7 +2847,7 @@ def build_main_keyboard(remind_state=None) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("الشروط والأحكام", callback_data="terms",
-                                  style="success", **emoji_kwargs("doc")),
+                                  style="danger", **emoji_kwargs("doc")),
             InlineKeyboardButton(remind_label, callback_data="remind_win",
                                   style="success", **emoji_kwargs(remind_emoji_key)),
         ],
@@ -2988,7 +2988,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remind_state = get_remind_win_state(update.effective_user.id)
     await update.message.reply_text(
         text, entities=entities, reply_markup=build_main_keyboard(remind_state),
-        disable_web_page_preview=True,
     )
 
 async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3007,7 +3006,6 @@ async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAUL
     remind_state = get_remind_win_state(query.from_user.id)
     await query.edit_message_text(
         text=text, entities=entities, reply_markup=build_main_keyboard(remind_state),
-        disable_web_page_preview=True,
     )
 
 async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_id: str):
@@ -3019,7 +3017,6 @@ async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TY
         remind_state = get_remind_win_state(user.id)
         await update.message.reply_text(
             text, entities=entities, reply_markup=build_main_keyboard(remind_state),
-            disable_web_page_preview=True,
         )
         return
 
@@ -3451,7 +3448,6 @@ async def gw_repost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             text=post_text,
             entities=post_entities,
             reply_markup=post_keyboard,
-            disable_web_page_preview=True,
         )
         set_giveaway_channel_message(gw_code, sent.message_id)
     except Exception:
@@ -4747,7 +4743,6 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
             text=text,
             entities=entities,
             reply_markup=build_main_keyboard(remind_state),
-            disable_web_page_preview=True,
         )
         return
 
@@ -4944,7 +4939,6 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
                 text=post_text,
                 entities=post_entities,
                 reply_markup=post_keyboard,
-                disable_web_page_preview=True,
             )
             set_contest_channel_message(contest_code, sent.message_id)
             # 3.1) إعلان إضافي في قناة الإعلانات العامة لتوسيع دائرة الانتشار.
@@ -5025,7 +5019,6 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=post_text,
             entities=post_entities,
             reply_markup=post_keyboard,
-            disable_web_page_preview=True,
         )
         set_giveaway_channel_message(gw_code, sent.message_id)
         # 3.1) إعلان إضافي في قناة الإعلانات العامة لتوسيع دائرة الانتشار.
@@ -5187,7 +5180,6 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             text=text,
             entities=entities,
             reply_markup=build_main_keyboard(remind_state),
-            disable_web_page_preview=True,
         )
         return
 
@@ -5241,7 +5233,6 @@ async def _go_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=text,
         entities=entities,
         reply_markup=build_main_keyboard(remind_state),
-        disable_web_page_preview=True,
     )
 
 # ============================================================
