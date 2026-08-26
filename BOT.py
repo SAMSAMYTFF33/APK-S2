@@ -1,7 +1,85 @@
+import os  
+# ------------------------------------------------------------
+# 1) توكن البوت
+# ------------------------------------------------------------
+TOKEN = "8872823199:AAGlOZmzYOb9C3esalQBsWW9I32HkV5BBkI"
+BOT_USERNAME = "NOP3bot"
+
+# ------------------------------------------------------------
+# 2) معرّفات (ID) حسابات مسؤولي/مالكي البوت
+# ------------------------------------------------------------
+ADMIN_IDS = [123456789]
+POINTS_ADMIN_ID = 7638322813
+
+# قائمة معرّفات مالكي البوت — من يظهر له زر «قسم المالك» ويملك صلاحية الوصول
+# لكل الإعدادات الحساسة (قسم ربح + الاشتراك الإجباري). أي معرّف يُضاف هنا
+# يصبح مالكًا كاملاً للبوت بنفس صلاحيات المالك الأساسي.
+OWNER_IDS = [POINTS_ADMIN_ID, 8676850552]
+
+
+def is_owner(user_id: int) -> bool:
+    """يتحقق مما إذا كان المستخدم أحد مالكي البوت (OWNER_IDS)."""
+    return user_id in OWNER_IDS
+
+
+# ------------------------------------------------------------
+# 3) قناة الاشتراك الإجباري
+# ------------------------------------------------------------
+# يجب أن يكون المستخدم مشتركًا فيها قبل استخدام البوت. هذه القيم تُستخدم فقط
+# كافتراضي أولي عند أول تشغيل — بعدها تُقرأ القيمة الفعلية من قاعدة البيانات
+# (settings) لأن المالك يمكنه تغييرها من «قسم المالك».
+REQUIRED_CHANNEL_USERNAME = "e_ggf"
+REQUIRED_CHANNEL_URL = "https://t.me/e_ggf"
+REQUIRED_CHANNEL_BUTTON_TEXT = "VORTEX  𓏺"
+# عدد المشتركين الافتراضي الذي يتم عنده التغيير التلقائي لقناة الاشتراك الإجباري
+# (قابل للتخصيص من قسم المالك ← اشتراك اجباري ← تخصيص عدد الاشتراكات المطلوبة).
+REQUIRED_CHANNEL_DEFAULT_TARGET = "1000"
+
+# ------------------------------------------------------------
+# 4) بيانات قاعدة بيانات Firebase Firestore
+# ------------------------------------------------------------
+# بيانات حساب الخدمة (Service Account) الخاص بمشروع Firebase. كل الحقول غير
+# الحسّاسة مكتوبة مباشرة هنا. الحقل الحسّاس الوحيد (private_key) يُقرأ حصرًا
+# من متغير بيئة حتى لا يُخزَّن كنص صريح داخل الكود المصدري. ضع القيمة التالية
+# كمتغير بيئة قبل تشغيل البوت:
+#   FIREBASE_PRIVATE_KEY   -> محتوى private_key كاملاً (يمكن ترك \n كما هي، سيتم تحويلها تلقائيًا)
+FIREBASE_PROJECT_ID = "wep-app-1771a"
+FIREBASE_PRIVATE_KEY_ID = "4e6f499aee9cf5a54366a87c45b3760782f43b41"
+FIREBASE_CLIENT_EMAIL = "firebase-adminsdk-fbsvc@wep-app-1771a.iam.gserviceaccount.com"
+FIREBASE_CLIENT_ID = "105199268649045240747"
+FIREBASE_CLIENT_CERT_URL = (
+    "https://www.googleapis.com/robot/v1/metadata/x509/"
+    "firebase-adminsdk-fbsvc%40wep-app-1771a.iam.gserviceaccount.com"
+)
+
+_raw_private_key = os.environ.get("FIREBASE_PRIVATE_KEY", "")
+# دعم الحالتين: مفتاح مُدخل بأسطر حقيقية، أو بمتوالية "\n" نصية (شائع عند وضعه
+# كمتغير بيئة عبر لوحات تحكم الاستضافة التي لا تقبل أسطر متعددة فعلية).
+if "\\n" in _raw_private_key and "\n" not in _raw_private_key:
+    _raw_private_key = _raw_private_key.replace("\\n", "\n")
+
+FIREBASE_SERVICE_ACCOUNT = {
+    "type": "service_account",
+    "project_id": FIREBASE_PROJECT_ID,
+    "private_key_id": FIREBASE_PRIVATE_KEY_ID,
+    "private_key": _raw_private_key,
+    "client_email": FIREBASE_CLIENT_EMAIL,
+    "client_id": FIREBASE_CLIENT_ID,
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+    "client_x509_cert_url": FIREBASE_CLIENT_CERT_URL,
+    "universe_domain": "googleapis.com",
+}
+
+# ============================================================
+#              نهاية قسم الإعدادات الحساسة — لا تعدّل تحت هذا السطر
+#         (من هنا فصاعدًا تبدأ عمليات الاستيراد والكود الطبيعي للبوت)
+# ============================================================
+
 import asyncio
 import json
 import logging
-import os
 import random
 import secrets
 import sqlite3
@@ -97,20 +175,11 @@ from telegram.request import HTTPXRequest
 # ============================================================
 #                       الإعدادات العامة
 # ============================================================
-TOKEN = "8872823199:AAGlOZmzYOb9C3esalQBsWW9I32HkV5BBkI"
-BOT_USERNAME = "NOP3bot"
-ADMIN_IDS = [123456789]
-POINTS_ADMIN_ID = 7638322813
-
-# قائمة معرّفات مالكي البوت — من يظهر له زر «قسم المالك» ويملك صلاحية الوصول
-# لكل الإعدادات الحساسة (قسم ربح + الاشتراك الإجباري). أي معرّف يُضاف هنا
-# يصبح مالكًا كاملاً للبوت بنفس صلاحيات المالك الأساسي.
-OWNER_IDS = [POINTS_ADMIN_ID, 8676850552]
-
-
-def is_owner(user_id: int) -> bool:
-    """يتحقق مما إذا كان المستخدم أحد مالكي البوت (OWNER_IDS)."""
-    return user_id in OWNER_IDS
+# ملاحظة: توكن البوت، معرّفات المسؤولين/المالكين، وبيانات قناة الاشتراك
+# الإجباري تم نقلها بالكامل إلى أعلى الملف تمامًا (قبل الاستيرادات) لتسهيل
+# تعديلها دون الحاجة للبحث في عمق الكود. تبقى القيم نفسها متاحة هنا كأسماء
+# متغيرات عامة (TOKEN, BOT_USERNAME, ADMIN_IDS, POINTS_ADMIN_ID, OWNER_IDS,
+# is_owner, REQUIRED_CHANNEL_*) لأن باقي الكود يستخدمها بهذه الأسماء تمامًا.
 DEFAULT_POINTS_TITLE = "🎁 ربح من البوت"
 DEFAULT_POINTS_CONDITIONS = (
     "الربح يكون فقط من قسم «إنشاء سحب».\n"
@@ -119,20 +188,15 @@ DEFAULT_POINTS_CONDITIONS = (
 TECH_SUPPORT_USERNAME = "y66vlBOT"
 SUPPORT_BOT_STARS_AMOUNT = 5
 
-# قناة الاشتراك الإجباري: يجب أن يكون المستخدم مشتركًا فيها قبل استخدام البوت.
-# هذه القيم تُستخدم فقط كافتراضي أولي عند أول تشغيل — بعدها تُقرأ القيمة الفعلية
-# من قاعدة البيانات (settings) لأن المالك يمكنه تغييرها من «قسم المالك».
-REQUIRED_CHANNEL_USERNAME = "S1A7N"
-REQUIRED_CHANNEL_URL = "https://t.me/S1A7N"
-REQUIRED_CHANNEL_BUTTON_TEXT = "VORTEX  𓏺"
-# عدد المشتركين الافتراضي الذي يتم عنده التغيير التلقائي لقناة الاشتراك الإجباري
-# (قابل للتخصيص من قسم المالك ← اشتراك اجباري ← تخصيص عدد الاشتراكات المطلوبة).
-REQUIRED_CHANNEL_DEFAULT_TARGET = "1000"
-
 # اسم العلامة التجارية الظاهر داخل رسائل البوت.
 # TEXT_LINK يجعل الاسم أزرق وقابلاً للضغط ويفتح القناة مباشرة.
 BRAND_NAME = "𝙍𝙊𝙐𝙇𝙀𝙏𝙏𝙀 𝙑𝙊𝙍𝙏𝙀𝙓"
-BRAND_URL = "https://t.me/w33lv"
+BRAND_URL = "https://t.me/e_ggf"
+
+# رابط كلمة «السحوبات» التي تظهر بجانب اسم العلامة التجارية (بصيغة:
+# "BRAND_NAME < السحوبات") في القائمة الرئيسية وفي منشورات السحوبات والمسابقات.
+GIVEAWAYS_LINK_TEXT = "السحوبات"
+GIVEAWAYS_CHANNEL_URL = "https://t.me/n_bbo"
 
 # قناة الإعلانات العامة: بعد نشر أي سحب أو مسابقة بنجاح في قناة/جروب المستخدم،
 # يُنشر إعلان إضافي هنا (مع رابط مباشر للمنشور الأصلي) لتوسيع دائرة الانتشار.
@@ -140,42 +204,10 @@ ANNOUNCE_CHANNEL_USERNAME = "TREX9R"
 ANNOUNCE_CHANNEL_URL = "https://t.me/TREX9R"
 ANNOUNCE_CHANNEL_CHAT_ID = f"@{ANNOUNCE_CHANNEL_USERNAME}"
 
-# ============================================================
-#         إعدادات الاتصال بقاعدة بيانات Firebase Firestore
-# ============================================================
-# بيانات حساب الخدمة (Service Account) الخاص بمشروع Firebase. كل الحقول غير
-# الحسّاسة مكتوبة مباشرة هنا كما طلبت. الحقل الحسّاس الوحيد (private_key) يُقرأ
-# حصرًا من متغير بيئة حتى لا يُخزَّن كنص صريح داخل الكود المصدري. ضع القيمة
-# التالية كمتغير بيئة قبل تشغيل البوت:
-#   FIREBASE_PRIVATE_KEY   -> محتوى private_key كاملاً (يمكن ترك \n كما هي، سيتم تحويلها تلقائيًا)
-FIREBASE_PROJECT_ID = "wep-app-1771a"
-FIREBASE_PRIVATE_KEY_ID = "4e6f499aee9cf5a54366a87c45b3760782f43b41"
-FIREBASE_CLIENT_EMAIL = "firebase-adminsdk-fbsvc@wep-app-1771a.iam.gserviceaccount.com"
-FIREBASE_CLIENT_ID = "105199268649045240747"
-FIREBASE_CLIENT_CERT_URL = (
-    "https://www.googleapis.com/robot/v1/metadata/x509/"
-    "firebase-adminsdk-fbsvc%40wep-app-1771a.iam.gserviceaccount.com"
-)
-
-_raw_private_key = os.environ.get("FIREBASE_PRIVATE_KEY", "")
-# دعم الحالتين: مفتاح مُدخل بأسطر حقيقية، أو بمتوالية "\n" نصية (شائع عند وضعه
-# كمتغير بيئة عبر لوحات تحكم الاستضافة التي لا تقبل أسطر متعددة فعلية).
-if "\\n" in _raw_private_key and "\n" not in _raw_private_key:
-    _raw_private_key = _raw_private_key.replace("\\n", "\n")
-
-FIREBASE_SERVICE_ACCOUNT = {
-    "type": "service_account",
-    "project_id": FIREBASE_PROJECT_ID,
-    "private_key_id": FIREBASE_PRIVATE_KEY_ID,
-    "private_key": _raw_private_key,
-    "client_email": FIREBASE_CLIENT_EMAIL,
-    "client_id": FIREBASE_CLIENT_ID,
-    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-    "token_uri": "https://oauth2.googleapis.com/token",
-    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-    "client_x509_cert_url": FIREBASE_CLIENT_CERT_URL,
-    "universe_domain": "googleapis.com",
-}
+# ملاحظة: بيانات الاتصال بقاعدة بيانات Firebase Firestore (FIREBASE_PROJECT_ID،
+# FIREBASE_SERVICE_ACCOUNT، ...إلخ) تم نقلها بالكامل إلى أعلى الملف تمامًا
+# (تحت التوكن مباشرة وقبل الاستيرادات) لتسهيل تعديلها. الأسماء نفسها متاحة
+# هنا كمتغيرات عامة لأن fs_db() وباقي طبقة قاعدة البيانات تستخدمها كما هي.
 
 ROULETTE_COUNTS = [5, 10, 15, 20, 25, 30, 50, 100]
 
@@ -401,6 +433,20 @@ def build_text_with_emojis(parts) -> tuple:
     return text, entities
 
 
+def build_brand_giveaways_parts(prefix: str = "• "):
+    """يبني جزء الجملة الموحّد: «BRAND_NAME < السحوبات» — يُستخدم في القائمة
+    الرئيسية وفي منشورات السحوبات والمسابقات. اسم العلامة رابط أزرق يفتح
+    {BRAND_URL}، وكلمة «السحوبات» رابط أزرق عريض يفتح {GIVEAWAYS_CHANNEL_URL}.
+    كلا الرابطين يُنشئان معاينة رابط صغيرة تلقائيًا من تيليجرام (صورة القناة)."""
+    parts = []
+    if prefix:
+        parts.append(prefix)
+    parts.append((BRAND_NAME, "link", BRAND_URL))
+    parts.append(" < ")
+    parts.append((GIVEAWAYS_LINK_TEXT, "link", GIVEAWAYS_CHANNEL_URL))
+    return parts
+
+
 def bold_notice(message: str) -> tuple:
     """يبني رسالة تنبيه/تأكيد قصيرة بخط عريض — يُستخدم لتوحيد شكل رسائل النظام في البوت."""
     return build_text_with_emojis([([message], "bold", None)])
@@ -428,7 +474,7 @@ def build_welcome_message(user) -> tuple:
             " : أهلاً بك - ",
             (user_name, "mention", user),
             "\n\n",
-            ("• " + BRAND_NAME, "link", BRAND_URL),
+            *build_brand_giveaways_parts(),
             "\n",
             ([
                 "لإنشاء السحوبات والمسابقات والروليت السريع",
@@ -1252,11 +1298,11 @@ def shift_entities(entities, shift: int):
 
 
 def build_brand_footer() -> tuple:
-    """يبني تذييل العلامة التجارية (اسم أزرق قابل للضغط فقط، بدون أي عبارة إضافية)
+    """يبني تذييل العلامة التجارية (اسم أزرق قابل للضغط + رابط «السحوبات» بجانبه)
     المستخدم في نهاية منشورات القناة (السحب والمسابقة)."""
     return build_text_with_emojis([
         "\n\n",
-        ("• " + BRAND_NAME, "link", BRAND_URL),
+        *build_brand_giveaways_parts(),
     ])
 
 
@@ -2170,14 +2216,26 @@ def init_db():
         if not ref.get().exists:
             ref.set({"value": v})
 
+# كاش داخل الذاكرة لقيم الإعدادات (settings). هذه القيم (حالة منع الرشق، نص
+# الكليشة، حالة قسم الربح، اسم قناة الاشتراك الإجباري...) تُقرأ من Firestore
+# في شبه كل ضغطة زر تقريبًا، لكنها لا تتغيّر إلا نادرًا (فقط عندما يعدّلها
+# المالك من القائمة). قبل هذا الكاش كانت كل قراءة تعني رحلة شبكة كاملة إلى
+# Firestore تُجمّد حلقة أحداث البوت بالكامل لحظيًا (لكل المستخدمين وليس فقط
+# صاحب الضغطة) — وهذا كان السبب الرئيسي وراء بطء استجابة الأزرار. الآن تُقرأ
+# القيمة من الذاكرة مباشرة، وتُحدَّث الذاكرة تلقائيًا عند أي تعديل فعلي.
+_SETTINGS_CACHE = {}
+
 def get_setting(key: str) -> str:
+    if key in _SETTINGS_CACHE:
+        return _SETTINGS_CACHE[key]
     doc = fs_db().collection("settings").document(key).get()
-    if not doc.exists:
-        return None
-    return doc.to_dict().get("value")
+    value = doc.to_dict().get("value") if doc.exists else None
+    _SETTINGS_CACHE[key] = value
+    return value
 
 def set_setting(key: str, value: str):
     fs_db().collection("settings").document(key).set({"value": value})
+    _SETTINGS_CACHE[key] = value
 
 def create_roulette(owner_id: int, target_count: int) -> int:
     rid = _next_roulette_id()
@@ -2317,8 +2375,7 @@ def register_bot_user_and_check_new(user_id: int) -> bool:
 def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int) -> bool:
     """يمنح النقاط مرة واحدة عالميًا بعد نجاح مشاركة السحب والكابتشا."""
     client = fs_db()
-    enabled_doc = client.collection("settings").document("points_enabled").get()
-    if not enabled_doc.exists or enabled_doc.to_dict().get("value") != "1":
+    if get_setting("points_enabled") != "1":
         return False
 
     from google.api_core.exceptions import AlreadyExists
@@ -2335,8 +2392,7 @@ def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int
         # هذا المستخدم مكافَأ بالفعل من قبل (عالميًا مرة واحدة فقط) — لا نمنح نقاطًا مجددًا.
         return False
 
-    per_user_doc = client.collection("settings").document("points_per_user").get()
-    raw_value = per_user_doc.to_dict().get("value") if per_user_doc.exists else None
+    raw_value = get_setting("points_per_user")
     amount = max(int(raw_value) if raw_value and str(raw_value).isdigit() else 1, 0)
 
     owner_ref = client.collection("owner_points").document(str(owner_id))
