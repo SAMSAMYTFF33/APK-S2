@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import secrets
 import sqlite3
@@ -41,6 +42,29 @@ except ImportError:
             "pip install \"python-telegram-bot[job-queue]\" ثم أعد التشغيل.",
             _exc,
         )
+
+# ============================================================
+# تثبيت ذاتي لمكتبة firebase-admin (تُستخدم للاتصال بقاعدة بيانات Firestore
+# الحقيقية بدل ملف SQLite المحلي). نفس منطق التثبيت الذاتي أعلاه بالضبط.
+# ============================================================
+try:
+    import firebase_admin  # noqa: F401
+except ImportError:
+    _boot_logger.warning("مكتبة firebase-admin غير مثبّتة — جارٍ تثبيتها تلقائيًا الآن (مرة واحدة فقط)...")
+    try:
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "--quiet", "firebase-admin",
+        ])
+        _boot_logger.warning("تم تثبيت firebase-admin بنجاح! يتابع البوت الإقلاع الآن مباشرة.")
+    except Exception as _exc:
+        _boot_logger.error(
+            "فشل التثبيت التلقائي لـ firebase-admin (%s). ثبّت يدويًا عبر: "
+            "pip install firebase-admin ثم أعد التشغيل.",
+            _exc,
+        )
+
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 logger = logging.getLogger("contest_bot")
 
@@ -101,7 +125,42 @@ ANNOUNCE_CHANNEL_USERNAME = "TREX9R"
 ANNOUNCE_CHANNEL_URL = "https://t.me/TREX9R"
 ANNOUNCE_CHANNEL_CHAT_ID = f"@{ANNOUNCE_CHANNEL_USERNAME}"
 
-DB_PATH = "roulette_points.db"
+# ============================================================
+#         إعدادات الاتصال بقاعدة بيانات Firebase Firestore
+# ============================================================
+# بيانات حساب الخدمة (Service Account) الخاص بمشروع Firebase. كل الحقول غير
+# الحسّاسة مكتوبة مباشرة هنا كما طلبت. الحقل الحسّاس الوحيد (private_key) يُقرأ
+# حصرًا من متغير بيئة حتى لا يُخزَّن كنص صريح داخل الكود المصدري. ضع القيمة
+# التالية كمتغير بيئة قبل تشغيل البوت:
+#   FIREBASE_PRIVATE_KEY   -> محتوى private_key كاملاً (يمكن ترك \n كما هي، سيتم تحويلها تلقائيًا)
+FIREBASE_PROJECT_ID = "wep-app-1771a"
+FIREBASE_PRIVATE_KEY_ID = "4e6f499aee9cf5a54366a87c45b3760782f43b41"
+FIREBASE_CLIENT_EMAIL = "firebase-adminsdk-fbsvc@wep-app-1771a.iam.gserviceaccount.com"
+FIREBASE_CLIENT_ID = "105199268649045240747"
+FIREBASE_CLIENT_CERT_URL = (
+    "https://www.googleapis.com/robot/v1/metadata/x509/"
+    "firebase-adminsdk-fbsvc%40wep-app-1771a.iam.gserviceaccount.com"
+)
+
+_raw_private_key = os.environ.get("FIREBASE_PRIVATE_KEY", "")
+# دعم الحالتين: مفتاح مُدخل بأسطر حقيقية، أو بمتوالية "\n" نصية (شائع عند وضعه
+# كمتغير بيئة عبر لوحات تحكم الاستضافة التي لا تقبل أسطر متعددة فعلية).
+if "\\n" in _raw_private_key and "\n" not in _raw_private_key:
+    _raw_private_key = _raw_private_key.replace("\\n", "\n")
+
+FIREBASE_SERVICE_ACCOUNT = {
+    "type": "service_account",
+    "project_id": FIREBASE_PROJECT_ID,
+    "private_key_id": FIREBASE_PRIVATE_KEY_ID,
+    "private_key": _raw_private_key,
+    "client_email": FIREBASE_CLIENT_EMAIL,
+    "client_id": FIREBASE_CLIENT_ID,
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+    "client_x509_cert_url": FIREBASE_CLIENT_CERT_URL,
+    "universe_domain": "googleapis.com",
+}
 
 ROULETTE_COUNTS = [5, 10, 15, 20, 25, 30, 50, 100]
 
@@ -1897,230 +1956,98 @@ def build_giveaway_ended_message(cliche_text: str, cliche_entities, winners: lis
 # ============================================================
 #                     قاعدة البيانات
 # ============================================================
-_DB_CONN = None
-_DB_LOCK = threading.Lock()
+# ============================================================
+#            الاتصال بـ Firestore (بديل الاتصال المشترك القديم)
+# ============================================================
+_FS_CLIENT = None
+_FS_LOCK = threading.Lock()
 
 
-class PersistentDBConnection(sqlite3.Connection):
-    def close(self):
-        # تجاهل أمر الإغلاق للحفاظ على الاتصال المشترك مفتوحاً
-        pass
-
-def db():
+class FSRow(dict):
     """
-    يعيد اتصال قاعدة بيانات واحد مشترك بدل فتح اتصال جديد (وتنفيذ PRAGMA) في كل
-    استدعاء — فتح/إغلاق اتصال SQLite جديد لكل استعلام هو السبب الرئيسي في بطء
-    رد الأزرار (كل زر يستدعي هذه الدالة عدة مرات وكل مرة فتح ملف + إعداد PRAGMA).
-    الاتصال المشترك يُفتح مرة واحدة فقط، ويُعاد استخدامه بأمان (check_same_thread=False)
-    عبر كل الاستدعاءات المتزامنة. تم استبدال conn.close() بدالة فارغة حتى لا تُغلق
-    الاتصال المشترك من مئات الأماكن في الكود التي ما تزال تستدعي conn.close() كالمعتاد.
+    يحاكي واجهة sqlite3.Row القديمة: وصول للحقول بالمفتاح row["field"] تمامًا كما
+    كانت كل دوال الكود تستخدمها سابقًا مع SQLite، حتى لا يحتاج أي كود خارج طبقة
+    قاعدة البيانات هذه إلى أي تعديل.
     """
-    global _DB_CONN
-    if _DB_CONN is None:
-        with _DB_LOCK:
-            if _DB_CONN is None:
-                # استخدام الكلاس المخصص لتخطي دالة close بأمان
-                conn = sqlite3.connect(DB_PATH, timeout=20.0, check_same_thread=False, factory=PersistentDBConnection)
-                conn.row_factory = sqlite3.Row
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA synchronous=NORMAL")
-                _DB_CONN = conn
-    return _DB_CONN
+    pass
 
-def migrate_db(conn):
-    c = conn.cursor()
-    c.execute("PRAGMA table_info(roulettes)")
-    columns = [column[1] for column in c.fetchall()]
 
-    if "target_count" not in columns:
-        c.execute("ALTER TABLE roulettes ADD COLUMN target_count INTEGER DEFAULT 0")
-    if "inline_message_id" not in columns:
-        c.execute("ALTER TABLE roulettes ADD COLUMN inline_message_id TEXT")
-    if "owner_id" not in columns:
-        c.execute("ALTER TABLE roulettes ADD COLUMN owner_id INTEGER DEFAULT 0")
-    if "status" not in columns:
-        c.execute("ALTER TABLE roulettes ADD COLUMN status TEXT DEFAULT 'open'")
-    if "created_at" not in columns:
-        c.execute("ALTER TABLE roulettes ADD COLUMN created_at TEXT")
-    if "channel_id" not in columns:
-        c.execute("ALTER TABLE roulettes ADD COLUMN channel_id INTEGER DEFAULT 0")
+def fs_db():
+    """يعيد عميل Firestore واحد مشترك (Singleton) بدل تهيئته في كل استدعاء."""
+    global _FS_CLIENT
+    if _FS_CLIENT is None:
+        with _FS_LOCK:
+            if _FS_CLIENT is None:
+                if not firebase_admin._apps:
+                    if not FIREBASE_SERVICE_ACCOUNT.get("private_key"):
+                        raise RuntimeError(
+                            "متغير البيئة FIREBASE_PRIVATE_KEY غير موجود أو فارغ. "
+                            "ضع فيه محتوى private_key من ملف Service Account قبل تشغيل البوت."
+                        )
+                    cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT)
+                    firebase_admin.initialize_app(cred)
+                _FS_CLIENT = firestore.client()
+    return _FS_CLIENT
 
-def migrate_counted_users(conn):
-    c = conn.cursor()
-    row = c.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='counted_users'"
-    ).fetchone()
-    if not row:
-        return
-    create_sql = row[0] or ""
-    if "PRIMARY KEY (user_id, roulette_id)" in create_sql or "PRIMARY KEY(user_id, roulette_id)" in create_sql:
-        return
 
-    c.execute("ALTER TABLE counted_users RENAME TO counted_users_old")
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS counted_users (
-            user_id INTEGER NOT NULL,
-            roulette_id INTEGER NOT NULL,
-            counted_at TEXT,
-            PRIMARY KEY (user_id, roulette_id)
-        )
-    """)
-    c.execute("""
-        INSERT OR IGNORE INTO counted_users (user_id, roulette_id, counted_at)
-        SELECT user_id, roulette_id, counted_at FROM counted_users_old
-    """)
-    c.execute("DROP TABLE counted_users_old")
-    conn.commit()
+def _fs_row_or_none(doc) -> "FSRow | None":
+    if doc is None or not doc.exists:
+        return None
+    return FSRow(doc.to_dict())
 
-def migrate_counted_users_display_name(conn):
-    c = conn.cursor()
-    c.execute("PRAGMA table_info(counted_users)")
-    columns = [column[1] for column in c.fetchall()]
-    if "display_name" not in columns:
-        c.execute("ALTER TABLE counted_users ADD COLUMN display_name TEXT")
-        conn.commit()
+
+def _fs_create_or_integrity_error(doc_ref, data: dict) -> None:
+    """يحاكي سلوك INSERT الذي يفشل عند تكرار المفتاح الأساسي (sqlite3.IntegrityError)."""
+    from google.api_core.exceptions import AlreadyExists
+    try:
+        doc_ref.create(data)
+    except AlreadyExists:
+        raise sqlite3.IntegrityError("duplicate key")
+
+
+def _fs_bump_counter(doc_ref, field: str, amount: int, extra: dict = None) -> None:
+    """يزيد قيمة حقل رقمي بشكل ذري داخل معاملة (transaction) لتفادي تعارض التحديثات المتزامنة."""
+    client = fs_db()
+    transaction = client.transaction()
+
+    @firestore.transactional
+    def _txn(transaction):
+        snap = doc_ref.get(transaction=transaction)
+        current = (snap.to_dict().get(field, 0) if snap.exists else 0) or 0
+        payload = dict(extra or {})
+        payload[field] = current + amount
+        if snap.exists:
+            transaction.update(doc_ref, payload)
+        else:
+            transaction.set(doc_ref, payload)
+
+    _txn(transaction)
+
+
+def _next_roulette_id() -> int:
+    """عدّاد ذري بديل عن AUTOINCREMENT في SQLite، عبر معاملة على مستند عدّاد واحد."""
+    client = fs_db()
+    counter_ref = client.collection("counters").document("roulettes")
+    transaction = client.transaction()
+
+    @firestore.transactional
+    def _txn(transaction):
+        snap = counter_ref.get(transaction=transaction)
+        current = (snap.to_dict().get("next_id", 0) if snap.exists else 0) or 0
+        next_id = current + 1
+        transaction.set(counter_ref, {"next_id": next_id})
+        return next_id
+
+    return _txn(transaction)
+
 
 def init_db():
-    conn = db()
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS roulettes (
-            roulette_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            owner_id INTEGER NOT NULL,
-            target_count INTEGER NOT NULL,
-            inline_message_id TEXT,
-            status TEXT DEFAULT 'open',
-            created_at TEXT,
-            channel_id INTEGER DEFAULT 0
-        )
-    """)
-    migrate_db(conn)
-
-    migrate_counted_users(conn)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS counted_users (
-            user_id INTEGER NOT NULL,
-            roulette_id INTEGER NOT NULL,
-            counted_at TEXT,
-            PRIMARY KEY (user_id, roulette_id)
-        )
-    """)
-    migrate_counted_users_display_name(conn)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS owner_points (
-            owner_id INTEGER PRIMARY KEY,
-            points INTEGER DEFAULT 0
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS channel_points (
-            chat_id INTEGER PRIMARY KEY,
-            owner_id INTEGER NOT NULL,
-            points INTEGER DEFAULT 0,
-            updated_at TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS rewarded_users (
-            user_id INTEGER PRIMARY KEY,
-            first_roulette_id INTEGER,
-            first_owner_id INTEGER,
-            first_giveaway_code TEXT,
-            rewarded_at TEXT
-        )
-    """)
-    c.execute("PRAGMA table_info(rewarded_users)")
-    rewarded_columns = [column[1] for column in c.fetchall()]
-    if "first_giveaway_code" not in rewarded_columns:
-        c.execute("ALTER TABLE rewarded_users ADD COLUMN first_giveaway_code TEXT")
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS remind_win (
-            user_id INTEGER PRIMARY KEY,
-            enabled INTEGER DEFAULT 1,
-            updated_at TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS registered_chats (
-            chat_id INTEGER PRIMARY KEY,
-            owner_id INTEGER NOT NULL,
-            chat_title TEXT,
-            chat_type TEXT,
-            registered_at TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS contests (
-            contest_code TEXT PRIMARY KEY,
-            owner_id INTEGER NOT NULL,
-            chat_id INTEGER NOT NULL,
-            cliche_text TEXT,
-            cliche_entities TEXT,
-            target_count INTEGER NOT NULL,
-            end_type TEXT,
-            time_minutes INTEGER,
-            winners_count INTEGER,
-            notify_win INTEGER DEFAULT 0,
-            announce_results INTEGER DEFAULT 0,
-            approve_participants INTEGER DEFAULT 1,
-            premium_only INTEGER DEFAULT 0,
-            channel_message_id INTEGER,
-            status TEXT DEFAULT 'open',
-            created_at TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS contest_participants (
-            contest_code TEXT NOT NULL,
-            user_id INTEGER NOT NULL,
-            display_name TEXT,
-            participant_code TEXT UNIQUE,
-            channel_message_id INTEGER,
-            joined_at TEXT,
-            PRIMARY KEY (contest_code, user_id)
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS contest_votes (
-            contest_code TEXT NOT NULL,
-            voter_id INTEGER NOT NULL,
-            participant_user_id INTEGER NOT NULL,
-            voted_at TEXT,
-            PRIMARY KEY (contest_code, voter_id)
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS giveaways (
-            gw_code TEXT PRIMARY KEY,
-            owner_id INTEGER NOT NULL,
-            chat_id INTEGER NOT NULL,
-            cliche_text TEXT,
-            cliche_entities TEXT,
-            winners_count INTEGER,
-            boost_required INTEGER DEFAULT 0,
-            premium_only INTEGER DEFAULT 0,
-            antispam INTEGER DEFAULT 0,
-            channel_message_id INTEGER,
-            status TEXT DEFAULT 'open',
-            created_at TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS giveaway_participants (
-            gw_code TEXT NOT NULL,
-            user_id INTEGER NOT NULL,
-            display_name TEXT,
-            username TEXT,
-            joined_at TEXT,
-            PRIMARY KEY (gw_code, user_id)
-        )
-    """)
+    """
+    Firestore بدون بنية جداول مسبقة — المجموعات (collections) تُنشأ تلقائيًا عند
+    أول عملية كتابة فيها. الشيء الوحيد المطلوب هنا هو ضمان وجود قيم الإعدادات
+    الافتراضية إن لم تكن موجودة بعد (بديل INSERT OR IGNORE في SQLite).
+    """
+    client = fs_db()
     defaults = {
         "points_enabled": "1",
         "points_per_user": "1",
@@ -2133,281 +2060,206 @@ def init_db():
         "game_cliche": DEFAULT_GAME_CLICHE,
     }
     for k, v in defaults.items():
-        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
-    conn.commit()
-    conn.close()
+        ref = client.collection("settings").document(k)
+        if not ref.get().exists:
+            ref.set({"value": v})
 
 def get_setting(key: str) -> str:
-    conn = db()
-    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-    conn.close()
-    return row["value"] if row else None
+    doc = fs_db().collection("settings").document(key).get()
+    if not doc.exists:
+        return None
+    return doc.to_dict().get("value")
 
 def set_setting(key: str, value: str):
-    conn = db()
-    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
-    conn.close()
+    fs_db().collection("settings").document(key).set({"value": value})
 
 def create_roulette(owner_id: int, target_count: int) -> int:
-    conn = db()
-    cur = conn.execute(
-        "INSERT INTO roulettes (owner_id, target_count, inline_message_id, status, created_at, channel_id) "
-        "VALUES (?, ?, NULL, 'open', ?, 0)",
-        (owner_id, target_count, datetime.now(timezone.utc).isoformat()),
-    )
-    conn.commit()
-    rid = cur.lastrowid
-    conn.close()
+    rid = _next_roulette_id()
+    fs_db().collection("roulettes").document(str(rid)).set({
+        "roulette_id": rid,
+        "owner_id": owner_id,
+        "target_count": target_count,
+        "inline_message_id": None,
+        "status": "open",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "channel_id": 0,
+    })
     return rid
 
 def create_roulettes_batch(owner_id: int, target_counts: list) -> dict:
-    conn = db()
-    now = datetime.now(timezone.utc).isoformat()
     result = {}
-    try:
-        cur = conn.cursor()
-        for n in target_counts:
-            cur.execute(
-                "INSERT INTO roulettes (owner_id, target_count, inline_message_id, status, created_at, channel_id) "
-                "VALUES (?, ?, NULL, 'open', ?, 0)",
-                (owner_id, n, now),
-            )
-            result[n] = cur.lastrowid
-        conn.commit()
-    finally:
-        conn.close()
+    for n in target_counts:
+        result[n] = create_roulette(owner_id, n)
     return result
 
 def set_inline_message_id(roulette_id: int, inline_message_id: str):
-    conn = db()
-    conn.execute(
-        "UPDATE roulettes SET inline_message_id=? WHERE roulette_id=? AND inline_message_id IS NULL",
-        (inline_message_id, roulette_id),
-    )
-    conn.commit()
-    conn.close()
+    ref = fs_db().collection("roulettes").document(str(roulette_id))
+    doc = ref.get()
+    if doc.exists and doc.to_dict().get("inline_message_id") is None:
+        ref.update({"inline_message_id": inline_message_id})
 
 def get_roulette(roulette_id: int):
-    conn = db()
-    row = conn.execute("SELECT * FROM roulettes WHERE roulette_id=?", (roulette_id,)).fetchone()
-    conn.close()
-    return row
+    doc = fs_db().collection("roulettes").document(str(roulette_id)).get()
+    return _fs_row_or_none(doc)
 
 def set_roulette_status(roulette_id: int, status: str):
-    conn = db()
-    conn.execute("UPDATE roulettes SET status=? WHERE roulette_id=?", (status, roulette_id))
-    conn.commit()
-    conn.close()
+    fs_db().collection("roulettes").document(str(roulette_id)).update({"status": status})
+
+def _counted_user_doc_id(user_id: int, roulette_id: int) -> str:
+    return f"{roulette_id}_{user_id}"
 
 def is_user_counted(user_id: int, roulette_id: int) -> bool:
-    conn = db()
-    row = conn.execute(
-        "SELECT 1 FROM counted_users WHERE user_id=? AND roulette_id=?", (user_id, roulette_id)
-    ).fetchone()
-    conn.close()
-    return row is not None
+    doc = fs_db().collection("counted_users").document(_counted_user_doc_id(user_id, roulette_id)).get()
+    return doc.exists
 
 def count_user(user_id: int, roulette_id: int, display_name: str = None):
-    conn = db()
-    conn.execute(
-        "INSERT OR IGNORE INTO counted_users (user_id, roulette_id, display_name, counted_at) VALUES (?, ?, ?, ?)",
-        (user_id, roulette_id, display_name, datetime.now(timezone.utc).isoformat()),
-    )
-    conn.commit()
-    conn.close()
+    ref = fs_db().collection("counted_users").document(_counted_user_doc_id(user_id, roulette_id))
+    if not ref.get().exists:
+        ref.set({
+            "user_id": user_id,
+            "roulette_id": roulette_id,
+            "display_name": display_name,
+            "counted_at": datetime.now(timezone.utc).isoformat(),
+        })
 
 def count_participants(roulette_id: int) -> int:
-    conn = db()
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM counted_users WHERE roulette_id=?", (roulette_id,)
-    ).fetchone()
-    conn.close()
-    return row["c"] if row else 0
+    docs = fs_db().collection("counted_users").where("roulette_id", "==", roulette_id).stream()
+    return sum(1 for _ in docs)
 
 def get_participants(roulette_id: int):
-    conn = db()
-    rows = conn.execute(
-        "SELECT user_id FROM counted_users WHERE roulette_id=?", (roulette_id,)
-    ).fetchall()
-    conn.close()
-    return [r["user_id"] for r in rows]
+    docs = fs_db().collection("counted_users").where("roulette_id", "==", roulette_id).stream()
+    return [d.to_dict()["user_id"] for d in docs]
 
 def get_participants_with_names(roulette_id: int):
-    conn = db()
-    rows = conn.execute(
-        "SELECT user_id, display_name FROM counted_users WHERE roulette_id=? ORDER BY counted_at",
-        (roulette_id,),
-    ).fetchall()
-    conn.close()
-    return [(r["user_id"], r["display_name"] or str(r["user_id"])) for r in rows]
+    docs = list(fs_db().collection("counted_users").where("roulette_id", "==", roulette_id).stream())
+    rows = [d.to_dict() for d in docs]
+    rows.sort(key=lambda r: r.get("counted_at") or "")
+    return [(r["user_id"], r.get("display_name") or str(r["user_id"])) for r in rows]
 
 def add_points(owner_id: int, amount: int):
-    conn = db()
-    conn.execute("INSERT OR IGNORE INTO owner_points (owner_id, points) VALUES (?, 0)", (owner_id,))
-    conn.execute("UPDATE owner_points SET points = points + ? WHERE owner_id=?", (amount, owner_id))
-    conn.commit()
-    conn.close()
+    ref = fs_db().collection("owner_points").document(str(owner_id))
+    _fs_bump_counter(ref, "points", amount, extra={"owner_id": owner_id})
 
 def get_points(owner_id: int) -> int:
-    conn = db()
-    row = conn.execute("SELECT points FROM owner_points WHERE owner_id=?", (owner_id,)).fetchone()
-    conn.close()
-    return row["points"] if row else 0
+    doc = fs_db().collection("owner_points").document(str(owner_id)).get()
+    if not doc.exists:
+        return 0
+    return doc.to_dict().get("points", 0) or 0
 
 def get_top_channel_points(limit: int = 5):
     """يعيد أعلى القنوات التي حصلت على نقاط فعلية من سحوبات منع الرشق."""
-    conn = db()
-    rows = conn.execute(
-        """
-        SELECT cp.chat_id, cp.owner_id, cp.points,
-               COALESCE(rc.chat_title, 'قناة ' || CAST(cp.chat_id AS TEXT)) AS chat_title
-        FROM channel_points cp
-        JOIN registered_chats rc
-          ON rc.chat_id = cp.chat_id AND rc.chat_type = 'channel'
-        WHERE cp.points > 0
-        ORDER BY cp.points DESC, cp.updated_at DESC
-        LIMIT ?
-        """,
-        (max(1, min(int(limit), 5)),),
-    ).fetchall()
-    conn.close()
-    return rows
+    client = fs_db()
+    docs = client.collection("channel_points").stream()
+    candidates = []
+    for d in docs:
+        data = d.to_dict()
+        if (data.get("points") or 0) <= 0:
+            continue
+        chat_id = data.get("chat_id")
+        rc_doc = client.collection("registered_chats").document(str(chat_id)).get()
+        if not rc_doc.exists:
+            continue
+        rc = rc_doc.to_dict()
+        if rc.get("chat_type") != "channel":
+            continue
+        candidates.append(FSRow({
+            "chat_id": chat_id,
+            "owner_id": data.get("owner_id"),
+            "points": data.get("points"),
+            "updated_at": data.get("updated_at"),
+            "chat_title": rc.get("chat_title") or f"قناة {chat_id}",
+        }))
+    candidates.sort(key=lambda r: (r.get("points") or 0, r.get("updated_at") or ""), reverse=True)
+    return candidates[:max(1, min(int(limit), 5))]
 
 def has_been_rewarded(user_id: int) -> bool:
-    conn = db()
-    row = conn.execute("SELECT 1 FROM rewarded_users WHERE user_id=?", (user_id,)).fetchone()
-    conn.close()
-    return row is not None
+    doc = fs_db().collection("rewarded_users").document(str(user_id)).get()
+    return doc.exists
 
 def mark_rewarded(user_id: int, roulette_id: int, owner_id: int):
-    conn = db()
-    conn.execute(
-        "INSERT OR IGNORE INTO rewarded_users (user_id, first_roulette_id, first_owner_id, rewarded_at) "
-        "VALUES (?, ?, ?, ?)",
-        (user_id, roulette_id, owner_id, datetime.now(timezone.utc).isoformat()),
-    )
-    conn.commit()
-    conn.close()
+    ref = fs_db().collection("rewarded_users").document(str(user_id))
+    if not ref.get().exists:
+        ref.set({
+            "user_id": user_id,
+            "first_roulette_id": roulette_id,
+            "first_owner_id": owner_id,
+            "first_giveaway_code": None,
+            "rewarded_at": datetime.now(timezone.utc).isoformat(),
+        })
 
 def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int) -> bool:
     """يمنح النقاط مرة واحدة عالميًا بعد نجاح مشاركة السحب والكابتشا."""
-    conn = db()
+    client = fs_db()
+    enabled_doc = client.collection("settings").document("points_enabled").get()
+    if not enabled_doc.exists or enabled_doc.to_dict().get("value") != "1":
+        return False
+
+    from google.api_core.exceptions import AlreadyExists
+    rewarded_ref = client.collection("rewarded_users").document(str(user_id))
     try:
-        enabled = conn.execute(
-            "SELECT value FROM settings WHERE key='points_enabled'"
-        ).fetchone()
-        if not enabled or enabled["value"] != "1":
-            conn.commit()
-            return False
+        rewarded_ref.create({
+            "user_id": user_id,
+            "first_roulette_id": None,
+            "first_owner_id": owner_id,
+            "first_giveaway_code": gw_code,
+            "rewarded_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except AlreadyExists:
+        # هذا المستخدم مكافَأ بالفعل من قبل (عالميًا مرة واحدة فقط) — لا نمنح نقاطًا مجددًا.
+        return False
 
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO rewarded_users "
-            "(user_id, first_roulette_id, first_owner_id, first_giveaway_code, rewarded_at) "
-            "VALUES (?, NULL, ?, ?, ?)",
-            (user_id, owner_id, gw_code, datetime.now(timezone.utc).isoformat()),
-        )
-        if cur.rowcount != 1:
-            conn.commit()
-            return False
+    per_user_doc = client.collection("settings").document("points_per_user").get()
+    raw_value = per_user_doc.to_dict().get("value") if per_user_doc.exists else None
+    amount = max(int(raw_value) if raw_value and str(raw_value).isdigit() else 1, 0)
 
-        row = conn.execute(
-            "SELECT value FROM settings WHERE key='points_per_user'"
-        ).fetchone()
-        amount = max(int(row["value"]) if row and str(row["value"]).isdigit() else 1, 0)
-        conn.execute(
-            "INSERT OR IGNORE INTO owner_points (owner_id, points) VALUES (?, 0)",
-            (owner_id,),
-        )
-        conn.execute(
-            "UPDATE owner_points SET points = points + ? WHERE owner_id=?",
-            (amount, owner_id),
-        )
-        conn.execute(
-            "INSERT OR IGNORE INTO channel_points (chat_id, owner_id, points, updated_at) "
-            "VALUES (?, ?, 0, ?)",
-            (chat_id, owner_id, datetime.now(timezone.utc).isoformat()),
-        )
-        conn.execute(
-            "UPDATE channel_points SET points = points + ?, owner_id = ?, updated_at=? "
-            "WHERE chat_id=?",
-            (amount, owner_id, datetime.now(timezone.utc).isoformat(), chat_id),
-        )
-        conn.commit()
-        return True
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    owner_ref = client.collection("owner_points").document(str(owner_id))
+    _fs_bump_counter(owner_ref, "points", amount, extra={"owner_id": owner_id})
+
+    channel_ref = client.collection("channel_points").document(str(chat_id))
+    _fs_bump_counter(channel_ref, "points", amount, extra={
+        "chat_id": chat_id,
+        "owner_id": owner_id,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return True
 
 def toggle_remind_win(user_id: int) -> bool:
-    conn = db()
-    row = conn.execute(
-        "SELECT enabled FROM remind_win WHERE user_id=?", (user_id,)
-    ).fetchone()
+    ref = fs_db().collection("remind_win").document(str(user_id))
+    doc = ref.get()
     now = datetime.now(timezone.utc).isoformat()
-    if row is None:
-        conn.execute(
-            "INSERT INTO remind_win (user_id, enabled, updated_at) VALUES (?, 1, ?)",
-            (user_id, now),
-        )
-        new_state = True
-    else:
-        new_value = 0 if row["enabled"] == 1 else 1
-        conn.execute(
-            "UPDATE remind_win SET enabled=?, updated_at=? WHERE user_id=?",
-            (new_value, now, user_id),
-        )
-        new_state = bool(new_value)
-    conn.commit()
-    conn.close()
-    return new_state
+    if not doc.exists:
+        ref.set({"user_id": user_id, "enabled": 1, "updated_at": now})
+        return True
+    current = doc.to_dict().get("enabled", 1)
+    new_value = 0 if current == 1 else 1
+    ref.update({"enabled": new_value, "updated_at": now})
+    return bool(new_value)
 
 def get_remind_win_state(user_id: int):
-    conn = db()
-    row = conn.execute(
-        "SELECT enabled FROM remind_win WHERE user_id=?", (user_id,)
-    ).fetchone()
-    conn.close()
-    if row is None:
+    doc = fs_db().collection("remind_win").document(str(user_id)).get()
+    if not doc.exists:
         return None
-    return bool(row["enabled"])
+    return bool(doc.to_dict().get("enabled"))
 
 # ============================================================
 #          تسجيل القنوات/القروبات عند إضافة البوت كمشرف
 # ============================================================
 def save_registered_chat(chat_id: int, owner_id: int, chat_title: str, chat_type: str):
-    conn = db()
-    conn.execute(
-        """
-        INSERT INTO registered_chats (chat_id, owner_id, chat_title, chat_type, registered_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(chat_id) DO UPDATE SET
-            owner_id=excluded.owner_id,
-            chat_title=excluded.chat_title,
-            chat_type=excluded.chat_type,
-            registered_at=excluded.registered_at
-        """,
-        (chat_id, owner_id, chat_title, chat_type, datetime.now(timezone.utc).isoformat()),
-    )
-    conn.commit()
-    conn.close()
+    fs_db().collection("registered_chats").document(str(chat_id)).set({
+        "chat_id": chat_id,
+        "owner_id": owner_id,
+        "chat_title": chat_title,
+        "chat_type": chat_type,
+        "registered_at": datetime.now(timezone.utc).isoformat(),
+    })
 
 def remove_registered_chat(chat_id: int):
-    conn = db()
-    conn.execute("DELETE FROM registered_chats WHERE chat_id = ?", (chat_id,))
-    conn.commit()
-    conn.close()
+    fs_db().collection("registered_chats").document(str(chat_id)).delete()
 
 def get_registered_chats(owner_id: int):
-    conn = db()
-    rows = conn.execute(
-        "SELECT chat_id, chat_title, chat_type FROM registered_chats "
-        "WHERE owner_id = ? ORDER BY registered_at DESC",
-        (owner_id,),
-    ).fetchall()
-    conn.close()
+    docs = fs_db().collection("registered_chats").where("owner_id", "==", owner_id).stream()
+    rows = [FSRow(d.to_dict()) for d in docs]
+    rows.sort(key=lambda r: r.get("registered_at") or "", reverse=True)
     return rows
 
 # ============================================================
@@ -2467,56 +2319,44 @@ def generate_participant_code(contest_code: str) -> str:
 def create_contest(contest_code: str, owner_id: int, chat_id: int, cliche_text: str,
                     cliche_entities, target_count: int, end_type: str, time_minutes,
                     winners_count, settings: dict) -> None:
-    conn = db()
-    conn.execute(
-        """
-        INSERT INTO contests (
-            contest_code, owner_id, chat_id, cliche_text, cliche_entities, target_count,
-            end_type, time_minutes, winners_count,
-            notify_win, announce_results, approve_participants, premium_only,
-            status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
-        """,
-        (
-            contest_code, owner_id, chat_id, cliche_text, entities_to_json(cliche_entities), target_count,
-            end_type, time_minutes, winners_count,
-            int(bool(settings.get("contest_notify_win", False))),
-            int(bool(settings.get("contest_announce_results", False))),
-            int(bool(settings.get("contest_approve_participants", True))),
-            int(bool(settings.get("contest_premium_only", False))),
-            datetime.now(timezone.utc).isoformat(),
-        ),
-    )
-    conn.commit()
-    conn.close()
+    fs_db().collection("contests").document(contest_code).set({
+        "contest_code": contest_code,
+        "owner_id": owner_id,
+        "chat_id": chat_id,
+        "cliche_text": cliche_text,
+        "cliche_entities": entities_to_json(cliche_entities),
+        "target_count": target_count,
+        "end_type": end_type,
+        "time_minutes": time_minutes,
+        "winners_count": winners_count,
+        "notify_win": int(bool(settings.get("contest_notify_win", False))),
+        "announce_results": int(bool(settings.get("contest_announce_results", False))),
+        "approve_participants": int(bool(settings.get("contest_approve_participants", True))),
+        "premium_only": int(bool(settings.get("contest_premium_only", False))),
+        "channel_message_id": None,
+        "status": "open",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
 
 
 def get_contest(contest_code: str):
-    conn = db()
-    row = conn.execute("SELECT * FROM contests WHERE contest_code=?", (contest_code,)).fetchone()
-    conn.close()
-    return row
+    doc = fs_db().collection("contests").document(contest_code).get()
+    return _fs_row_or_none(doc)
 
 
 def get_contests_by_owner(owner_id: int):
     """يعيد المسابقات الجارية (غير المنتهية) الخاصة بالمالك، الأحدث أولًا."""
-    conn = db()
-    rows = conn.execute(
-        "SELECT * FROM contests WHERE owner_id=? AND status IN ('open','paused') "
-        "ORDER BY created_at DESC",
-        (owner_id,),
-    ).fetchall()
-    conn.close()
+    docs = fs_db().collection("contests").where("owner_id", "==", owner_id).stream()
+    rows = [FSRow(d.to_dict()) for d in docs if d.to_dict().get("status") in ("open", "paused")]
+    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     return rows
 
 
 def get_chat_title_by_id(chat_id: int) -> str:
-    conn = db()
-    row = conn.execute(
-        "SELECT chat_title FROM registered_chats WHERE chat_id=?", (chat_id,)
-    ).fetchone()
-    conn.close()
-    return row["chat_title"] if row and row["chat_title"] else str(chat_id)
+    doc = fs_db().collection("registered_chats").document(str(chat_id)).get()
+    if doc.exists and doc.to_dict().get("chat_title"):
+        return doc.to_dict()["chat_title"]
+    return str(chat_id)
 
 
 def contest_display_name(contest) -> str:
@@ -2592,127 +2432,88 @@ async def announce_new_post(context: ContextTypes.DEFAULT_TYPE, source_chat_id: 
 
 def delete_contest_completely(contest_code: str) -> None:
     """يحذف المسابقة بكل مشاركيها وأصواتها نهائيًا من قاعدة البيانات."""
-    conn = db()
-    conn.execute("DELETE FROM contest_votes WHERE contest_code=?", (contest_code,))
-    conn.execute("DELETE FROM contest_participants WHERE contest_code=?", (contest_code,))
-    conn.execute("DELETE FROM contests WHERE contest_code=?", (contest_code,))
-    conn.commit()
-    conn.close()
+    client = fs_db()
+    for d in client.collection("contest_votes").where("contest_code", "==", contest_code).stream():
+        d.reference.delete()
+    for d in client.collection("contest_participants").where("contest_code", "==", contest_code).stream():
+        d.reference.delete()
+    client.collection("contests").document(contest_code).delete()
 
 
 def set_contest_channel_message(contest_code: str, message_id: int):
-    conn = db()
-    conn.execute(
-        "UPDATE contests SET channel_message_id=? WHERE contest_code=?",
-        (message_id, contest_code),
-    )
-    conn.commit()
-    conn.close()
+    fs_db().collection("contests").document(contest_code).update({"channel_message_id": message_id})
 
 
 def set_contest_status(contest_code: str, status: str):
-    conn = db()
-    conn.execute("UPDATE contests SET status=? WHERE contest_code=?", (status, contest_code))
-    conn.commit()
-    conn.close()
+    fs_db().collection("contests").document(contest_code).update({"status": status})
 
 
 def count_contest_participants(contest_code: str) -> int:
-    conn = db()
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM contest_participants WHERE contest_code=?", (contest_code,)
-    ).fetchone()
-    conn.close()
-    return row["c"] if row else 0
+    docs = fs_db().collection("contest_participants").where("contest_code", "==", contest_code).stream()
+    return sum(1 for _ in docs)
+
+
+def _contest_participant_doc_id(contest_code: str, user_id: int) -> str:
+    return f"{contest_code}_{user_id}"
 
 
 def get_contest_participant(contest_code: str, user_id: int):
-    conn = db()
-    row = conn.execute(
-        "SELECT * FROM contest_participants WHERE contest_code=? AND user_id=?",
-        (contest_code, user_id),
-    ).fetchone()
-    conn.close()
-    return row
+    doc = fs_db().collection("contest_participants").document(_contest_participant_doc_id(contest_code, user_id)).get()
+    return _fs_row_or_none(doc)
 
 
 def get_participant_by_code(participant_code: str):
-    conn = db()
-    row = conn.execute(
-        "SELECT * FROM contest_participants WHERE participant_code=?", (participant_code,)
-    ).fetchone()
-    conn.close()
-    return row
+    docs = fs_db().collection("contest_participants").where("participant_code", "==", participant_code).limit(1).stream()
+    for d in docs:
+        return FSRow(d.to_dict())
+    return None
 
 
 def add_contest_participant(contest_code: str, user_id: int, display_name: str, participant_code: str):
-    conn = db()
-    conn.execute(
-        """
-        INSERT INTO contest_participants (contest_code, user_id, display_name, participant_code, joined_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (contest_code, user_id, display_name, participant_code, datetime.now(timezone.utc).isoformat()),
-    )
-    conn.commit()
-    conn.close()
+    ref = fs_db().collection("contest_participants").document(_contest_participant_doc_id(contest_code, user_id))
+    _fs_create_or_integrity_error(ref, {
+        "contest_code": contest_code,
+        "user_id": user_id,
+        "display_name": display_name,
+        "participant_code": participant_code,
+        "channel_message_id": None,
+        "joined_at": datetime.now(timezone.utc).isoformat(),
+    })
 
 
 def remove_contest_participant(contest_code: str, user_id: int):
-    conn = db()
-    conn.execute(
-        "DELETE FROM contest_participants WHERE contest_code=? AND user_id=?",
-        (contest_code, user_id),
-    )
-    conn.execute(
-        "DELETE FROM contest_votes WHERE contest_code=? AND participant_user_id=?",
-        (contest_code, user_id),
-    )
-    conn.commit()
-    conn.close()
+    client = fs_db()
+    client.collection("contest_participants").document(_contest_participant_doc_id(contest_code, user_id)).delete()
+    for d in client.collection("contest_votes").where("contest_code", "==", contest_code).stream():
+        if d.to_dict().get("participant_user_id") == user_id:
+            d.reference.delete()
 
 
 def set_participant_channel_message(contest_code: str, user_id: int, message_id: int):
-    conn = db()
-    conn.execute(
-        "UPDATE contest_participants SET channel_message_id=? WHERE contest_code=? AND user_id=?",
-        (message_id, contest_code, user_id),
+    fs_db().collection("contest_participants").document(_contest_participant_doc_id(contest_code, user_id)).update(
+        {"channel_message_id": message_id}
     )
-    conn.commit()
-    conn.close()
 
 
 def has_voted(contest_code: str, voter_id: int) -> bool:
-    conn = db()
-    row = conn.execute(
-        "SELECT 1 FROM contest_votes WHERE contest_code=? AND voter_id=?",
-        (contest_code, voter_id),
-    ).fetchone()
-    conn.close()
-    return row is not None
+    doc = fs_db().collection("contest_votes").document(f"{contest_code}_{voter_id}").get()
+    return doc.exists
 
 
 def add_vote(contest_code: str, voter_id: int, participant_user_id: int):
-    conn = db()
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO contest_votes (contest_code, voter_id, participant_user_id, voted_at)
-        VALUES (?, ?, ?, ?)
-        """,
-        (contest_code, voter_id, participant_user_id, datetime.now(timezone.utc).isoformat()),
-    )
-    conn.commit()
-    conn.close()
+    ref = fs_db().collection("contest_votes").document(f"{contest_code}_{voter_id}")
+    if not ref.get().exists:
+        ref.set({
+            "contest_code": contest_code,
+            "voter_id": voter_id,
+            "participant_user_id": participant_user_id,
+            "voted_at": datetime.now(timezone.utc).isoformat(),
+        })
 
 
 def get_participant_votes(contest_code: str, participant_user_id: int) -> int:
-    conn = db()
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM contest_votes WHERE contest_code=? AND participant_user_id=?",
-        (contest_code, participant_user_id),
-    ).fetchone()
-    conn.close()
-    return row["c"] if row else 0
+    docs = fs_db().collection("contest_votes").where("contest_code", "==", contest_code).stream()
+    return sum(1 for d in docs if d.to_dict().get("participant_user_id") == participant_user_id)
 
 
 def get_contest_leaderboard(contest_code: str):
@@ -2720,35 +2521,33 @@ def get_contest_leaderboard(contest_code: str):
     يُعيد قائمة كل المتسابقين مرتّبة تنازليًا حسب عدد الأصوات (الأعلى أولًا)،
     وعند التعادل يُقدَّم من انضمّ أولًا. كل عنصر: (user_id, display_name, participant_code, votes).
     """
-    conn = db()
-    rows = conn.execute(
-        """
-        SELECT p.user_id AS user_id, p.display_name AS display_name,
-               p.participant_code AS participant_code, p.joined_at AS joined_at,
-               COUNT(v.voter_id) AS votes
-        FROM contest_participants p
-        LEFT JOIN contest_votes v
-            ON v.contest_code = p.contest_code AND v.participant_user_id = p.user_id
-        WHERE p.contest_code = ?
-        GROUP BY p.user_id
-        ORDER BY votes DESC, p.joined_at ASC
-        """,
-        (contest_code,),
-    ).fetchall()
-    conn.close()
-    return [
-        (r["user_id"], r["display_name"] or str(r["user_id"]), r["participant_code"], r["votes"])
-        for r in rows
-    ]
+    client = fs_db()
+    participants = list(client.collection("contest_participants").where("contest_code", "==", contest_code).stream())
+    votes = list(client.collection("contest_votes").where("contest_code", "==", contest_code).stream())
+    vote_counts = {}
+    for v in votes:
+        pid = v.to_dict().get("participant_user_id")
+        vote_counts[pid] = vote_counts.get(pid, 0) + 1
+    rows = []
+    for p in participants:
+        data = p.to_dict()
+        uid = data.get("user_id")
+        rows.append((
+            uid, data.get("display_name") or str(uid), data.get("participant_code"),
+            vote_counts.get(uid, 0), data.get("joined_at") or "",
+        ))
+    rows.sort(key=lambda r: (-r[3], r[4]))
+    return [(r[0], r[1], r[2], r[3]) for r in rows]
 
 
 def get_open_time_contests():
     """يُعيد كل المسابقات المفتوحة المعتمدة على وقت محدد (لإعادة جدولة المؤقتات بعد إعادة تشغيل البوت)."""
-    conn = db()
-    rows = conn.execute(
-        "SELECT * FROM contests WHERE status='open' AND end_type='time' AND time_minutes IS NOT NULL"
-    ).fetchall()
-    conn.close()
+    docs = fs_db().collection("contests").where("status", "==", "open").stream()
+    rows = []
+    for d in docs:
+        data = d.to_dict()
+        if data.get("end_type") == "time" and data.get("time_minutes") is not None:
+            rows.append(FSRow(data))
     return rows
 
 
@@ -2763,126 +2562,89 @@ def generate_gw_code() -> str:
 
 def create_giveaway(gw_code: str, owner_id: int, chat_id: int, cliche_text: str,
                      cliche_entities, winners_count: int, settings: dict) -> None:
-    conn = db()
-    conn.execute(
-        """
-        INSERT INTO giveaways (
-            gw_code, owner_id, chat_id, cliche_text, cliche_entities, winners_count,
-            boost_required, premium_only, antispam, status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
-        """,
-        (
-            gw_code, owner_id, chat_id, cliche_text, entities_to_json(cliche_entities), winners_count,
-            int(bool(settings.get("gw_boost", False))),
-            int(bool(settings.get("gw_premium", False))),
-            int(bool(settings.get("gw_antispam", False))),
-            datetime.now(timezone.utc).isoformat(),
-        ),
-    )
-    conn.commit()
-    conn.close()
+    fs_db().collection("giveaways").document(gw_code).set({
+        "gw_code": gw_code,
+        "owner_id": owner_id,
+        "chat_id": chat_id,
+        "cliche_text": cliche_text,
+        "cliche_entities": entities_to_json(cliche_entities),
+        "winners_count": winners_count,
+        "boost_required": int(bool(settings.get("gw_boost", False))),
+        "premium_only": int(bool(settings.get("gw_premium", False))),
+        "antispam": int(bool(settings.get("gw_antispam", False))),
+        "channel_message_id": None,
+        "status": "open",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
 
 
 def get_giveaway(gw_code: str):
-    conn = db()
-    row = conn.execute("SELECT * FROM giveaways WHERE gw_code=?", (gw_code,)).fetchone()
-    conn.close()
-    return row
+    doc = fs_db().collection("giveaways").document(gw_code).get()
+    return _fs_row_or_none(doc)
 
 
 def set_giveaway_channel_message(gw_code: str, message_id: int):
-    conn = db()
-    conn.execute(
-        "UPDATE giveaways SET channel_message_id=? WHERE gw_code=?",
-        (message_id, gw_code),
-    )
-    conn.commit()
-    conn.close()
+    fs_db().collection("giveaways").document(gw_code).update({"channel_message_id": message_id})
 
 
 def set_giveaway_status(gw_code: str, status: str):
-    conn = db()
-    conn.execute("UPDATE giveaways SET status=? WHERE gw_code=?", (status, gw_code))
-    conn.commit()
-    conn.close()
+    fs_db().collection("giveaways").document(gw_code).update({"status": status})
 
 
 def count_giveaway_participants(gw_code: str) -> int:
-    conn = db()
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM giveaway_participants WHERE gw_code=?", (gw_code,)
-    ).fetchone()
-    conn.close()
-    return row["c"] if row else 0
+    docs = fs_db().collection("giveaway_participants").where("gw_code", "==", gw_code).stream()
+    return sum(1 for _ in docs)
+
+
+def _giveaway_participant_doc_id(gw_code: str, user_id: int) -> str:
+    return f"{gw_code}_{user_id}"
 
 
 def is_giveaway_participant(gw_code: str, user_id: int) -> bool:
-    conn = db()
-    row = conn.execute(
-        "SELECT 1 FROM giveaway_participants WHERE gw_code=? AND user_id=?", (gw_code, user_id)
-    ).fetchone()
-    conn.close()
-    return row is not None
+    doc = fs_db().collection("giveaway_participants").document(_giveaway_participant_doc_id(gw_code, user_id)).get()
+    return doc.exists
 
 
 def add_giveaway_participant(gw_code: str, user_id: int, display_name: str, username: str = None) -> bool:
     """يضيف مشاركًا جديدًا؛ يُعيد False إن كان مسجّلاً بالفعل."""
-    conn = db()
+    from google.api_core.exceptions import AlreadyExists
+    ref = fs_db().collection("giveaway_participants").document(_giveaway_participant_doc_id(gw_code, user_id))
     try:
-        conn.execute(
-            """
-            INSERT INTO giveaway_participants (gw_code, user_id, display_name, username, joined_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (gw_code, user_id, display_name, username, datetime.now(timezone.utc).isoformat()),
-        )
-        conn.commit()
+        ref.create({
+            "gw_code": gw_code,
+            "user_id": user_id,
+            "display_name": display_name,
+            "username": username,
+            "joined_at": datetime.now(timezone.utc).isoformat(),
+        })
         return True
-    except sqlite3.IntegrityError:
-        conn.rollback()
+    except AlreadyExists:
         return False
-    finally:
-        conn.close()
 
 
 def remove_giveaway_participant(gw_code: str, user_id: int):
-    conn = db()
-    conn.execute(
-        "DELETE FROM giveaway_participants WHERE gw_code=? AND user_id=?", (gw_code, user_id)
-    )
-    conn.commit()
-    conn.close()
+    fs_db().collection("giveaway_participants").document(_giveaway_participant_doc_id(gw_code, user_id)).delete()
 
 
 def get_giveaway_participants(gw_code: str):
-    conn = db()
-    rows = conn.execute(
-        "SELECT user_id, display_name FROM giveaway_participants WHERE gw_code=? ORDER BY joined_at ASC",
-        (gw_code,),
-    ).fetchall()
-    conn.close()
-    return [(r["user_id"], r["display_name"] or str(r["user_id"])) for r in rows]
+    docs = list(fs_db().collection("giveaway_participants").where("gw_code", "==", gw_code).stream())
+    rows = [d.to_dict() for d in docs]
+    rows.sort(key=lambda r: r.get("joined_at") or "")
+    return [(r["user_id"], r.get("display_name") or str(r["user_id"])) for r in rows]
 
 
 def get_giveaways_by_owner(owner_id: int):
     """يعيد كل سحوبات المستخدم (بجميع حالاتها)، الأقدم أولًا، لترقيمها بثبات عبر الصفحات."""
-    conn = db()
-    rows = conn.execute(
-        "SELECT * FROM giveaways WHERE owner_id=? ORDER BY created_at ASC",
-        (owner_id,),
-    ).fetchall()
-    conn.close()
+    docs = fs_db().collection("giveaways").where("owner_id", "==", owner_id).stream()
+    rows = [FSRow(d.to_dict()) for d in docs]
+    rows.sort(key=lambda r: r.get("created_at") or "")
     return rows
 
 
 def count_giveaway_new_rewarded(gw_code: str) -> int:
     """يعيد عدد المشاركين الجدد الذين احتُسبت نقاط لصاحب السحب بسبب مشاركتهم في هذا السحب تحديدًا."""
-    conn = db()
-    row = conn.execute(
-        "SELECT COUNT(*) AS c FROM rewarded_users WHERE first_giveaway_code=?", (gw_code,)
-    ).fetchone()
-    conn.close()
-    return row["c"] if row else 0
+    docs = fs_db().collection("rewarded_users").where("first_giveaway_code", "==", gw_code).stream()
+    return sum(1 for _ in docs)
 
 
 async def bot_chat_status_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3298,58 +3060,51 @@ async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TY
             pass
 
 def join_roulette(user_id: int, roulette_id: int, display_name: str = None):
-    conn = db()
-    try:
-        roulette = conn.execute(
-            "SELECT * FROM roulettes WHERE roulette_id=?", (roulette_id,)
-        ).fetchone()
-        if not roulette:
-            return {"found": False}
+    from google.api_core.exceptions import AlreadyExists
+    client = fs_db()
 
-        target = roulette["target_count"]
-        owner_id = roulette["owner_id"]
-        status = roulette["status"]
+    roulette_doc = client.collection("roulettes").document(str(roulette_id)).get()
+    if not roulette_doc.exists:
+        return {"found": False}
+    roulette = roulette_doc.to_dict()
 
-        existing = conn.execute(
-            "SELECT 1 FROM counted_users WHERE user_id=? AND roulette_id=?",
-            (user_id, roulette_id),
-        ).fetchone()
+    target = roulette["target_count"]
+    owner_id = roulette["owner_id"]
+    status = roulette["status"]
 
-        if existing or status != "open":
-            current = conn.execute(
-                "SELECT COUNT(*) AS c FROM counted_users WHERE roulette_id=?", (roulette_id,)
-            ).fetchone()["c"]
-            return {
-                "found": True, "already": bool(existing), "current": current,
-                "target": target, "owner_id": owner_id, "status": status,
-            }
+    def _current_count():
+        docs = client.collection("counted_users").where("roulette_id", "==", roulette_id).stream()
+        return sum(1 for _ in docs)
 
-        try:
-            conn.execute(
-                "INSERT INTO counted_users (user_id, roulette_id, display_name, counted_at) VALUES (?, ?, ?, ?)",
-                (user_id, roulette_id, display_name, datetime.now(timezone.utc).isoformat()),
-            )
-        except sqlite3.IntegrityError:
-            conn.rollback()
-            current = conn.execute(
-                "SELECT COUNT(*) AS c FROM counted_users WHERE roulette_id=?", (roulette_id,)
-            ).fetchone()["c"]
-            return {
-                "found": True, "already": True, "current": current,
-                "target": target, "owner_id": owner_id, "status": status,
-            }
+    counted_ref = client.collection("counted_users").document(_counted_user_doc_id(user_id, roulette_id))
+    existing = counted_ref.get().exists
 
-        current = conn.execute(
-            "SELECT COUNT(*) AS c FROM counted_users WHERE roulette_id=?", (roulette_id,)
-        ).fetchone()["c"]
-
-        conn.commit()
+    if existing or status != "open":
+        current = _current_count()
         return {
-            "found": True, "already": False, "current": current,
+            "found": True, "already": existing, "current": current,
             "target": target, "owner_id": owner_id, "status": status,
         }
-    finally:
-        conn.close()
+
+    try:
+        counted_ref.create({
+            "user_id": user_id,
+            "roulette_id": roulette_id,
+            "display_name": display_name,
+            "counted_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except AlreadyExists:
+        current = _current_count()
+        return {
+            "found": True, "already": True, "current": current,
+            "target": target, "owner_id": owner_id, "status": status,
+        }
+
+    current = _current_count()
+    return {
+        "found": True, "already": False, "current": current,
+        "target": target, "owner_id": owner_id, "status": status,
+    }
 
 async def handle_contest_join_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, contest_code: str):
     """يُستدعى عند فتح البوت عبر رابط ?start=compjoin_{contest_code} (زر المشاركة في المسابقة)."""
