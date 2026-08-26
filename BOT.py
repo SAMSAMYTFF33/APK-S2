@@ -1562,6 +1562,86 @@ def build_back_to_giveaway_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+# ============================================================
+#                     قسم «سحوباتي» (My Draws)
+# ============================================================
+GW_LIST_PAGE_SIZE = 8  # عدد أزرار السحوبات في كل صفحة (لتفادي تكدّس الأزرار عند كثرتها)
+
+
+def build_my_giveaways_list_message(page: int, total_pages: int) -> tuple:
+    """شاشة «سحوباتي»: تعرض رقم الصفحة الحالية من إجمالي الصفحات."""
+    parts = [
+        ([("🎁", EMOJI["draws_check"]), " سحوباتي"], "bold", None),
+        "\n\n",
+        ([
+            f"كل سحوباتك • صفحة {page}/{total_pages}", "\n",
+            "اختر سحبًا لعرض تفاصيله:",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_my_giveaways_list_keyboard(giveaways, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    """
+    أزرار مرقّمة (زر لكل سحب) مع نقطة ملوّنة تدل على حالته (🟢 نشط / 🔴 متوقف).
+    عند كثرة السحوبات تُقسَّم تلقائيًا إلى صفحات (GW_LIST_PAGE_SIZE في كل صفحة)
+    مع صف تنقّل «السابق / التالي» حتى لا تتكدّس القائمة.
+    """
+    start = (page - 1) * GW_LIST_PAGE_SIZE
+    page_items = giveaways[start:start + GW_LIST_PAGE_SIZE]
+
+    rows = []
+    for offset, gw in enumerate(page_items):
+        index = start + offset + 1
+        dot = "🟢" if gw["status"] == "open" else "🔴"
+        rows.append([InlineKeyboardButton(
+            f"{dot} #{index}", callback_data=f"gwmy_detail:{gw['gw_code']}:{page}",
+        )])
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"gwmy_page:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="gw_noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"gwmy_page:{page + 1}"))
+        rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton(
+        "رجوع", callback_data="back_main_menu",
+        style="danger", **emoji_kwargs("back_section_btn"),
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_my_giveaway_detail_message(giveaway, index: int, channel_title: str,
+                                      participants_total: int, new_rewarded_count: int) -> tuple:
+    """شاشة تفاصيل سحب واحد من «سحوباتي»."""
+    status_line = "🟢 نشط" if giveaway["status"] == "open" else "🔴 متوقف"
+    parts = [
+        ([
+            f"🎁 السحب #{index}",
+            "\n\n",
+            f"👥 عدد المشاركين الكلي : {participants_total}", "\n",
+            f"🏆 عدد الفائزين : {giveaway['winners_count']}", "\n",
+            f"📊 الحالة : {status_line}", "\n",
+            f"✨ مشاركون جدد احتُسبت نقاطهم : {new_rewarded_count}", "\n",
+            f"📢 القناة : {channel_title}",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_my_giveaway_detail_keyboard(page: int) -> InlineKeyboardMarkup:
+    """زر «رجوع» فقط، يعيد المستخدم لنفس صفحة القائمة التي جاء منها."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "رجوع", callback_data=f"gwmy_page:{page}",
+            style="danger", **emoji_kwargs("back_section_btn"),
+        )],
+    ])
+
+
 def build_giveaway_cliche_message() -> tuple:
     parts = [
         ([
@@ -2782,6 +2862,27 @@ def get_giveaway_participants(gw_code: str):
     ).fetchall()
     conn.close()
     return [(r["user_id"], r["display_name"] or str(r["user_id"])) for r in rows]
+
+
+def get_giveaways_by_owner(owner_id: int):
+    """يعيد كل سحوبات المستخدم (بجميع حالاتها)، الأقدم أولًا، لترقيمها بثبات عبر الصفحات."""
+    conn = db()
+    rows = conn.execute(
+        "SELECT * FROM giveaways WHERE owner_id=? ORDER BY created_at ASC",
+        (owner_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def count_giveaway_new_rewarded(gw_code: str) -> int:
+    """يعيد عدد المشاركين الجدد الذين احتُسبت نقاط لصاحب السحب بسبب مشاركتهم في هذا السحب تحديدًا."""
+    conn = db()
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM rewarded_users WHERE first_giveaway_code=?", (gw_code,)
+    ).fetchone()
+    conn.close()
+    return row["c"] if row else 0
 
 
 async def bot_chat_status_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4582,9 +4683,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    replies = {
-        "my_draws": ("🚧", None),
-    }
+    replies = {}
     if query.data in replies:
         emoji_char, emoji_key = replies[query.data]
         text, entities = build_under_development_message(emoji_key=emoji_key, emoji_char=emoji_char)
@@ -5189,6 +5288,70 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ud.pop("awaiting", None)
 
 
+async def show_my_giveaways_list(query, context: ContextTypes.DEFAULT_TYPE, page: int = 1):
+    """يعرض قائمة سحوبات المستخدم (كل الحالات)، مقسّمة إلى صفحات عند الحاجة."""
+    giveaways = get_giveaways_by_owner(query.from_user.id)
+    if not giveaways:
+        text, entities = bold_notice("لا توجد لديك أي سحوبات حتى الآن.")
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                "رجوع", callback_data="back_main_menu",
+                style="danger", **emoji_kwargs("back_section_btn"),
+            )]]),
+        )
+        return
+
+    total_pages = max(1, -(-len(giveaways) // GW_LIST_PAGE_SIZE))  # سقف القسمة بدون استيراد math
+    page = max(1, min(page, total_pages))
+    text, entities = build_my_giveaways_list_message(page, total_pages)
+    await query.edit_message_text(
+        text=text,
+        entities=entities,
+        reply_markup=build_my_giveaways_list_keyboard(giveaways, page, total_pages),
+    )
+
+
+async def gw_my_draws_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج زر «سحوباتي»: عرض قائمة السحوبات، التنقّل بين الصفحات، وعرض تفاصيل كل سحب."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "my_draws":
+        await show_my_giveaways_list(query, context, page=1)
+        return
+
+    if data.startswith("gwmy_page:"):
+        page_str = data.split(":", 1)[1]
+        page = int(page_str) if page_str.isdigit() else 1
+        await show_my_giveaways_list(query, context, page=page)
+        return
+
+    if data.startswith("gwmy_detail:"):
+        _, gw_code, page_str = data.split(":", 2)
+        giveaway = get_giveaway(gw_code)
+        if not giveaway or giveaway["owner_id"] != query.from_user.id:
+            await query.answer("تعذر العثور على هذا السحب.", show_alert=True)
+            return
+        giveaways = get_giveaways_by_owner(query.from_user.id)
+        index = next((i + 1 for i, g in enumerate(giveaways) if g["gw_code"] == gw_code), 0)
+        channel_title = get_chat_title_by_id(giveaway["chat_id"])
+        participants_total = count_giveaway_participants(gw_code)
+        new_rewarded_count = count_giveaway_new_rewarded(gw_code)
+        text, entities = build_my_giveaway_detail_message(
+            giveaway, index, channel_title, participants_total, new_rewarded_count,
+        )
+        page = int(page_str) if page_str.isdigit() else 1
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_my_giveaway_detail_keyboard(page),
+        )
+        return
+
+
 async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """يعالج جميع أزرار قسم إنشاء السحب (Image 1 إلى Image 4)."""
     query = update.callback_query
@@ -5424,6 +5587,10 @@ def main():
                 r"|gw_delc:-?\d+|gw_sel:-?\d+|gw_back_main|gw_toggle_boost|gw_toggle_premium"
                 r"|gw_toggle_antispam|gw_opt_condition|gw_opt_vote|gw_opt_autospin|gw_opt_create"
                 r"|gw_back_to_options)$",
+    ))
+    app.add_handler(CallbackQueryHandler(
+        gw_my_draws_callback,
+        pattern=r"^(my_draws|gwmy_page:\d+|gwmy_detail:)",
     ))
     app.add_handler(CallbackQueryHandler(gw_join_callback, pattern=r"^gw_join:"))
     app.add_handler(CallbackQueryHandler(gw_captcha_callback, pattern=r"^gwcap:"))
