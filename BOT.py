@@ -101,6 +101,16 @@ TOKEN = "8872823199:AAGlOZmzYOb9C3esalQBsWW9I32HkV5BBkI"
 BOT_USERNAME = "NOP3bot"
 ADMIN_IDS = [123456789]
 POINTS_ADMIN_ID = 7638322813
+
+# قائمة معرّفات مالكي البوت — من يظهر له زر «قسم المالك» ويملك صلاحية الوصول
+# لكل الإعدادات الحساسة (قسم ربح + الاشتراك الإجباري). أي معرّف يُضاف هنا
+# يصبح مالكًا كاملاً للبوت بنفس صلاحيات المالك الأساسي.
+OWNER_IDS = [POINTS_ADMIN_ID, 8676850552]
+
+
+def is_owner(user_id: int) -> bool:
+    """يتحقق مما إذا كان المستخدم أحد مالكي البوت (OWNER_IDS)."""
+    return user_id in OWNER_IDS
 DEFAULT_POINTS_TITLE = "🎁 ربح من البوت"
 DEFAULT_POINTS_CONDITIONS = (
     "الربح يكون فقط من قسم «إنشاء سحب».\n"
@@ -110,9 +120,14 @@ TECH_SUPPORT_USERNAME = "y66vlBOT"
 SUPPORT_BOT_STARS_AMOUNT = 5
 
 # قناة الاشتراك الإجباري: يجب أن يكون المستخدم مشتركًا فيها قبل استخدام البوت.
+# هذه القيم تُستخدم فقط كافتراضي أولي عند أول تشغيل — بعدها تُقرأ القيمة الفعلية
+# من قاعدة البيانات (settings) لأن المالك يمكنه تغييرها من «قسم المالك».
 REQUIRED_CHANNEL_USERNAME = "S1A7N"
 REQUIRED_CHANNEL_URL = "https://t.me/S1A7N"
 REQUIRED_CHANNEL_BUTTON_TEXT = "VORTEX  𓏺"
+# عدد المشتركين الافتراضي الذي يتم عنده التغيير التلقائي لقناة الاشتراك الإجباري
+# (قابل للتخصيص من قسم المالك ← اشتراك اجباري ← تخصيص عدد الاشتراكات المطلوبة).
+REQUIRED_CHANNEL_DEFAULT_TARGET = "1000"
 
 # اسم العلامة التجارية الظاهر داخل رسائل البوت.
 # TEXT_LINK يجعل الاسم أزرق وقابلاً للضغط ويفتح القناة مباشرة.
@@ -504,6 +519,44 @@ def build_support_bot_keyboard() -> InlineKeyboardMarkup:
 # ============================================================
 #              الاشتراك الإجباري في القناة
 # ============================================================
+def get_required_channel_username() -> str:
+    """اسم يوزر قناة الاشتراك الإجباري الحالية (بدون @) — قابل للتغيير من قسم المالك."""
+    return (get_setting("required_channel_username") or REQUIRED_CHANNEL_USERNAME).lstrip("@")
+
+
+def get_required_channel_url() -> str:
+    """رابط قناة الاشتراك الإجباري الحالية."""
+    custom_url = get_setting("required_channel_url")
+    if custom_url:
+        return custom_url
+    return f"https://t.me/{get_required_channel_username()}"
+
+
+def get_required_channel_next_username() -> str:
+    """اسم يوزر القناة التالية (بدون @) التي سيتم التحويل إليها تلقائيًا، أو فارغ إن لم تُحدَّد."""
+    return (get_setting("required_channel_next_username") or "").lstrip("@")
+
+
+def get_required_channel_auto_target() -> int:
+    """عدد المشتركين المطلوب للتحويل التلقائي للقناة التالية."""
+    raw = get_setting("required_channel_auto_target") or REQUIRED_CHANNEL_DEFAULT_TARGET
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return int(REQUIRED_CHANNEL_DEFAULT_TARGET)
+
+
+def _normalize_channel_username(raw: str) -> str:
+    """يستخرج اسم اليوزر من نص قد يكون @username أو t.me/username أو مجرد username."""
+    value = (raw or "").strip()
+    for prefix in ("https://t.me/", "http://t.me/", "t.me/", "@"):
+        if value.lower().startswith(prefix):
+            value = value[len(prefix):]
+            break
+    value = value.strip().strip("/")
+    return value
+
+
 def build_subscription_required_message() -> tuple:
     """رسالة تطلب من المستخدم الاشتراك في القناة قبل استخدام البوت."""
     parts = [
@@ -523,7 +576,7 @@ def build_subscription_required_message() -> tuple:
 
 def build_subscription_required_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(REQUIRED_CHANNEL_BUTTON_TEXT, url=REQUIRED_CHANNEL_URL)],
+        [InlineKeyboardButton(REQUIRED_CHANNEL_BUTTON_TEXT, url=get_required_channel_url())],
         [InlineKeyboardButton("تحقق من الاشتراك", callback_data="check_sub_status")],
     ])
 
@@ -546,9 +599,10 @@ async def is_user_subscribed(
         ttl = SUBSCRIPTION_CACHE_TTL if cached["value"] else SUBSCRIPTION_NEGATIVE_CACHE_TTL
         if age < ttl:
             return cached["value"]
+    channel_username = get_required_channel_username()
     try:
         member = await context.bot.get_chat_member(
-            chat_id=f"@{REQUIRED_CHANNEL_USERNAME}", user_id=user_id
+            chat_id=f"@{channel_username}", user_id=user_id
         )
         # restricted مع is_member=True يعني أن المستخدم ما زال مشتركًا،
         # حتى لو كانت صلاحياته في القناة مقيّدة.
@@ -559,11 +613,59 @@ async def is_user_subscribed(
     except Exception:
         logger.exception(
             "تعذّر التحقق من اشتراك المستخدم %s في القناة @%s",
-            user_id, REQUIRED_CHANNEL_USERNAME,
+            user_id, channel_username,
         )
         result = False
     _SUBSCRIPTION_CACHE[user_id] = {"value": result, "ts": time.time()}
     return result
+
+
+async def check_required_channel_auto_switch(context: ContextTypes.DEFAULT_TYPE):
+    """
+    مهمة دورية: تتحقق من عدد مشتركي قناة الاشتراك الإجباري الحالية، وإن وصلت
+    (أو تجاوزت) العدد المطلوب وكانت هناك قناة تالية محددة من المالك، يتم تبديل
+    قناة الاشتراك الإجباري تلقائيًا إليها. إن لم تُحدَّد قناة تالية فلا يحدث أي
+    تغيير أبدًا مهما بلغ عدد المشتركين.
+    """
+    next_username = get_required_channel_next_username()
+    if not next_username:
+        return
+
+    target = get_required_channel_auto_target()
+    current_username = get_required_channel_username()
+    try:
+        count = await context.bot.get_chat_member_count(chat_id=f"@{current_username}")
+    except Exception:
+        logger.exception(
+            "تعذّر جلب عدد مشتركي قناة الاشتراك الإجباري @%s للتحقق من التغيير التلقائي",
+            current_username,
+        )
+        return
+
+    if count < target:
+        return
+
+    set_setting("required_channel_username", next_username)
+    set_setting("required_channel_url", f"https://t.me/{next_username}")
+    set_setting("required_channel_next_username", "")
+    _SUBSCRIPTION_CACHE.clear()
+    logger.info(
+        "تم تغيير قناة الاشتراك الإجباري تلقائيًا من @%s إلى @%s بعد وصول عدد المشتركين إلى %s",
+        current_username, next_username, count,
+    )
+    for owner_id in OWNER_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=owner_id,
+                text=(
+                    f"✅ تم تغيير قناة الاشتراك الإجباري تلقائيًا\n"
+                    f"من: @{current_username}\n"
+                    f"إلى: @{next_username}\n"
+                    f"(بعد وصولها إلى {count} مشترك)"
+                ),
+            )
+        except Exception:
+            pass
 
 
 def build_contest_section_message() -> tuple:
@@ -2058,6 +2160,10 @@ def init_db():
         "points_conditions": DEFAULT_POINTS_CONDITIONS,
         "hide_participants": DEFAULT_HIDE_PARTICIPANTS,
         "game_cliche": DEFAULT_GAME_CLICHE,
+        "required_channel_username": REQUIRED_CHANNEL_USERNAME,
+        "required_channel_url": REQUIRED_CHANNEL_URL,
+        "required_channel_next_username": "",
+        "required_channel_auto_target": REQUIRED_CHANNEL_DEFAULT_TARGET,
     }
     for k, v in defaults.items():
         ref = client.collection("settings").document(k)
@@ -2186,6 +2292,27 @@ def mark_rewarded(user_id: int, roulette_id: int, owner_id: int):
             "first_giveaway_code": None,
             "rewarded_at": datetime.now(timezone.utc).isoformat(),
         })
+
+def register_bot_user_and_check_new(user_id: int) -> bool:
+    """
+    يسجّل أول تواصل لهذا المستخدم مع البوت مهما كان مصدر الدخول (رابط سحب/مسابقة،
+    أو رابط عام، أو بحث عن اسم البوت... إلخ)، ويُستدعى مرة واحدة فقط في بداية
+    /start قبل معالجة أي رابط دخول.
+    يعيد True فقط إذا كانت هذه أول مرة يتواصل فيها المستخدم مع البوت إطلاقًا
+    (مستخدم جديد كليًا) — وFalse إن كان قد استخدم البوت من قبل بأي طريقة،
+    حتى لو لم يشارك في أي سحب سابقًا. تُستخدم هذه القيمة لمنع احتساب نقطة
+    لصاحب السحب عندما يشارك مستخدم "قديم" وليس مستخدمًا جديدًا حقيقيًا.
+    """
+    from google.api_core.exceptions import AlreadyExists
+    ref = fs_db().collection("known_bot_users").document(str(user_id))
+    try:
+        ref.create({
+            "user_id": user_id,
+            "first_seen_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return True
+    except AlreadyExists:
+        return False
 
 def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int) -> bool:
     """يمنح النقاط مرة واحدة عالميًا بعد نجاح مشاركة السحب والكابتشا."""
@@ -2709,16 +2836,12 @@ def build_points_message(user_id: int) -> tuple:
 
 
 def build_points_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    rows = []
-    if user_id == POINTS_ADMIN_ID:
-        rows.append([InlineKeyboardButton(
-            "⚙️ إعدادات", callback_data="points_settings",
-            style="primary", **emoji_kwargs("gear"),
-        )])
-    rows.append([InlineKeyboardButton(
+    # زر «⚙️ إعدادات» انتقل من هنا إلى «قسم المالك ← قسم ربح» — لم يعد يظهر في
+    # هذه الواجهة العامة حتى للمالك نفسه.
+    rows = [[InlineKeyboardButton(
         "🔙 رجوع", callback_data="back_main_menu",
         style="danger", **emoji_kwargs("back_section_btn"),
-    )])
+    )]]
     return InlineKeyboardMarkup(rows)
 
 
@@ -2791,7 +2914,7 @@ def build_points_settings_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💰 قيمة المكافأة", callback_data="points_edit:reward_value", style="primary")],
         [InlineKeyboardButton("📝 نصوص قسم ربح", callback_data="points_text_settings", style="primary")],
         [InlineKeyboardButton("↩️ العودة للوضع الافتراضي", callback_data="points_restore_defaults", style="success")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="my_stats", style="danger")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_points_section", style="danger")],
     ])
 
 
@@ -2817,7 +2940,111 @@ def build_points_text_settings_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def build_main_keyboard(remind_state=None) -> InlineKeyboardMarkup:
+# ============================================================
+#                     قسم المالك (Owner Section)
+# ============================================================
+def build_owner_section_message() -> tuple:
+    return build_text_with_emojis([
+        ([
+            "👑 قسم المالك",
+            "\n\n",
+            (["اختر القسم الذي تريد إدارته من الأزرار أدناه ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_section_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💰 قسم ربح", callback_data="owner_points_section", style="primary")],
+        [InlineKeyboardButton("📢 اشتراك اجباري", callback_data="owner_sub_section", style="primary")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="back_main_menu", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_owner_points_section_message() -> tuple:
+    return build_text_with_emojis([
+        ([
+            "💰 قسم ربح — إدارة المالك",
+            "\n\n",
+            (["من هنا يمكنك التحكم بكل إعدادات قسم الربح (النقاط، المكافآت، النصوص) ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_points_section_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "⚙️ إعدادات", callback_data="points_settings",
+            style="primary", **emoji_kwargs("gear"),
+        )],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_owner_sub_section_message() -> tuple:
+    current = get_required_channel_username()
+    next_username = get_required_channel_next_username()
+    target = get_required_channel_auto_target()
+    next_line = f"@{next_username} (عند {target} مشترك)" if next_username else "غير محددة (لا يوجد تغيير تلقائي)"
+    return build_text_with_emojis([
+        ([
+            "📢 الاشتراك الإجباري — إدارة المالك",
+            "\n\n",
+            ([
+                f"📡 القناة الحالية: @{current}\n",
+                f"🔄 القناة التالية (تلقائي): {next_line}",
+            ], "blockquote", None),
+            "\n\n",
+            (["اختر ما تريد تعديله من الأزرار أدناه ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_sub_section_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ تغيير القناة الحالية", callback_data="owner_sub_change_current", style="primary")],
+        [InlineKeyboardButton("🔄 التغيير التلقائي", callback_data="owner_sub_auto", style="primary")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_owner_sub_auto_message() -> tuple:
+    next_username = get_required_channel_next_username()
+    target = get_required_channel_auto_target()
+    next_line = f"@{next_username}" if next_username else "غير محددة"
+    status_line = (
+        f"سيتم التحويل تلقائيًا إلى @{next_username} عند وصول القناة الحالية إلى {target} مشترك."
+        if next_username else
+        "لن يحدث أي تغيير تلقائي حتى تحدد القناة التالية."
+    )
+    return build_text_with_emojis([
+        ([
+            "🔄 التغيير التلقائي لقناة الاشتراك",
+            "\n\n",
+            ([
+                f"🎯 عدد الاشتراكات المطلوب: {target}\n",
+                f"📢 القناة التالية: {next_line}",
+            ], "blockquote", None),
+            "\n\n",
+            ([status_line, " ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_sub_auto_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎯 تخصيص عدد الاشتراكات المطلوبة", callback_data="owner_sub_edit_target", style="primary")],
+        [InlineKeyboardButton("📢 تحديد القناة التالية", callback_data="owner_sub_edit_next", style="primary")],
+        [InlineKeyboardButton("❌ إلغاء القناة التالية", callback_data="owner_sub_clear_next", style="danger")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_main_keyboard(remind_state=None, user_id: int = None) -> InlineKeyboardMarkup:
     if remind_state is True:
         remind_emoji_key = "remind_on"
         remind_label = "ألغِ التذكير إن فزت"
@@ -2862,6 +3089,11 @@ def build_main_keyboard(remind_state=None) -> InlineKeyboardMarkup:
                                   style="primary", **emoji_kwargs("trophy_contest")),
         ],
     ]
+    if user_id is not None and is_owner(user_id):
+        keyboard.append([InlineKeyboardButton(
+            "👑 قسم المالك", callback_data="owner_section",
+            style="danger", **emoji_kwargs("gear"),
+        )])
     return InlineKeyboardMarkup(keyboard)
 
 def build_quick_roulette_keyboard() -> InlineKeyboardMarkup:
@@ -2965,6 +3197,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # نسجّل أول تواصل لهذا المستخدم مع البوت (مهما كان مصدر الدخول) مرة واحدة فقط.
+    # is_genuinely_new تكون True فقط إذا كانت هذه أول مرة يتواصل فيها المستخدم مع
+    # البوت إطلاقًا — تُستخدم لاحقًا لمنع احتساب نقطة لصاحب السحب إذا كان المستخدم
+    # قد استخدم البوت من قبل (مثلاً دخل عبر رابط عادي) قبل مشاركته في هذا السحب.
+    is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id)
+
     args = context.args
     if args and args[0].startswith("rr_"):
         await handle_roulette_entry(update, context, args[0][len("rr_"):])
@@ -2976,7 +3214,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_contest_vote_entry(update, context, args[0][len("compvote_"):])
         return
     if args and args[0].startswith("gwcap_"):
-        await handle_giveaway_captcha_entry(update, context, args[0][len("gwcap_"):])
+        await handle_giveaway_captcha_entry(
+            update, context, args[0][len("gwcap_"):], is_genuinely_new=is_genuinely_new,
+        )
         return
     if args and args[0].startswith("gwshare_"):
         await handle_giveaway_share_entry(update, context, args[0][len("gwshare_"):])
@@ -2987,7 +3227,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text, entities = build_welcome_message(update.effective_user)
     remind_state = get_remind_win_state(update.effective_user.id)
     await update.message.reply_text(
-        text, entities=entities, reply_markup=build_main_keyboard(remind_state),
+        text, entities=entities,
+        reply_markup=build_main_keyboard(remind_state, update.effective_user.id),
     )
 
 async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3005,7 +3246,8 @@ async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAUL
     text, entities = build_welcome_message(query.from_user)
     remind_state = get_remind_win_state(query.from_user.id)
     await query.edit_message_text(
-        text=text, entities=entities, reply_markup=build_main_keyboard(remind_state),
+        text=text, entities=entities,
+        reply_markup=build_main_keyboard(remind_state, query.from_user.id),
     )
 
 async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_id: str):
@@ -3016,7 +3258,7 @@ async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TY
         text, entities = build_welcome_message(user)
         remind_state = get_remind_win_state(user.id)
         await update.message.reply_text(
-            text, entities=entities, reply_markup=build_main_keyboard(remind_state),
+            text, entities=entities, reply_markup=build_main_keyboard(remind_state, user.id),
         )
         return
 
@@ -3211,7 +3453,9 @@ async def handle_contest_vote_entry(update: Update, context: ContextTypes.DEFAUL
 # ============================================================
 #            روابط دخول خاصة بقسم «السحب» (Giveaway)
 # ============================================================
-async def handle_giveaway_captcha_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, gw_code: str):
+async def handle_giveaway_captcha_entry(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, gw_code: str, is_genuinely_new: bool = False,
+):
     """يُستدعى عند فتح البوت عبر رابط ?start=gwcap_{gw_code} (تحقق منع الرشق قبل المشاركة في السحب)."""
     user = update.effective_user
 
@@ -3239,6 +3483,7 @@ async def handle_giveaway_captcha_entry(update: Update, context: ContextTypes.DE
         "gw_code": gw_code,
         "correct_index": correct_index,
         "created_at": time.time(),
+        "is_genuinely_new": is_genuinely_new,
     }
 
     text, entities = build_vote_captcha_message(correct_emoji)
@@ -3274,17 +3519,19 @@ async def handle_giveaway_remind_entry(update: Update, context: ContextTypes.DEF
 
 
 async def finalize_giveaway_join(context: ContextTypes.DEFAULT_TYPE, gw_code: str, giveaway,
-                                  user, message=None):
+                                  user, message=None, is_genuinely_new: bool = True):
     """يسجّل مشاركة مستخدم في سحب (بعد اجتياز الكابتشا إن لزم)، يحدّث زر المشاركة،
     ويُرسل إشعارًا خاصًا لمنشئ السحب مع زر استبعاد (Image 6)."""
     display_name = user.first_name or user.username or str(user.id)
     added = add_giveaway_participant(gw_code, user.id, display_name, user.username)
     if not added:
         return
-    # الربح مخصص لسحوبات «إنشاء سحب» التي فعّل صاحبها منع الرشق،
-    # ولا يصل هذا الموضع إلا بعد نجاح الكابتشا في مسار gwcap.
+    # الربح مخصص لسحوبات «إنشاء سحب» التي فعّل صاحبها منع الرشق، ولا يصل هذا الموضع
+    # إلا بعد نجاح الكابتشا في مسار gwcap. كذلك لا نمنح نقطة إلا إذا كان المستخدم
+    # جديدًا كليًا على البوت (لم يستخدمه من قبل بأي طريقة، ولو عبر رابط عادي) —
+    # وإلا يمكن لأي "قديم" يعيد المشاركة أن يُحتسب كمستخدم جديد خطأً.
     # INSERT OR IGNORE داخل الدالة يمنع التكرار حتى مع ضغطات متزامنة.
-    if bool(giveaway["antispam"]):
+    if bool(giveaway["antispam"]) and is_genuinely_new:
         reward_giveaway_user(
             user.id, gw_code, giveaway["owner_id"], giveaway["chat_id"]
         )
@@ -3373,6 +3620,7 @@ async def gw_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     gw_code = session["gw_code"]
     giveaway = get_giveaway(gw_code)
+    is_genuinely_new = session.get("is_genuinely_new", False)
     sessions.pop(token, None)
     if not giveaway or giveaway["status"] != "open":
         await query.answer("⚠️ هذا السحب لم يعد متاحاً.", show_alert=True)
@@ -3381,7 +3629,9 @@ async def gw_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
         return
 
-    await finalize_giveaway_join(context, gw_code, giveaway, query.from_user, None)
+    await finalize_giveaway_join(
+        context, gw_code, giveaway, query.from_user, None, is_genuinely_new=is_genuinely_new,
+    )
     await query.answer("✅ تم التحقق وتسجيل مشاركتك بنجاح!", show_alert=True)
 
     text, entities = build_vote_captcha_success_message()
@@ -4256,13 +4506,64 @@ async def handle_setting_input(update: Update, context: ContextTypes.DEFAULT_TYP
     if not field:
         return
     value = update.message.text.strip()
-    if update.effective_user.id != POINTS_ADMIN_ID and field.startswith("points_"):
+    if not is_owner(update.effective_user.id) and (
+        field.startswith("points_") or field.startswith("required_channel_")
+    ):
         context.user_data.pop("awaiting_setting", None)
         return
+
     if field in ("points_per_user", "points_required", "reward_value"):
         if not value.isdigit() or int(value) < 0:
             await update.message.reply_text("⚠️ أرسل رقمًا صحيحًا أكبر من أو يساوي صفر ”")
             return
+
+    if field == "required_channel_username":
+        username = _normalize_channel_username(value)
+        if not username:
+            await update.message.reply_text("⚠️ أرسل اسم يوزر صحيح للقناة (مثال: @channel أو رابط t.me/channel) ”")
+            return
+        set_setting("required_channel_username", username)
+        set_setting("required_channel_url", f"https://t.me/{username}")
+        _SUBSCRIPTION_CACHE.clear()
+        context.user_data.pop("awaiting_setting", None)
+        await update.message.reply_text(
+            f"✅ تم تغيير قناة الاشتراك الإجباري إلى @{username} بنجاح.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_section", style="danger")
+            ]]),
+        )
+        return
+
+    if field == "required_channel_next_username":
+        username = _normalize_channel_username(value)
+        if not username:
+            await update.message.reply_text("⚠️ أرسل اسم يوزر صحيح للقناة (مثال: @channel أو رابط t.me/channel) ”")
+            return
+        set_setting("required_channel_next_username", username)
+        context.user_data.pop("awaiting_setting", None)
+        await update.message.reply_text(
+            f"✅ تم تحديد القناة التالية: @{username}\n"
+            f"سيتم التحويل إليها تلقائيًا عند وصول القناة الحالية إلى {get_required_channel_auto_target()} مشترك.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_auto", style="danger")
+            ]]),
+        )
+        return
+
+    if field == "required_channel_auto_target":
+        if not value.isdigit() or int(value) <= 0:
+            await update.message.reply_text("⚠️ أرسل رقمًا صحيحًا أكبر من صفر ”")
+            return
+        set_setting("required_channel_auto_target", value)
+        context.user_data.pop("awaiting_setting", None)
+        await update.message.reply_text(
+            f"✅ تم تحديد العدد المطلوب: {value} مشترك.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_auto", style="danger")
+            ]]),
+        )
+        return
+
     set_setting(field, value)
     context.user_data.pop("awaiting_setting", None)
 
@@ -4312,8 +4613,107 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
+    # ------------------------------------------------------------
+    #                      قسم المالك
+    # ------------------------------------------------------------
+    if query.data == "owner_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_owner_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_section_keyboard(),
+        )
+        return
+
+    if query.data == "owner_points_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_owner_points_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_points_section_keyboard(),
+        )
+        return
+
+    if query.data == "owner_sub_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_owner_sub_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_section_keyboard(),
+        )
+        return
+
+    if query.data == "owner_sub_change_current":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting_setting"] = "required_channel_username"
+        await query.edit_message_text(
+            "✍️ أرسل الآن يوزر القناة الجديدة للاشتراك الإجباري (مثال: @channel أو رابط t.me/channel) ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_section", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data == "owner_sub_auto":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_owner_sub_auto_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_auto_keyboard(),
+        )
+        return
+
+    if query.data == "owner_sub_edit_target":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting_setting"] = "required_channel_auto_target"
+        await query.edit_message_text(
+            "✍️ أرسل الآن عدد المشتركين المطلوب للتحويل التلقائي (مثال: 1000) ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_auto", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data == "owner_sub_edit_next":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting_setting"] = "required_channel_next_username"
+        await query.edit_message_text(
+            "✍️ أرسل الآن يوزر القناة التالية (مثال: @channel أو رابط t.me/channel) ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_auto", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data == "owner_sub_clear_next":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        set_setting("required_channel_next_username", "")
+        await query.answer("✅ تم إلغاء القناة التالية — لن يحدث تغيير تلقائي.")
+        text, entities = build_owner_sub_auto_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_auto_keyboard(),
+        )
+        return
+
     if query.data == "points_settings":
-        if query.from_user.id != POINTS_ADMIN_ID:
+        if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
             return
         text, entities = build_points_settings_message()
@@ -4324,7 +4724,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if query.data == "points_text_settings":
-        if query.from_user.id != POINTS_ADMIN_ID:
+        if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
             return
         text, entities = build_points_text_settings_message()
@@ -4335,7 +4735,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if query.data == "points_restore_defaults":
-        if query.from_user.id != POINTS_ADMIN_ID:
+        if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
             return
         set_setting("points_title", DEFAULT_POINTS_TITLE)
@@ -4349,7 +4749,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if query.data == "points_toggle":
-        if query.from_user.id != POINTS_ADMIN_ID:
+        if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
             return
         set_setting("points_enabled", "0" if get_setting("points_enabled") == "1" else "1")
@@ -4361,7 +4761,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if query.data.startswith("points_edit:"):
-        if query.from_user.id != POINTS_ADMIN_ID:
+        if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
             return
         field = query.data.split(":", 1)[1]
@@ -4386,7 +4786,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         enabled = toggle_remind_win(query.from_user.id)
         try:
             await query.edit_message_reply_markup(
-                reply_markup=build_main_keyboard(enabled)
+                reply_markup=build_main_keyboard(enabled, query.from_user.id)
             )
         except Exception:
             pass
@@ -4742,7 +5142,7 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text(
             text=text,
             entities=entities,
-            reply_markup=build_main_keyboard(remind_state),
+            reply_markup=build_main_keyboard(remind_state, query.from_user.id),
         )
         return
 
@@ -5179,7 +5579,7 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text(
             text=text,
             entities=entities,
-            reply_markup=build_main_keyboard(remind_state),
+            reply_markup=build_main_keyboard(remind_state, query.from_user.id),
         )
         return
 
@@ -5232,7 +5632,7 @@ async def _go_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         text=text,
         entities=entities,
-        reply_markup=build_main_keyboard(remind_state),
+        reply_markup=build_main_keyboard(remind_state, query.from_user.id),
     )
 
 # ============================================================
@@ -5279,6 +5679,12 @@ def main():
         )
     else:
         logger.info("JobQueue مفعّلة بنجاح.")
+        # فحص دوري كل 10 دقائق لعدد مشتركي قناة الاشتراك الإجباري، لتفعيل التغيير
+        # التلقائي للقناة التالية إن كانت محددة من المالك ووصل عدد المشتركين للهدف.
+        app.job_queue.run_repeating(
+            check_required_channel_auto_switch, interval=600, first=30,
+            name="required_channel_auto_switch",
+        )
 
     app.add_error_handler(_global_error_handler)
 
