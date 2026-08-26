@@ -200,8 +200,8 @@ GIVEAWAYS_CHANNEL_URL = "https://t.me/n_bbo"
 
 # قناة الإعلانات العامة: بعد نشر أي سحب أو مسابقة بنجاح في قناة/جروب المستخدم،
 # يُنشر إعلان إضافي هنا (مع رابط مباشر للمنشور الأصلي) لتوسيع دائرة الانتشار.
-ANNOUNCE_CHANNEL_USERNAME = "TREX9R"
-ANNOUNCE_CHANNEL_URL = "https://t.me/TREX9R"
+ANNOUNCE_CHANNEL_USERNAME = "n_bbo"
+ANNOUNCE_CHANNEL_URL = "https://t.me/n_bbo"
 ANNOUNCE_CHANNEL_CHAT_ID = f"@{ANNOUNCE_CHANNEL_USERNAME}"
 
 # ملاحظة: بيانات الاتصال بقاعدة بيانات Firebase Firestore (FIREBASE_PROJECT_ID،
@@ -3285,6 +3285,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         text, entities=entities,
         reply_markup=build_main_keyboard(remind_state, update.effective_user.id),
+        disable_web_page_preview=True,
     )
 
 async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3304,6 +3305,7 @@ async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAUL
     await query.edit_message_text(
         text=text, entities=entities,
         reply_markup=build_main_keyboard(remind_state, query.from_user.id),
+        disable_web_page_preview=True,
     )
 
 async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_id: str):
@@ -3315,6 +3317,7 @@ async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TY
         remind_state = get_remind_win_state(user.id)
         await update.message.reply_text(
             text, entities=entities, reply_markup=build_main_keyboard(remind_state, user.id),
+            disable_web_page_preview=True,
         )
         return
 
@@ -5199,6 +5202,7 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
             text=text,
             entities=entities,
             reply_markup=build_main_keyboard(remind_state, query.from_user.id),
+            disable_web_page_preview=True,
         )
         return
 
@@ -5636,6 +5640,7 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             text=text,
             entities=entities,
             reply_markup=build_main_keyboard(remind_state, query.from_user.id),
+            disable_web_page_preview=True,
         )
         return
 
@@ -5689,6 +5694,7 @@ async def _go_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=text,
         entities=entities,
         reply_markup=build_main_keyboard(remind_state, query.from_user.id),
+        disable_web_page_preview=True,
     )
 
 # ============================================================
@@ -5705,7 +5711,7 @@ def main():
     # الإعدادات الافتراضية للمكتبة تستخدم اتصال شبكة واحد فقط (connection_pool_size=1)
     # وتعالج التحديثات تباعًا واحدًا تلو الآخر (concurrent_updates=False) — هذا هو السبب
     # الرئيسي لبطء الاتصال: كل ضغطة زر/رسالة تنتظر دورها خلف كل طلب آخر يجري في نفس
-    # اللحظة (حتى الطلبات الخلفية مثل إعلان قناة TREX9R). الإعدادات أدناه تفتح عدة
+    # اللحظة (حتى الطلبات الخلفية مثل إعلان قناة السحوبات). الإعدادات أدناه تفتح عدة
     # اتصالات متوازية وتسمح بمعالجة عدة مستخدمين/أزرار في نفس الوقت بدل التسلسل.
     request = HTTPXRequest(
         connection_pool_size=20,
