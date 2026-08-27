@@ -697,6 +697,70 @@ async def is_user_subscribed(
     return result
 
 
+# كاش منفصل للتحقق من الاشتراك في «قنوات الشرط» الخاصة بكل سحب (تختلف عن قناة
+# الاشتراك الإجباري العامة للبوت). المفتاح: (user_id, chat_ref) حيث chat_ref هو
+# إما "@username" أو معرّف الشات الرقمي (للقنوات الخاصة).
+_GW_CONDITION_SUB_CACHE = {}
+
+
+async def is_user_subscribed_to_chat(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    chat_ref,
+    force_refresh: bool = False,
+) -> bool:
+    """يتحقق من اشتراك المستخدم في أي قناة يتم تمريرها (chat_ref: يوزر بصيغة
+    "@username" أو معرّف الشات الرقمي)، بنفس منطق/كاش is_user_subscribed لكن
+    لقنوات «شرط السحب» الديناميكية بدل قناة الاشتراك الإجباري الثابتة. تُستخدم
+    هذه الدالة للتحقق الداخلي دون تحويل المستخدم لأي بوت آخر."""
+    cache_key = (user_id, str(chat_ref))
+    cached = _GW_CONDITION_SUB_CACHE.get(cache_key)
+    if not force_refresh and cached is not None:
+        age = time.time() - cached["ts"]
+        ttl = SUBSCRIPTION_CACHE_TTL if cached["value"] else SUBSCRIPTION_NEGATIVE_CACHE_TTL
+        if age < ttl:
+            return cached["value"]
+
+    result = False
+    for attempt in range(2):
+        try:
+            member = await context.bot.get_chat_member(chat_id=chat_ref, user_id=user_id)
+            result = (
+                member.status in ("member", "administrator", "creator")
+                or (member.status == "restricted" and bool(getattr(member, "is_member", False)))
+            )
+            break
+        except RetryAfter as exc:
+            if attempt == 0 and exc.retry_after <= 5:
+                await asyncio.sleep(exc.retry_after)
+                continue
+            result = False
+            break
+        except Exception:
+            logger.exception(
+                "تعذّر التحقق من اشتراك المستخدم %s في قناة الشرط %s", user_id, chat_ref,
+            )
+            result = False
+            break
+    _GW_CONDITION_SUB_CACHE[cache_key] = {"value": result, "ts": time.time()}
+    return result
+
+
+async def check_giveaway_condition_channels(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, giveaway,
+) -> bool:
+    """يتحقق من اشتراك المستخدم في جميع قنوات شرط السحب (واحدة أو قناتين).
+    يُعيد True فقط إذا لم توجد قنوات شرط أصلاً، أو كان مشتركًا في جميعها."""
+    channels = giveaway.get("condition_channels") or []
+    for channel in channels:
+        ref = channel.get("ref")
+        if not ref:
+            continue
+        if not await is_user_subscribed_to_chat(context, user_id, ref):
+            return False
+    return True
+
+
 async def _check_bot_can_verify_channel(context: ContextTypes.DEFAULT_TYPE, username: str) -> str:
     """يتحقق من أن البوت نفسه مُضاف كمشرف (Admin) في قناة الاشتراك الإجباري
     الجديدة. هذا شرط ضروري لعمل get_chat_member بشكل صحيح — إن لم يكن البوت
@@ -1941,7 +2005,17 @@ GIVEAWAY_SETTINGS_DEFAULTS = {
     "gw_vote_participant_id": None,
     "gw_vote_participant_code": None,
     "gw_vote_display_name": None,
+    # شرط «قناة شرط»: الاشتراك في قناة أو قناتين محددتين (عامة عبر يوزر، أو
+    # خاصة عبر معرّف الشات) قبل السماح بالمشاركة في السحب — تُملأ بعد
+    # gw_opt_condition. كل عنصر بالقائمة: {"ref": ..., "title": ..., "url": ...}
+    # حيث ref هو "@username" أو معرّف الشات الرقمي (يُستخدم مباشرة مع get_chat_member).
+    "gw_condition_channels": [],
 }
+
+# الحد الأقصى لعدد قنوات الشرط التي يمكن ربطها بسحب واحد.
+GW_CONDITION_CHANNELS_MAX = 2
+# رموز دائرية مرقّمة تُستخدم لعرض كل قناة شرط برقمها ضمن منشور السحب (Image 3).
+GW_CONDITION_CIRCLE_NUMS = ["❶", "❷"]
 
 
 def build_giveaway_settings_message() -> tuple:
@@ -1993,11 +2067,29 @@ def build_giveaway_settings_keyboard(user_data: dict) -> InlineKeyboardMarkup:
         vote_btn = InlineKeyboardButton("تصويت متسابق", callback_data="gw_opt_vote",
                                          style="primary", **emoji_kwargs("gw_vote_icon"))
 
+    # زر «قناة شرط»: إن كانت قناة شرط واحدة أو أكثر مربوطة فعليًا، يتغيّر اسم
+    # الزر ليعرض اسم أول قناة مباشرة، ويُضاف "+1" إن أُضيفت قناة ثانية أيضًا
+    # (بنفس شكل "EARN HIVE +1" في الصورة المرجعية) بدل النص الافتراضي.
+    condition_channels = user_data.get("gw_condition_channels") or []
+    if condition_channels:
+        label = condition_channels[0]["title"]
+        extra = len(condition_channels) - 1
+        if extra > 0:
+            label = f"{label} +{extra}"
+        condition_btn = InlineKeyboardButton(
+            label, callback_data="gw_opt_condition",
+            style="success", **emoji_kwargs("gw_condition_channel"),
+        )
+    else:
+        condition_btn = InlineKeyboardButton(
+            "قناة شرط", callback_data="gw_opt_condition",
+            style="primary", **emoji_kwargs("gw_condition_channel"),
+        )
+
     return InlineKeyboardMarkup([
         [
             toggle_btn("تعزيز القناة", boost, "gw_toggle_boost"),
-            InlineKeyboardButton("قناة شرط", callback_data="gw_opt_condition",
-                                  style="primary", **emoji_kwargs("gw_condition_channel")),
+            condition_btn,
         ],
         [
             toggle_btn("مشتركين المميز", premium, "gw_toggle_premium"),
@@ -2066,6 +2158,143 @@ def build_giveaway_vote_linked_message(participant_code: str) -> tuple:
     return build_text_with_emojis(parts)
 
 
+def build_giveaway_condition_type_message() -> tuple:
+    """شاشة اختيار نوع «قناة الشرط»: عامة أو خاصة (Image 2)."""
+    parts = [
+        ([("📢", EMOJI["gw_condition_channel"]), " قناة الشرط"], "bold", None),
+        "\n\n",
+        "اختر نوع قناة الشرط:",
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_giveaway_condition_type_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🌐 قناة عامة", callback_data="gw_cond_public", style="primary"),
+            InlineKeyboardButton("🔒 قناة خاصة", callback_data="gw_cond_private", style="primary"),
+        ],
+        [InlineKeyboardButton(
+            "رجوع للخيارات", callback_data="gw_back_to_options",
+            style="danger", **emoji_kwargs("back_section_btn"),
+        )],
+    ])
+
+
+def build_giveaway_condition_public_message() -> tuple:
+    """شاشة طلب يوزر القناة العامة (أو قناتين) لجعلها شرط اشتراك للمشاركة (Image 3)."""
+    parts = [
+        ([("📢", EMOJI["gw_condition_channel"]), " قناة الشرط العامة"], "bold", None),
+        "\n\n",
+        "الان ارسل لي يوزر قناة الشرط", "\n",
+        "مثال @YYYLLY",
+        "\n\n",
+        "لا تضف أي نص إضافي مع اليوزر",
+        "\n\n",
+        (["تأكد من إضافة البوت كمشرف في قناة الشرط مع صلاحية إدارة الأعضاء"],
+         "blockquote", None),
+        "\n\n",
+        ([
+            "يمكنك إضافة قناتين كحد أقصى، ويتم إدخال الأسماء بهذا الشكل:", "\n",
+            "@YYYLLY", "\n",
+            "@YY3HH",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_giveaway_condition_public_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "رجوع للخيارات", callback_data="gw_opt_condition",
+            style="danger", **emoji_kwargs("back_section_btn"),
+        )],
+    ])
+
+
+def build_giveaway_condition_private_message(added_count: int = 0) -> tuple:
+    """شاشة طلب توجيه رسالة من القناة الخاصة لجعلها شرط اشتراك للمشاركة.
+    عند added_count == 1 (بعد إضافة أول قناة) تتحول الرسالة لعرض إمكانية إضافة
+    قناة ثانية اختيارية أو إنهاء الآن بقناة واحدة فقط."""
+    if added_count >= 1:
+        parts = [
+            ([("✅", EMOJI["sub_check"]), f" تم إضافة القناة الخاصة رقم {added_count} بنجاح"], "bold", None),
+            "\n\n",
+            "يمكنك إعادة توجيه رسالة من قناة خاصة ثانية (اختياري)، أو الضغط على «إنهاء» للاكتفاء بالقناة الحالية.",
+        ]
+    else:
+        parts = [
+            ([("📢", EMOJI["gw_condition_channel"]), " قناة الشرط الخاصة"], "bold", None),
+            "\n\n",
+            "الان قم بإعادة توجيه أي رسالة من قناتك الخاصة إلى هنا",
+            "\n\n",
+            (["تأكد من إضافة البوت كمشرف في القناة مع صلاحية إدارة الأعضاء، وأن تكون أنت مشرفًا فيها أيضًا"],
+             "blockquote", None),
+            "\n\n",
+            (["يمكنك إضافة قناتين خاصتين كحد أقصى، بتوجيه رسالة من كل قناة على حدة"],
+             "blockquote", None),
+        ]
+    return build_text_with_emojis(parts)
+
+
+def build_giveaway_condition_private_keyboard(added_count: int = 0) -> InlineKeyboardMarkup:
+    if added_count >= 1:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "إنهاء ✅", callback_data="gw_cond_private_done",
+                style="success", **emoji_kwargs("yes_btn"),
+            )],
+            [InlineKeyboardButton(
+                "رجوع للخيارات", callback_data="gw_opt_condition",
+                style="danger", **emoji_kwargs("back_section_btn"),
+            )],
+        ])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "رجوع للخيارات", callback_data="gw_opt_condition",
+            style="danger", **emoji_kwargs("back_section_btn"),
+        )],
+    ])
+
+
+def build_giveaway_condition_error_message() -> tuple:
+    """رسالة الخطأ عند تعذّر التحقق من قناة الشرط المُدخلة."""
+    parts = [
+        (["❌ تعذّر العثور على القناة أو أن البوت ليس مشرفًا فيها!"], "bold", None),
+        "\n\n",
+        "تأكد من اليوزر وأن البوت مضاف كمشرف بصلاحية إدارة الأعضاء، ثم حاول مجدداً.",
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_giveaway_condition_max_error_message() -> tuple:
+    """رسالة الخطأ عند إرسال أكثر من قناتين لشرط السحب."""
+    parts = [
+        (["❌ يمكنك إضافة قناتين كحد أقصى!"], "bold", None),
+        "\n\n",
+        "أرسل يوزر قناة واحدة أو قناتين فقط (كل يوزر في سطر منفصل).",
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_giveaway_condition_linked_message(channel_titles) -> tuple:
+    """رسالة تأكيد ربط قناة/قنوات الشرط بنجاح (Image 4)."""
+    titles_line = "\n".join(channel_titles) if isinstance(channel_titles, (list, tuple)) else str(channel_titles)
+    parts = [
+        (["✅ تم اضافة قناة الشرط بنجاح"], "bold", None),
+        f"\n{titles_line}",
+        "\n\n",
+        "كل مشارك سيتحقق من اشتراكه في القناة قبل المشاركة في السحب.",
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_giveaway_condition_subscribe_alert() -> str:
+    """نص التنبيه الداخلي (show_alert) الذي يظهر عند محاولة المشاركة دون اشتراك في
+    قناة/قنوات الشرط (Image 2 — نص عام دون ذكر اسم قناة محددة)."""
+    return "❌ يجب عليك الاشتراك في قناة الشرط اولاً"
+
+
 def build_giveaway_winners_message() -> tuple:
     parts = [
         ([
@@ -2098,13 +2327,31 @@ def build_giveaway_vote_condition_link(vote_contest_code: str, vote_participant_
     return f"https://t.me/{BOT_USERNAME}?start=compvote_{vote_contest_code}_{vote_participant_id}"
 
 
-def build_giveaway_channel_message(cliche_text: str, cliche_entities, vote_link: str = None) -> tuple:
+def build_giveaway_channel_message(cliche_text: str, cliche_entities, vote_link: str = None,
+                                    condition_channels=None) -> tuple:
     """منشور السحب الذي يُنشر في القناة/القروب (Image 5).
 
     إذا كان السحب مشروطًا بالتصويت لمتسابق (vote_link)، يُضاف أعلى تذييل العلامة
     التجارية اقتباس مزخرف «شرط تصويت» تحمل فيه كلمة «هنا» رابطًا مخفيًا يفتح
-    نفس مسار التصويت للمتسابق مباشرة عبر البوت (Image 6)."""
+    نفس مسار التصويت للمتسابق مباشرة عبر البوت (Image 6).
+
+    وإذا كان السحب مشروطًا بالاشتراك في قناة شرط واحدة أو قناتين (condition_channels:
+    قائمة عناصر {"title", "url"})، يُضاف اقتباس «الشرط» يحتوي سطرًا مرقّمًا
+    (❶ / ❷) لكل قناة، تحمل كلمة «هنا» فيه رابط تلك القناة تحديدًا (Image 3)."""
     extra_parts = []
+    condition_channels = condition_channels or []
+    if condition_channels:
+        quote_content = ["• الشرط ", ("⬇️", EMOJI["arrow_down"])]
+        for idx, channel in enumerate(condition_channels[:GW_CONDITION_CHANNELS_MAX]):
+            circle = GW_CONDITION_CIRCLE_NUMS[idx] if idx < len(GW_CONDITION_CIRCLE_NUMS) else f"{idx + 1}."
+            link = channel.get("url") or f"https://t.me/{str(channel.get('ref', '')).lstrip('@')}"
+            quote_content += [
+                "\n", f"{circle} ",
+                (["الإشتراك"], "bold", None),
+                " ›› ",
+                (["هـــنـــا"], "link", link),
+            ]
+        extra_parts += ["\n\n", (quote_content, "blockquote", None)]
     if vote_link:
         quote_content = [
             "شرط تصويت", "\n\n",
@@ -2113,7 +2360,7 @@ def build_giveaway_channel_message(cliche_text: str, cliche_entities, vote_link:
             " ›› ",
             (["هـــنـــا"], "link", vote_link),
         ]
-        extra_parts = ["\n\n", (quote_content, "blockquote", None)]
+        extra_parts += ["\n\n", (quote_content, "blockquote", None)]
 
     extra_text, extra_entities = build_text_with_emojis(extra_parts) if extra_parts else ("", [])
     footer_text, footer_entities = build_brand_footer()
@@ -2922,6 +3169,7 @@ def create_giveaway(gw_code: str, owner_id: int, chat_id: int, cliche_text: str,
         "vote_participant_id": settings.get("gw_vote_participant_id"),
         "vote_participant_code": settings.get("gw_vote_participant_code"),
         "vote_display_name": settings.get("gw_vote_display_name"),
+        "condition_channels": settings.get("gw_condition_channels") or [],
         "channel_message_id": None,
         "status": "open",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -3806,6 +4054,10 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
         return
 
+    if not await check_giveaway_condition_channels(context, user.id, giveaway):
+        await query.answer(build_giveaway_condition_subscribe_alert(), show_alert=True)
+        return
+
     vote_contest_code = giveaway.get("vote_contest_code")
     vote_participant_id = giveaway.get("vote_participant_id")
     vote_required = bool(vote_contest_code and vote_participant_id)
@@ -3865,6 +4117,10 @@ async def gw_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if is_giveaway_participant(gw_code, query.from_user.id):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
+        return
+
+    if not await check_giveaway_condition_channels(context, query.from_user.id, giveaway):
+        await query.answer(build_giveaway_condition_subscribe_alert(), show_alert=True)
         return
 
     vote_contest_code = giveaway.get("vote_contest_code")
@@ -3942,8 +4198,9 @@ async def gw_repost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         build_giveaway_vote_condition_link(vote_contest_code, vote_participant_id)
         if vote_contest_code and vote_participant_id else None
     )
+    condition_channels = giveaway.get("condition_channels") or []
     post_text, post_entities = build_giveaway_channel_message(
-        giveaway["cliche_text"], cliche_entities, vote_link=vote_link,
+        giveaway["cliche_text"], cliche_entities, vote_link=vote_link, condition_channels=condition_channels,
     )
     post_keyboard = build_giveaway_channel_keyboard(
         gw_code, total, antispam=bool(giveaway["antispam"]), status=giveaway["status"],
@@ -5170,6 +5427,66 @@ async def channel_forward_handler(update: Update, context: ContextTypes.DEFAULT_
         await delete_forwarded_message()
         return
 
+    # مسار «قناة شرط خاصة» لإنشاء السحب: بدل تسجيل القناة كقناة عادية للنشر
+    # فيها، نربطها كشرط اشتراك إجباري لهذا السحب فقط (لا نحوّل المستخدم لأي
+    # بوت آخر — التحقق يتم داخليًا لاحقًا عبر is_user_subscribed_to_chat).
+    # يمكن تكرار هذا المسار مرتين لإضافة قناتين خاصتين كحد أقصى (Image 2/3).
+    if context.user_data.get("awaiting") == "gw_condition_channel_private":
+        pending = context.user_data.setdefault("gw_condition_channels_pending", [])
+        if any(str(c.get("ref")) == str(origin_chat.id) for c in pending):
+            _bt, _be = bold_notice("⚠️ هذه القناة مضافة بالفعل كشرط.")
+            await message.reply_text(text=_bt, entities=_be)
+            await delete_forwarded_message()
+            return
+        if len(pending) >= GW_CONDITION_CHANNELS_MAX:
+            _bt, _be = bold_notice("❌ يمكنك إضافة قناتين كحد أقصى!")
+            await message.reply_text(text=_bt, entities=_be)
+            await delete_forwarded_message()
+            return
+
+        chat_title = origin_chat.title or str(origin_chat.id)
+        invite_url = None
+        try:
+            invite_link = await context.bot.create_chat_invite_link(origin_chat.id)
+            invite_url = invite_link.invite_link
+        except Exception:
+            try:
+                invite_url = await context.bot.export_chat_invite_link(origin_chat.id)
+            except Exception:
+                invite_url = None
+
+        pending.append({"ref": origin_chat.id, "title": chat_title, "url": invite_url})
+
+        if len(pending) >= GW_CONDITION_CHANNELS_MAX:
+            # اكتمل الحد الأقصى (قناتان) — نُنهي المسار تلقائيًا.
+            context.user_data["gw_condition_channels"] = pending
+            context.user_data.pop("gw_condition_channels_pending", None)
+            context.user_data.pop("awaiting", None)
+            for key, default in GIVEAWAY_SETTINGS_DEFAULTS.items():
+                context.user_data.setdefault(key, default)
+
+            confirm_text, confirm_entities = build_giveaway_condition_linked_message(
+                [c["title"] for c in pending],
+            )
+            await message.reply_text(text=confirm_text, entities=confirm_entities)
+
+            settings_text, settings_entities = build_giveaway_settings_message()
+            await message.reply_text(
+                text=settings_text,
+                entities=settings_entities,
+                reply_markup=build_giveaway_settings_keyboard(context.user_data),
+            )
+        else:
+            # قناة أولى فقط حتى الآن — نمنح خيار إضافة قناة ثانية أو الإنهاء.
+            text, entities = build_giveaway_condition_private_message(added_count=len(pending))
+            await message.reply_text(
+                text=text,
+                entities=entities,
+                reply_markup=build_giveaway_condition_private_keyboard(added_count=len(pending)),
+            )
+        await delete_forwarded_message()
+        return
+
     chat_title = origin_chat.title or (f"@{origin_chat.username}" if origin_chat.username else str(origin_chat.id))
     save_registered_chat(
         chat_id=origin_chat.id,
@@ -5318,6 +5635,71 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.setdefault(key, default)
 
         confirm_text, confirm_entities = build_giveaway_vote_linked_message(raw_code)
+        await update.message.reply_text(text=confirm_text, entities=confirm_entities)
+
+        settings_text, settings_entities = build_giveaway_settings_message()
+        await update.message.reply_text(
+            text=settings_text,
+            entities=settings_entities,
+            reply_markup=build_giveaway_settings_keyboard(context.user_data),
+        )
+        return
+
+    if awaiting == "gw_condition_channel_public":
+        raw_lines = [
+            line.strip() for line in (update.message.text or "").splitlines() if line.strip()
+        ]
+        if not raw_lines:
+            text, entities = build_giveaway_condition_error_message()
+            await update.message.reply_text(
+                text=text, entities=entities, reply_markup=build_giveaway_condition_public_keyboard(),
+            )
+            return
+        if len(raw_lines) > GW_CONDITION_CHANNELS_MAX:
+            text, entities = build_giveaway_condition_max_error_message()
+            await update.message.reply_text(
+                text=text, entities=entities, reply_markup=build_giveaway_condition_public_keyboard(),
+            )
+            return
+
+        resolved = []
+        for raw in raw_lines:
+            username = _normalize_channel_username(raw)
+            if not username or " " in username:
+                resolved = None
+                break
+            try:
+                chat = await context.bot.get_chat(f"@{username}")
+                bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
+                if bot_member.status not in ("administrator", "creator"):
+                    resolved = None
+                    break
+            except Exception:
+                resolved = None
+                break
+            resolved.append({
+                "ref": f"@{username}",
+                "title": chat.title or f"@{username}",
+                "url": f"https://t.me/{username}",
+            })
+
+        if resolved is None or not resolved:
+            text, entities = build_giveaway_condition_error_message()
+            await update.message.reply_text(
+                text=text,
+                entities=entities,
+                reply_markup=build_giveaway_condition_public_keyboard(),
+            )
+            return
+
+        context.user_data["gw_condition_channels"] = resolved
+        context.user_data.pop("awaiting", None)
+        for key, default in GIVEAWAY_SETTINGS_DEFAULTS.items():
+            context.user_data.setdefault(key, default)
+
+        confirm_text, confirm_entities = build_giveaway_condition_linked_message(
+            [c["title"] for c in resolved],
+        )
         await update.message.reply_text(text=confirm_text, entities=confirm_entities)
 
         settings_text, settings_entities = build_giveaway_settings_message()
@@ -5708,7 +6090,10 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
         build_giveaway_vote_condition_link(vote_contest_code, vote_participant_id)
         if vote_contest_code and vote_participant_id else None
     )
-    post_text, post_entities = build_giveaway_channel_message(cliche_text, cliche_entities, vote_link=vote_link)
+    condition_channels = settings.get("gw_condition_channels") or []
+    post_text, post_entities = build_giveaway_channel_message(
+        cliche_text, cliche_entities, vote_link=vote_link, condition_channels=condition_channels,
+    )
     post_keyboard = build_giveaway_channel_keyboard(gw_code, 0, antispam=bool(settings.get("gw_antispam", False)))
     try:
         sent = await context.bot.send_message(
@@ -5905,9 +6290,61 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    if data in ("gw_opt_condition", "gw_opt_autospin"):
-        # قناة الشرط / السحب التلقائي: قيد التطوير حاليًا.
+    if data == "gw_opt_autospin":
+        # السحب التلقائي: قيد التطوير حاليًا.
         await query.answer("🚧 جاري تجهيز هذه الميزة قريبًا.", show_alert=True)
+        return
+
+    if data == "gw_opt_condition":
+        # «قناة شرط»: نعرض أولاً قائمة اختيار نوع القناة (عامة/خاصة) — Image 2.
+        context.user_data.pop("awaiting", None)
+        context.user_data.pop("gw_condition_channels_pending", None)
+        text, entities = build_giveaway_condition_type_message()
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_condition_type_keyboard(),
+        )
+        return
+
+    if data == "gw_cond_public":
+        context.user_data["awaiting"] = "gw_condition_channel_public"
+        text, entities = build_giveaway_condition_public_message()
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_condition_public_keyboard(),
+        )
+        return
+
+    if data == "gw_cond_private":
+        context.user_data["awaiting"] = "gw_condition_channel_private"
+        context.user_data["gw_condition_channels_pending"] = []
+        text, entities = build_giveaway_condition_private_message()
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_condition_private_keyboard(),
+        )
+        return
+
+    if data == "gw_cond_private_done":
+        # إنهاء إضافة قنوات الشرط الخاصة بقناة واحدة فقط (بدون إضافة الثانية).
+        pending = context.user_data.get("gw_condition_channels_pending") or []
+        if not pending:
+            await query.answer("⚠️ لم تُضِف أي قناة بعد.", show_alert=True)
+            return
+        context.user_data["gw_condition_channels"] = pending
+        context.user_data.pop("gw_condition_channels_pending", None)
+        context.user_data.pop("awaiting", None)
+        for key, default in GIVEAWAY_SETTINGS_DEFAULTS.items():
+            context.user_data.setdefault(key, default)
+        text, entities = build_giveaway_settings_message()
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_settings_keyboard(context.user_data),
+        )
         return
 
     if data == "gw_opt_create":
@@ -5922,6 +6359,7 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data == "gw_back_to_options":
         context.user_data.pop("awaiting", None)
+        context.user_data.pop("gw_condition_channels_pending", None)
         for key, default in GIVEAWAY_SETTINGS_DEFAULTS.items():
             context.user_data.setdefault(key, default)
         text, entities = build_giveaway_settings_message()
@@ -6047,7 +6485,8 @@ def main():
         gw_section_callback,
         pattern=r"^(create_draw|gw_start_create|gw_reg_channel|gw_reg_group|gw_del_channels|gw_noop"
                 r"|gw_delc:-?\d+|gw_sel:-?\d+|gw_back_main|gw_toggle_boost|gw_toggle_premium"
-                r"|gw_toggle_antispam|gw_opt_condition|gw_opt_vote|gw_opt_autospin|gw_opt_create"
+                r"|gw_toggle_antispam|gw_opt_condition|gw_cond_public|gw_cond_private|gw_cond_private_done"
+                r"|gw_opt_vote|gw_opt_autospin|gw_opt_create"
                 r"|gw_back_to_options)$",
     ))
     app.add_handler(CallbackQueryHandler(
