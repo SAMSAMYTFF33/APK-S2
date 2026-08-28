@@ -13,6 +13,28 @@ def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
 
 
+async def global_ban_gate(update: "Update", context) -> None:
+    """بوابة عامة تمنع أي مستخدم محظور (من قسم إدارة المستخدمين) من استخدام
+    البوت إطلاقًا — تعمل على كل الرسائل والأزرار قبل وصولها لأي معالج آخر."""
+    user = update.effective_user
+    if not user or is_owner(user.id):
+        return
+    try:
+        banned = is_user_banned(user.id)
+    except Exception:
+        return
+    if not banned:
+        return
+    try:
+        if update.callback_query:
+            await update.callback_query.answer("🚫 تم حظرك من استخدام هذا البوت.", show_alert=True)
+        elif update.message:
+            await update.message.reply_text("🚫 تم حظرك من استخدام هذا البوت.")
+    except Exception:
+        pass
+    raise ApplicationHandlerStop
+
+
 REQUIRED_CHANNEL_USERNAME = "w33lv"
 REQUIRED_CHANNEL_URL = "https://t.me/w33lv"
 REQUIRED_CHANNEL_BUTTON_TEXT = "VORTEX  𓏺"
@@ -131,6 +153,7 @@ from telegram.ext import (
     ChatMemberHandler,
     ContextTypes,
     PreCheckoutQueryHandler,
+    ApplicationHandlerStop,
     filters,
 )
 from telegram.request import HTTPXRequest
@@ -3236,7 +3259,7 @@ def get_top_channel_points(limit: int = 5):
 
 
 
-def register_bot_user_and_check_new(user_id: int) -> bool:
+def register_bot_user_and_check_new(user) -> bool:
     """
     يسجّل أول تواصل لهذا المستخدم مع البوت مهما كان مصدر الدخول (رابط سحب/مسابقة،
     أو رابط عام، أو بحث عن اسم البوت... إلخ)، ويُستدعى مرة واحدة فقط في بداية
@@ -3245,17 +3268,95 @@ def register_bot_user_and_check_new(user_id: int) -> bool:
     (مستخدم جديد كليًا) — وFalse إن كان قد استخدم البوت من قبل بأي طريقة،
     حتى لو لم يشارك في أي سحب سابقًا. تُستخدم هذه القيمة لمنع احتساب نقطة
     لصاحب السحب عندما يشارك مستخدم "قديم" وليس مستخدمًا جديدًا حقيقيًا.
+
+    يقبل كائن المستخدم الكامل (telegram.User) بدل الـ ID فقط، حتى يحفظ/يحدّث
+    اليوزر والاسم في كل مرة — وهو ما يُستخدم لاحقًا في «إدارة المستخدمين»
+    من قسم المالك (البحث بالـ ID أو باليوزر، عرض البيانات، الحظر...).
     """
     from google.api_core.exceptions import AlreadyExists
+    user_id = user.id
+    now_iso = datetime.now(timezone.utc).isoformat()
     ref = fs_db().collection("known_bot_users").document(str(user_id))
+    username = (getattr(user, "username", None) or "").lstrip("@").lower() or None
+    seen_payload = {
+        "user_id": user_id,
+        "username": username,
+        "first_name": getattr(user, "first_name", None),
+        "last_name": getattr(user, "last_name", None),
+        "last_seen_at": now_iso,
+    }
     try:
         ref.create({
-            "user_id": user_id,
-            "first_seen_at": datetime.now(timezone.utc).isoformat(),
+            **seen_payload,
+            "first_seen_at": now_iso,
+            "banned": False,
+            "banned_at": None,
         })
         return True
     except AlreadyExists:
+        try:
+            ref.set(seen_payload, merge=True)
+        except Exception:
+            pass
         return False
+
+
+def is_user_banned(user_id: int) -> bool:
+    """يتحقق مما إذا كان المستخدم محظورًا من استخدام البوت (قسم إدارة المستخدمين)."""
+    doc = fs_db().collection("known_bot_users").document(str(user_id)).get()
+    if not doc.exists:
+        return False
+    return bool(doc.to_dict().get("banned"))
+
+
+def get_known_user(user_id: int):
+    doc = fs_db().collection("known_bot_users").document(str(user_id)).get()
+    return _fs_row_or_none(doc)
+
+
+def resolve_known_user(query_text: str):
+    """يبحث عن مستخدم مسجّل سابقًا في البوت عبر الـ ID الرقمي أو اليوزر (@username)."""
+    query_text = (query_text or "").strip()
+    if not query_text:
+        return None
+    if query_text.lstrip("@").isdigit():
+        return get_known_user(int(query_text.lstrip("@")))
+    username = query_text.lstrip("@").lower()
+    docs = list(
+        fs_db().collection("known_bot_users").where("username", "==", username).limit(1).stream()
+    )
+    if not docs:
+        return None
+    return FSRow(docs[0].to_dict())
+
+
+def set_user_banned(user_id: int, banned: bool) -> None:
+    ref = fs_db().collection("known_bot_users").document(str(user_id))
+    ref.set({
+        "banned": banned,
+        "banned_at": datetime.now(timezone.utc).isoformat() if banned else None,
+    }, merge=True)
+
+
+def count_known_users() -> tuple:
+    """يعيد (إجمالي المستخدمين، عدد المحظورين) عبر عدّ مستندات known_bot_users."""
+    docs = fs_db().collection("known_bot_users").stream()
+    total = 0
+    banned = 0
+    for d in docs:
+        total += 1
+        if (d.to_dict() or {}).get("banned"):
+            banned += 1
+    return total, banned
+
+
+def get_banned_users_list(limit: int = 50):
+    docs = list(
+        fs_db().collection("known_bot_users").where("banned", "==", True).limit(limit).stream()
+    )
+    rows = [FSRow(d.to_dict()) for d in docs]
+    rows.sort(key=lambda r: r.get("banned_at") or "", reverse=True)
+    return rows
 
 def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int) -> bool:
     """يمنح النقاط مرة واحدة عالميًا بعد نجاح مشاركة السحب والكابتشا."""
@@ -4141,7 +4242,132 @@ def build_owner_section_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💰 قسم ربح", callback_data="owner_points_section", style="primary")],
         [InlineKeyboardButton("📢 اشتراك اجباري", callback_data="owner_sub_section", style="primary")],
+        [InlineKeyboardButton("👥 إدارة المستخدمين", callback_data="user_mgmt_section", style="primary")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="back_main_menu", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_user_mgmt_section_message() -> tuple:
+    return build_text_with_emojis([
+        ([
+            "👥 إدارة المستخدمين",
+            "\n\n",
+            (["من هنا يمكنك البحث عن أي مستخدم، عرض بياناته، حظره أو فك حظره ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_user_mgmt_section_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔎 البحث عن مستخدم", callback_data="user_mgmt_search", style="primary")],
+        [InlineKeyboardButton("👤 عرض بيانات مستخدم", callback_data="user_mgmt_view_prompt", style="primary")],
+        [InlineKeyboardButton("🚫 حظر مستخدم", callback_data="user_mgmt_ban_prompt", style="danger")],
+        [InlineKeyboardButton("✅ فك حظر مستخدم", callback_data="user_mgmt_unban_prompt", style="success")],
+        [InlineKeyboardButton("📋 قائمة المحظورين", callback_data="user_mgmt_banned_list", style="primary")],
+        [InlineKeyboardButton("📊 إحصائيات المستخدم", callback_data="user_mgmt_stats", style="primary")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def _user_mgmt_display_name(row) -> str:
+    first = (row.get("first_name") or "").strip()
+    last = (row.get("last_name") or "").strip()
+    name = (first + " " + last).strip()
+    return name or str(row.get("user_id"))
+
+
+def build_user_mgmt_profile_message(row) -> tuple:
+    user_id = row.get("user_id")
+    username = row.get("username")
+    username_line = f"@{username}" if username else "لا يوجد"
+    banned = bool(row.get("banned"))
+    status_line = "🚫 محظور" if banned else "✅ غير محظور"
+    points = get_points(user_id)
+    first_seen = row.get("first_seen_at") or "غير معروف"
+    last_seen = row.get("last_seen_at") or "غير معروف"
+    return build_text_with_emojis([
+        ([
+            "👤 بيانات المستخدم",
+            "\n\n",
+            ([
+                f"🆔 المعرف: {user_id}\n",
+                f"📛 الاسم: {_user_mgmt_display_name(row)}\n",
+                f"🔗 اليوزر: {username_line}\n",
+                f"📌 الحالة: {status_line}\n",
+                f"💎 عدد النقاط: {points}\n",
+                f"🕐 أول تواصل: {first_seen}\n",
+                f"🕓 آخر تواصل: {last_seen}",
+            ], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_user_mgmt_profile_keyboard(row) -> InlineKeyboardMarkup:
+    user_id = row.get("user_id")
+    banned = bool(row.get("banned"))
+    action_row = (
+        [InlineKeyboardButton("✅ فك الحظر", callback_data=f"user_mgmt_unban:{user_id}", style="success")]
+        if banned else
+        [InlineKeyboardButton("🚫 حظر", callback_data=f"user_mgmt_ban:{user_id}", style="danger")]
+    )
+    return InlineKeyboardMarkup([
+        action_row,
+        [InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_user_mgmt_banned_list_message(rows) -> tuple:
+    if not rows:
+        body = ["لا يوجد أي مستخدم محظور حاليًا ”"]
+    else:
+        lines = []
+        for r in rows:
+            username = r.get("username")
+            uname_part = f"@{username}" if username else _user_mgmt_display_name(r)
+            lines.append(f"• {uname_part} (ID: {r.get('user_id')})")
+        body = ["\n".join(lines)]
+    return build_text_with_emojis([
+        (["📋 قائمة المحظورين", "\n\n"], "bold", None),
+        (body, "blockquote", None),
+    ])
+
+
+def build_user_mgmt_banned_list_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_user_mgmt_stats_message() -> tuple:
+    total, banned = count_known_users()
+    active = max(total - banned, 0)
+    return build_text_with_emojis([
+        ([
+            "📊 إحصائيات المستخدمين",
+            "\n\n",
+            ([
+                f"👥 إجمالي المستخدمين: {total}\n",
+                f"🚫 عدد المحظورين: {banned}\n",
+                f"✅ عدد غير المحظورين: {active}",
+            ], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_user_mgmt_stats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_user_mgmt_not_found_keyboard(back_to: str = "user_mgmt_section") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 رجوع", callback_data=back_to, style="danger",
                               **emoji_kwargs("back_section_btn"))],
     ])
 
@@ -4426,7 +4652,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # مباشرة (VORTEX + قناة استضافة السحب معًا في شاشة واحدة) بدل بوابة
         # VORTEX العامة أدناه، حتى لا يمر المستخدم بخطوتين متتاليتين لإتمام
         # نفس الشرط عند فتح البوت عبر زر «اضغط لـ المشاركة».
-        is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id)
+        is_genuinely_new = register_bot_user_and_check_new(update.effective_user)
         await handle_giveaway_join_entry(
             update, context, args[0][len("gwjoin_"):], is_genuinely_new=is_genuinely_new,
         )
@@ -4446,7 +4672,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id)
+    is_genuinely_new = register_bot_user_and_check_new(update.effective_user)
 
     args = context.args
     if args and await _dispatch_start_arg(update, context, args[0], is_genuinely_new):
@@ -4477,7 +4703,7 @@ async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAUL
 
     pending_arg = context.user_data.pop("pending_start_arg", None)
     if pending_arg:
-        is_genuinely_new = register_bot_user_and_check_new(query.from_user.id)
+        is_genuinely_new = register_bot_user_and_check_new(query.from_user)
         shim_update = SimpleNamespace(
             effective_user=query.from_user,
             message=_ReplyOnlyMessageShim(context.bot, query.from_user.id),
@@ -6397,8 +6623,69 @@ async def handle_setting_input(update: Update, context: ContextTypes.DEFAULT_TYP
     value = update.message.text.strip()
     if not is_owner(update.effective_user.id) and (
         field.startswith("points_") or field.startswith("required_channel_")
+        or field.startswith("user_mgmt_")
     ):
         context.user_data.pop("awaiting_setting", None)
+        return
+
+    if field == "user_mgmt_lookup":
+        context.user_data.pop("awaiting_setting", None)
+        row = resolve_known_user(value)
+        if not row:
+            await update.message.reply_text(
+                "⚠️ لم يتم العثور على أي مستخدم بهذا المعرف أو اليوزر.",
+                reply_markup=build_user_mgmt_not_found_keyboard(),
+            )
+            return
+        text, entities = build_user_mgmt_profile_message(row)
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_user_mgmt_profile_keyboard(row),
+        )
+        return
+
+    if field == "user_mgmt_ban_query":
+        context.user_data.pop("awaiting_setting", None)
+        row = resolve_known_user(value)
+        if not row:
+            await update.message.reply_text(
+                "⚠️ لم يتم العثور على أي مستخدم بهذا المعرف أو اليوزر.",
+                reply_markup=build_user_mgmt_not_found_keyboard(),
+            )
+            return
+        if row.get("user_id") in OWNER_IDS:
+            await update.message.reply_text(
+                "⛔ لا يمكن حظر مالك البوت.",
+                reply_markup=build_user_mgmt_not_found_keyboard(),
+            )
+            return
+        set_user_banned(row.get("user_id"), True)
+        row["banned"] = True
+        await update.message.reply_text("✅ تم حظر المستخدم بنجاح.")
+        text, entities = build_user_mgmt_profile_message(row)
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_user_mgmt_profile_keyboard(row),
+        )
+        return
+
+    if field == "user_mgmt_unban_query":
+        context.user_data.pop("awaiting_setting", None)
+        row = resolve_known_user(value)
+        if not row:
+            await update.message.reply_text(
+                "⚠️ لم يتم العثور على أي مستخدم بهذا المعرف أو اليوزر.",
+                reply_markup=build_user_mgmt_not_found_keyboard(),
+            )
+            return
+        set_user_banned(row.get("user_id"), False)
+        row["banned"] = False
+        await update.message.reply_text("✅ تم فك حظر المستخدم بنجاح.")
+        text, entities = build_user_mgmt_profile_message(row)
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_user_mgmt_profile_keyboard(row),
+        )
         return
 
     if field in ("points_per_user", "points_required", "reward_value"):
@@ -6513,6 +6800,115 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             text=text, entities=entities,
             reply_markup=build_owner_section_keyboard(),
         )
+        return
+
+    if query.data == "user_mgmt_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data.pop("awaiting_setting", None)
+        text, entities = build_user_mgmt_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_user_mgmt_section_keyboard(),
+        )
+        return
+
+    if query.data in ("user_mgmt_search", "user_mgmt_view_prompt"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting_setting"] = "user_mgmt_lookup"
+        await query.edit_message_text(
+            "✍️ أرسل الآن معرّف المستخدم (ID) أو اليوزر (@username) للبحث عنه ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data == "user_mgmt_ban_prompt":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting_setting"] = "user_mgmt_ban_query"
+        await query.edit_message_text(
+            "✍️ أرسل الآن معرّف المستخدم (ID) أو اليوزر (@username) لحظره ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data == "user_mgmt_unban_prompt":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting_setting"] = "user_mgmt_unban_query"
+        await query.edit_message_text(
+            "✍️ أرسل الآن معرّف المستخدم (ID) أو اليوزر (@username) لفك حظره ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data == "user_mgmt_banned_list":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        rows = get_banned_users_list()
+        text, entities = build_user_mgmt_banned_list_message(rows)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_user_mgmt_banned_list_keyboard(),
+        )
+        return
+
+    if query.data == "user_mgmt_stats":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_user_mgmt_stats_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_user_mgmt_stats_keyboard(),
+        )
+        return
+
+    if query.data.startswith("user_mgmt_ban:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+            return
+        target_id = int(query.data.split(":", 1)[1])
+        if target_id in OWNER_IDS:
+            await query.answer("⛔ لا يمكن حظر مالك البوت.", show_alert=True)
+            return
+        set_user_banned(target_id, True)
+        await query.answer("✅ تم حظر المستخدم بنجاح.")
+        row = get_known_user(target_id)
+        if row:
+            text, entities = build_user_mgmt_profile_message(row)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_user_mgmt_profile_keyboard(row),
+            )
+        return
+
+    if query.data.startswith("user_mgmt_unban:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+            return
+        target_id = int(query.data.split(":", 1)[1])
+        set_user_banned(target_id, False)
+        await query.answer("✅ تم فك حظر المستخدم بنجاح.")
+        row = get_known_user(target_id)
+        if row:
+            text, entities = build_user_mgmt_profile_message(row)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_user_mgmt_profile_keyboard(row),
+            )
         return
 
     if query.data == "owner_points_section":
@@ -8125,6 +8521,11 @@ def main():
         )
 
     app.add_error_handler(_global_error_handler)
+
+    # بوابة الحظر العامة: تعمل في مجموعة سابقة (group=-1) على كل الرسائل
+    # والأزرار، فتوقف أي مستخدم محظور قبل وصوله لأي معالج آخر في البوت.
+    app.add_handler(MessageHandler(filters.ALL, global_ban_gate), group=-1)
+    app.add_handler(CallbackQueryHandler(global_ban_gate), group=-1)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("getid", get_id_prompt))
