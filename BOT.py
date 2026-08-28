@@ -696,6 +696,49 @@ async def check_giveaway_boost(
         return False
 
 
+async def check_giveaway_requirements(context: ContextTypes.DEFAULT_TYPE, user, giveaway) -> tuple:
+    """يتحقق من جميع شروط الدخول في السحب (بريميوم / قنوات الاشتراك / تعزيز /
+    تصويت لمتسابق) بترتيب واحد موحّد، ويُستخدم في كل نقاط الدخول (زر المشاركة
+    المباشر، بوابة الاشتراك قبل الكابتشا، والتحقق النهائي بعد الكابتشا) حتى لا
+    تتكرر نفس الشروط بصيغ مختلفة في أكثر من مكان.
+    يُعيد (True, "") عند اجتياز كل الشروط، أو (False, نص التنبيه المناسب لأول شرط لم يتحقق)."""
+    if giveaway.get("premium_only") and not user.is_premium:
+        return False, "💎 هذا السحب للأشخاص المفعلين مميز فقط!"
+
+    if not await check_giveaway_condition_channels(context, user.id, giveaway):
+        return False, build_giveaway_condition_subscribe_alert()
+
+    if giveaway.get("boost_required") and not await check_giveaway_boost(
+        context, user.id, giveaway["chat_id"],
+    ):
+        return False, "❌ يجب عليك تعزيز القناة اولا"
+
+    vote_contest_code = giveaway.get("vote_contest_code")
+    vote_participant_id = giveaway.get("vote_participant_id")
+    if vote_contest_code and vote_participant_id and not has_voted_for(
+        vote_contest_code, user.id, vote_participant_id,
+    ):
+        return False, "❌ يجب عليك التصويت للمتسابق أولاً قبل المشاركة في السحب"
+
+    return True, ""
+
+
+async def build_giveaway_gate_links(context: ContextTypes.DEFAULT_TYPE, giveaway) -> tuple:
+    """يبني رابط التعزيز (إن كان السحب يتطلب Boost) ورابط التصويت (إن كان
+    مشروطًا بالتصويت لمتسابق)، لعرضهما كأزرار داخل بوابة شروط السحب."""
+    boost_link = (
+        await build_giveaway_boost_link(context, giveaway["chat_id"])
+        if giveaway.get("boost_required") else ""
+    )
+    vote_contest_code = giveaway.get("vote_contest_code")
+    vote_participant_id = giveaway.get("vote_participant_id")
+    vote_link = (
+        build_giveaway_vote_condition_link(vote_contest_code, vote_participant_id)
+        if vote_contest_code and vote_participant_id else ""
+    )
+    return boost_link, vote_link
+
+
 async def _check_bot_can_verify_channel(context: ContextTypes.DEFAULT_TYPE, username: str) -> str:
     """يتحقق من أن البوت نفسه مُضاف كمشرف (Admin) في قناة الاشتراك الإجباري
     الجديدة. هذا شرط ضروري لعمل get_chat_member بشكل صحيح — إن لم يكن البوت
@@ -1673,13 +1716,52 @@ QUICK_ROULETTE_TEXT = (
     "• اختر ماتريد من الازرار ادناه ⬇️"
 )
 
-def roulette_body_text(target: int, current: int) -> str:
+def _roulette_progress_bar(current: int, target: int, length: int = 10) -> str:
+    """يبني شريط تقدّم مرئي بسيط (مربعات ملوّنة) لعدد المشاركين الحاليين
+    مقابل العدد المطلوب، يُستخدم في منشور «روليت سريع» ليبدو أكثر احترافية."""
+    if target <= 0:
+        return ""
+    ratio = min(1.0, current / target)
+    filled = min(length, round(length * ratio))
+    return "🟩" * filled + "⬜️" * (length - filled)
+
+
+def build_quick_roulette_channel_message(target: int, current: int) -> tuple:
+    """رسالة «روليت سريع» الاحترافية التي تُنشر عبر الوضع المضمّن (inline) في
+    القناة/القروب، وتُحدَّث في نفس الرسالة عند كل مشاركة جديدة. تتضمّن كليشة
+    اللعبة، عداد المشاركين مع شريط تقدّم داخل اقتباس مميّز، وتذييل العلامة
+    التجارية الموحّد (نفس تذييل منشورات السحب/المسابقة)."""
     cliche = get_setting("game_cliche") or DEFAULT_GAME_CLICHE
-    return (
-        f"{cliche}\n\n"
-        f"👥 المشاركين: {current}/{target}\n\n"
-        f"• {BRAND_NAME} > جميع البوتات"
-    )
+    bar = _roulette_progress_bar(current, target)
+    parts = [
+        ([("🎡", EMOJI["roulette"]), " روليت سريع"], "bold", None),
+        "\n\n",
+        cliche,
+        "\n\n",
+        ([
+            ("👥", EMOJI["people"]),
+            f" المشاركين: {current}/{target}",
+            "\n",
+            bar,
+        ], "blockquote", None),
+    ]
+    base_text, base_entities = build_text_with_emojis(parts)
+    footer_text, footer_entities = build_brand_footer()
+    shift = utf16_len(base_text)
+    combined_text = base_text + footer_text
+    combined_entities = base_entities + shift_entities(footer_entities, shift)
+    return combined_text, combined_entities
+
+
+def build_quick_roulette_join_notify_message(display_name: str) -> tuple:
+    """رسالة مختصرة تُرسل لمالك الروليت السريع فقط عند انضمام مشارك جديد —
+    الاسم فقط دون أي تفاصيل إضافية (آيدي/يوزر/عدد المشاركين)."""
+    parts = [
+        ([("🎡", EMOJI["roulette"]), f" قام شخص بالاشتراك في روليتك: {display_name}"], "bold", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
 
 def build_waiting_spin_message(target: int, current: int, participants: list) -> tuple:
     """
@@ -1743,7 +1825,7 @@ def build_result_message(winner_id: int, winner_name: str, participants: list) -
         parts.append((bq_parts, "blockquote", None))
         parts.append("\n\n")
 
-    parts.append(f"• {BRAND_NAME} > جميع البوتات")
+    parts += build_brand_giveaways_parts()
     return build_text_with_emojis(parts)
 
 def waiting_spin_keyboard(roulette_id: int) -> InlineKeyboardMarkup:
@@ -2362,6 +2444,60 @@ def build_giveaway_condition_subscribe_alert() -> str:
     """نص التنبيه الداخلي (show_alert) الذي يظهر عند محاولة المشاركة دون اشتراك في
     قناة/قنوات الشرط (Image 2 — نص عام دون ذكر اسم قناة محددة)."""
     return "❌ يجب عليك الاشتراك في قناة الشرط اولاً"
+
+
+def build_giveaway_gate_message(giveaway) -> tuple:
+    """رسالة «بوابة الشروط» التي تظهر للمستخدم داخل البوت بعد الضغط على زر
+    المشاركة في سحب مفعّل عليه «منع الرشق» — تُعرض فقط عندما لا يكون قد
+    اجتاز بعد شرط/شروط السحب (اشتراك في القنوات و/أو تعزيز)، وقبل ظهور زر
+    التحقق (الكابتشا) الذي يظهر بعد إكمال هذه الشروط."""
+    channels = (giveaway.get("condition_channels") or [])[:GW_CONDITION_CHANNELS_MAX]
+    lines = [f"• {ch.get('title') or ch.get('ref') or 'القناة'}" for ch in channels]
+    if giveaway.get("boost_required"):
+        lines.append("• تعزيز القناة (Boost)")
+    vote_contest_code = giveaway.get("vote_contest_code")
+    vote_participant_id = giveaway.get("vote_participant_id")
+    if vote_contest_code and vote_participant_id:
+        lines.append("• التصويت للمتسابق المطلوب")
+
+    parts = [
+        "عليك إكمال الشروط التالية أولاً", "\n",
+        "- لتتمكن من المشاركة في السحب: ", ("🎁", EMOJI["target_pin"]),
+    ]
+    if lines:
+        parts += ["\n", "\n".join(lines)]
+    parts += [
+        "\n\n",
+        ([
+            ("‼️", EMOJI["sub_alert"]),
+            " | أكمل الشروط ثم اضغط تحقق",
+            ("✅", EMOJI["sub_check"]),
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_giveaway_gate_keyboard(gw_code: str, giveaway, is_genuinely_new: bool,
+                                  boost_link: str = "", vote_link: str = "") -> InlineKeyboardMarkup:
+    """كيبورد بوابة الشروط: زر لكل قناة/تعزيز/تصويت مطلوب، وزر «تحقق ✅» أسفلها.
+    عند الضغط على «تحقق» يُعاد فحص الشروط؛ فإن اجتازها المستخدم تتحوّل نفس
+    الرسالة إلى كابتشا التحقق منع الرشق الموجودة مسبقًا."""
+    rows = []
+    channels = (giveaway.get("condition_channels") or [])[:GW_CONDITION_CHANNELS_MAX]
+    for ch in channels:
+        title = ch.get("title") or "الإشتراك في القناة"
+        link = ch.get("url") or f"https://t.me/{str(ch.get('ref', '')).lstrip('@')}"
+        rows.append([InlineKeyboardButton(title, url=link)])
+    if boost_link:
+        rows.append([InlineKeyboardButton("تعزيز القناة (Boost)", url=boost_link)])
+    if vote_link:
+        rows.append([InlineKeyboardButton("التصويت للمتسابق", url=vote_link)])
+    rows.append([
+        InlineKeyboardButton(
+            "تحقق ✅", callback_data=f"gwcond:{gw_code}:{1 if is_genuinely_new else 0}",
+        )
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_giveaway_winners_message() -> tuple:
@@ -3733,7 +3869,7 @@ def build_cliche_prompt_keyboard() -> InlineKeyboardMarkup:
 
 def roulette_share_keyboard(roulette_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔶 اضغط لـ المشاركة 🔶", callback_data=f"rr_join_{roulette_id}")],
+        [InlineKeyboardButton("🔶 اضغط لـ المشاركة 🔶", callback_data=f"rr_join_{roulette_id}", style="primary")],
         [InlineKeyboardButton("🔷 تدوير الروليت 🔷", callback_data=f"rr_spin_{roulette_id}", style="danger")],
     ])
 
@@ -3837,10 +3973,22 @@ async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TY
 
     if roulette["inline_message_id"]:
         try:
+            body_text, body_entities = build_quick_roulette_channel_message(target, current)
             await context.bot.edit_message_text(
                 inline_message_id=roulette["inline_message_id"],
-                text=roulette_body_text(target, current),
+                text=body_text,
+                entities=body_entities,
                 reply_markup=roulette_share_keyboard(roulette_id),
+            )
+        except Exception:
+            pass
+
+    if owner_id and owner_id != user.id:
+        display_name = user.first_name or user.username or str(user.id)
+        notify_text, notify_entities = build_quick_roulette_join_notify_message(display_name)
+        try:
+            await context.bot.send_message(
+                chat_id=owner_id, text=notify_text, entities=notify_entities,
             )
         except Exception:
             pass
@@ -3996,22 +4144,12 @@ async def handle_contest_vote_entry(update: Update, context: ContextTypes.DEFAUL
     )
 
 
-async def handle_giveaway_captcha_entry(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, gw_code: str, is_genuinely_new: bool = False,
-):
-    """يُستدعى عند فتح البوت عبر رابط ?start=gwcap_{gw_code} (تحقق منع الرشق قبل المشاركة في السحب)."""
-    user = update.effective_user
-
-    giveaway = get_giveaway(gw_code)
-    if not giveaway or giveaway["status"] != "open":
-        _bt, _be = bold_notice("⚠️ هذا السحب غير متاح حالياً.")
-        await update.message.reply_text(text=_bt, entities=_be)
-        return
-    if is_giveaway_participant(gw_code, user.id):
-        _bt, _be = bold_notice("✅ أنت مسجّل بالفعل في هذا السحب.")
-        await update.message.reply_text(text=_bt, entities=_be)
-        return
-
+def _build_giveaway_captcha_payload(context: ContextTypes.DEFAULT_TYPE, gw_code: str,
+                                     is_genuinely_new: bool) -> tuple:
+    """يبني رسالة/كيبورد كابتشا منع الرشق (نفس زر الإيموجي الموجود مسبقًا)
+    ويخزّن جلستها. تُستخدم عند فتح البوت لأول مرة (إن كانت الشروط مكتملة
+    مسبقًا) وأيضًا بعد اجتياز بوابة الشروط عبر زر «تحقق»، لتظهر نفس الكابتشا
+    في الحالتين."""
     correct_emoji = random.choice(CAPTCHA_EMOJIS)
     decoys_pool = [e for e in CAPTCHA_EMOJIS if e != correct_emoji]
     decoy_count = min(CAPTCHA_OPTIONS_COUNT - 1, len(decoys_pool))
@@ -4030,11 +4168,81 @@ async def handle_giveaway_captcha_entry(
     }
 
     text, entities = build_vote_captcha_message(correct_emoji)
-    await update.message.reply_text(
-        text=text,
-        entities=entities,
-        reply_markup=build_vote_captcha_keyboard(token, options, correct_index, prefix="gwcap"),
-    )
+    keyboard = build_vote_captcha_keyboard(token, options, correct_index, prefix="gwcap")
+    return text, entities, keyboard
+
+
+async def handle_giveaway_captcha_entry(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, gw_code: str, is_genuinely_new: bool = False,
+):
+    """يُستدعى عند فتح البوت عبر رابط ?start=gwcap_{gw_code} (زر «اضغط لـ
+    المشاركة» على سحب مفعّل عليه «منع الرشق»).
+
+    أولاً يتحقق من شروط السحب (الاشتراك في قناة/قنوات الشرط، التعزيز، التصويت
+    للمتسابق إن وُجد). إن لم تكتمل بعد، يعرض للمستخدم بوابة الشروط (زر لكل
+    قناة/شرط + زر «تحقق») بدل الكابتشا مباشرة. فقط بعد اجتياز هذه الشروط
+    يظهر له زر التحقق (الكابتشا) الموجود مسبقًا."""
+    user = update.effective_user
+
+    giveaway = get_giveaway(gw_code)
+    if not giveaway or giveaway["status"] != "open":
+        _bt, _be = bold_notice("⚠️ هذا السحب غير متاح حالياً.")
+        await update.message.reply_text(text=_bt, entities=_be)
+        return
+    if is_giveaway_participant(gw_code, user.id):
+        _bt, _be = bold_notice("✅ أنت مسجّل بالفعل في هذا السحب.")
+        await update.message.reply_text(text=_bt, entities=_be)
+        return
+
+    ok, _alert = await check_giveaway_requirements(context, user, giveaway)
+    if not ok:
+        boost_link, vote_link = await build_giveaway_gate_links(context, giveaway)
+        gate_text, gate_entities = build_giveaway_gate_message(giveaway)
+        await update.message.reply_text(
+            text=gate_text,
+            entities=gate_entities,
+            reply_markup=build_giveaway_gate_keyboard(
+                gw_code, giveaway, is_genuinely_new, boost_link=boost_link, vote_link=vote_link,
+            ),
+        )
+        return
+
+    text, entities, keyboard = _build_giveaway_captcha_payload(context, gw_code, is_genuinely_new)
+    await update.message.reply_text(text=text, entities=entities, reply_markup=keyboard)
+
+
+async def gwcond_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج ضغط زر «تحقق ✅» في بوابة شروط السحب (gwcond:{gw_code}:{is_genuinely_new}).
+    عند اجتياز الشروط تتحوّل نفس الرسالة إلى كابتشا التحقق منع الرشق."""
+    query = update.callback_query
+    try:
+        _, gw_code, flag_raw = query.data.split(":", 2)
+        is_genuinely_new = flag_raw == "1"
+    except (ValueError, IndexError):
+        await query.answer("⚠️ طلب غير صالح.", show_alert=True)
+        return
+
+    giveaway = get_giveaway(gw_code)
+    if not giveaway or giveaway["status"] != "open":
+        await query.answer("⚠️ هذا السحب لم يعد متاحاً.", show_alert=True)
+        return
+
+    user = query.from_user
+    if is_giveaway_participant(gw_code, user.id):
+        await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
+        return
+
+    ok, alert_text = await check_giveaway_requirements(context, user, giveaway)
+    if not ok:
+        await query.answer(alert_text, show_alert=True)
+        return
+
+    await query.answer("✅ تم التحقق من الشروط، أكمل التحقق أدناه.")
+    text, entities, keyboard = _build_giveaway_captcha_payload(context, gw_code, is_genuinely_new)
+    try:
+        await query.edit_message_text(text=text, entities=entities, reply_markup=keyboard)
+    except Exception:
+        await query.message.reply_text(text=text, entities=entities, reply_markup=keyboard)
 
 
 async def handle_giveaway_share_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, gw_code: str):
@@ -4122,28 +4330,14 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
         return
 
-    if giveaway.get("premium_only") and not user.is_premium:
-        await query.answer("💎 هذا السحب للأشخاص المفعلين مميز فقط!", show_alert=True)
-        return
-
-    if not await check_giveaway_condition_channels(context, user.id, giveaway):
-        await query.answer(build_giveaway_condition_subscribe_alert(), show_alert=True)
-        return
-
-    if giveaway.get("boost_required") and not await check_giveaway_boost(
-        context, user.id, giveaway["chat_id"],
-    ):
-        await query.answer("❌ يجب عليك تعزيز القناة اولا", show_alert=True)
+    ok, alert_text = await check_giveaway_requirements(context, user, giveaway)
+    if not ok:
+        await query.answer(alert_text, show_alert=True)
         return
 
     vote_contest_code = giveaway.get("vote_contest_code")
     vote_participant_id = giveaway.get("vote_participant_id")
     vote_required = bool(vote_contest_code and vote_participant_id)
-    if vote_required and not has_voted_for(vote_contest_code, user.id, vote_participant_id):
-        await query.answer(
-            "❌ يجب عليك التصويت للمتسابق أولاً قبل المشاركة في السحب", show_alert=True,
-        )
-        return
 
     if giveaway["antispam"]:
         await query.answer(
@@ -4193,28 +4387,26 @@ async def gw_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
         return
 
-    if giveaway.get("premium_only") and not query.from_user.is_premium:
-        await query.answer("💎 هذا السحب للأشخاص المفعلين مميز فقط!", show_alert=True)
-        return
-
-    if not await check_giveaway_condition_channels(context, query.from_user.id, giveaway):
-        await query.answer(build_giveaway_condition_subscribe_alert(), show_alert=True)
-        return
-
-    if giveaway.get("boost_required") and not await check_giveaway_boost(
-        context, query.from_user.id, giveaway["chat_id"],
-    ):
-        await query.answer("❌ يجب عليك تعزيز القناة اولا", show_alert=True)
-        return
-
-    vote_contest_code = giveaway.get("vote_contest_code")
-    vote_participant_id = giveaway.get("vote_participant_id")
-    if vote_contest_code and vote_participant_id and not has_voted_for(
-        vote_contest_code, query.from_user.id, vote_participant_id,
-    ):
-        await query.answer(
-            "❌ يجب عليك التصويت للمتسابق أولاً قبل المشاركة في السحب", show_alert=True,
-        )
+    # التحقق النهائي الموحّد (بريميوم/قنوات/تعزيز/تصويت) — بهذا يتم الدخول
+    # تلقائيًا في السحب فقط بعد اجتياز الكابتشا وهذه الشروط معًا دفعة واحدة.
+    ok, alert_text = await check_giveaway_requirements(context, query.from_user, giveaway)
+    if not ok:
+        # حالة نادرة: تحقق المستخدم من الشروط عند فتح البوت ثم ألغى اشتراكه
+        # قبل الضغط على الكابتشا — نعيده لبوابة الشروط بدل تنبيه فقط حتى
+        # يتمكن من إصلاح الأمر والمتابعة دون طلب رابط مشاركة جديد.
+        await query.answer(alert_text, show_alert=True)
+        boost_link, vote_link = await build_giveaway_gate_links(context, giveaway)
+        gate_text, gate_entities = build_giveaway_gate_message(giveaway)
+        try:
+            await query.edit_message_text(
+                text=gate_text,
+                entities=gate_entities,
+                reply_markup=build_giveaway_gate_keyboard(
+                    gw_code, giveaway, is_genuinely_new, boost_link=boost_link, vote_link=vote_link,
+                ),
+            )
+        except Exception:
+            pass
         return
 
     await finalize_giveaway_join(
@@ -4294,6 +4486,7 @@ async def gw_repost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     post_keyboard = build_giveaway_channel_keyboard(
         gw_code, total, antispam=bool(giveaway["antispam"]), status=giveaway["status"],
     )
+    old_message_id = giveaway.get("channel_message_id")
     try:
         sent = await context.bot.send_message(
             chat_id=giveaway["chat_id"],
@@ -4304,6 +4497,15 @@ async def gw_repost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         set_giveaway_channel_message(gw_code, sent.message_id)
     except Exception:
         await query.message.reply_text("⚠️ تعذر إعادة نشر السحب، تأكد من أن البوت مايزال مشرفًا هناك.")
+        return
+
+    # حذف النسخة السابقة من منشور السحب حتى لا يبقى أكثر من نسخة منشورة في
+    # نفس الوقت — تبقى فقط أحدث نسخة (التي أُرسلت للتو) ظاهرة في القناة/القروب.
+    if old_message_id and old_message_id != sent.message_id:
+        try:
+            await context.bot.delete_message(chat_id=giveaway["chat_id"], message_id=old_message_id)
+        except Exception:
+            pass
 
 
 async def gw_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5012,8 +5214,10 @@ async def rr_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
+        body_text, body_entities = build_quick_roulette_channel_message(target, current)
         await query.edit_message_text(
-            text=roulette_body_text(target, current),
+            text=body_text,
+            entities=body_entities,
             reply_markup=roulette_share_keyboard(roulette_id),
         )
     except Exception as e:
@@ -5024,6 +5228,17 @@ async def rr_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         show_alert=True,
     )
 
+    owner_id = result.get("owner_id")
+    if owner_id and owner_id != user.id:
+        display_name = user.first_name or user.username or str(user.id)
+        notify_text, notify_entities = build_quick_roulette_join_notify_message(display_name)
+        try:
+            await context.bot.send_message(
+                chat_id=owner_id, text=notify_text, entities=notify_entities,
+            )
+        except Exception:
+            pass
+
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     owner_id = update.inline_query.from_user.id
     results = []
@@ -5032,6 +5247,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         ids_map = create_roulettes_batch(owner_id, ROULETTE_COUNTS)
         for n in ROULETTE_COUNTS:
             roulette_id = ids_map[n]
+            body_text, body_entities = build_quick_roulette_channel_message(n, 0)
             results.append(
                 InlineQueryResultArticle(
                     id=str(roulette_id),
@@ -5039,7 +5255,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     description="اضغط هنا لبدء روليت سريع بهذا العدد",
                     thumbnail_url=ROULETTE_THUMBS[n],
                     input_message_content=InputTextMessageContent(
-                        roulette_body_text(n, 0)
+                        body_text, entities=body_entities,
                     ),
                     reply_markup=roulette_share_keyboard(roulette_id),
                 )
@@ -6774,6 +6990,7 @@ def main():
         pattern=r"^(my_draws|gwmy_page:\d+|gwmy_detail:)",
     ))
     app.add_handler(CallbackQueryHandler(gw_join_callback, pattern=r"^gw_join:"))
+    app.add_handler(CallbackQueryHandler(gwcond_check_callback, pattern=r"^gwcond:"))
     app.add_handler(CallbackQueryHandler(gw_captcha_callback, pattern=r"^gwcap:"))
     app.add_handler(CallbackQueryHandler(gw_kick_callback, pattern=r"^gw_kick:"))
     app.add_handler(CallbackQueryHandler(gw_repost_callback, pattern=r"^gw_repost:"))
