@@ -1721,6 +1721,40 @@ def build_contest_vote_keyboard(contest_code: str, participant_id: int, votes: i
     ])
 
 
+def build_contest_vote_premium_blocked_message() -> tuple:
+    """رسالة تُعرض لمستخدم غير مفعّل بريميوم عند محاولته التصويت في مسابقة
+    مخصّصة حصريًا لمصوّتي تيليجرام بريميوم."""
+    parts = [
+        ([("💎", EMOJI.get("premium_vote_btn", "💎")),
+          " هذه المسابقة تتيح التصويت فقط لمستخدمي تيليجرام المميز Premium."],
+         "bold", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_contest_vote_gate_message() -> tuple:
+    """رسالة بوابة الشرط الإلزامي قبل احتساب أي تصويت: يجب الاشتراك في
+    القناة الإلزامية أولاً، ثم الضغط على زر «تحقق» لإكمال التصويت."""
+    parts = [
+        "للتصويت في هذه المسابقة عليك أولاً:",
+        "\n\n",
+        ([
+            (" 1️⃣ ", None), "الاشتراك في القناة الإلزامية أدناه", "\n",
+            (" 2️⃣ ", None), "ثم الضغط على زر «تحقق ✅» لإتمام تصويتك",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_contest_vote_gate_keyboard(contest_code: str, participant_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(REQUIRED_CHANNEL_BUTTON_TEXT, url=get_required_channel_url())],
+        [InlineKeyboardButton(
+            "تحقق ✅", callback_data=f"compcond:{contest_code}:{participant_id}", style="success",
+        )],
+    ])
+
+
 def build_vote_captcha_message(target_emoji_id: str) -> tuple:
     """رسالة الكابتشا التي تُعرض للمستخدم عند محاولة التصويت لمتسابق (تحقق أنك لست روبوت)."""
     parts = [
@@ -2839,7 +2873,8 @@ def _fs_create_or_integrity_error(doc_ref, data: dict) -> None:
 
 
 def _fs_bump_counter(doc_ref, field: str, amount: int, extra: dict = None) -> None:
-    """يزيد قيمة حقل رقمي بشكل ذري داخل معاملة (transaction) لتفادي تعارض التحديثات المتزامنة."""
+    """يزيد قيمة حقل رقمي بشكل ذري داخل معاملة (transaction) لتفادي تعارض التحديثات المتزامنة.
+    القيمة النهائية لا تنزل تحت الصفر أبدًا (مهم عند خصم نقاط ملغاة)."""
     client = fs_db()
     transaction = client.transaction()
 
@@ -2848,7 +2883,7 @@ def _fs_bump_counter(doc_ref, field: str, amount: int, extra: dict = None) -> No
         snap = doc_ref.get(transaction=transaction)
         current = (snap.to_dict().get(field, 0) if snap.exists else 0) or 0
         payload = dict(extra or {})
-        payload[field] = current + amount
+        payload[field] = max(0, current + amount)
         if snap.exists:
             transaction.update(doc_ref, payload)
         else:
@@ -3096,6 +3131,30 @@ def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int
         "updated_at": datetime.now(timezone.utc).isoformat(),
     })
     return True
+
+def award_contest_owner_points(owner_id: int) -> int:
+    """يمنح صاحب المسابقة نقاطًا مقابل صوت واحد مكتمل الشروط (اشتراك + تحقق +
+    عدم تلاعب). يعيد عدد النقاط الممنوحة فعليًا (0 إن كانت خاصية النقاط معطّلة).
+    لا تُستدعى إلا مرة واحدة لكل تصويت مؤكد — الاستدعاء متروك لـ
+    register_confirmed_contest_vote الذي يضمن ذلك."""
+    if get_setting("points_enabled") != "1":
+        return 0
+    raw_value = get_setting("points_per_user")
+    amount = max(int(raw_value) if raw_value and str(raw_value).isdigit() else 1, 0)
+    if amount <= 0:
+        return 0
+    owner_ref = fs_db().collection("owner_points").document(str(owner_id))
+    _fs_bump_counter(owner_ref, "points", amount, extra={"owner_id": owner_id})
+    return amount
+
+
+def reverse_contest_owner_points(owner_id: int, amount: int) -> None:
+    """يخصم من صاحب المسابقة نقاطًا سبق منحها مقابل تصويت أُلغي لاحقًا (خروج
+    المصوّت من القنوات الإلزامية) — لا تنزل النقاط تحت الصفر أبدًا."""
+    if not amount or amount <= 0 or not owner_id:
+        return
+    owner_ref = fs_db().collection("owner_points").document(str(owner_id))
+    _fs_bump_counter(owner_ref, "points", -amount, extra={"owner_id": owner_id})
 
 def toggle_remind_win(user_id: int) -> bool:
     ref = fs_db().collection("remind_win").document(str(user_id))
@@ -3368,7 +3427,10 @@ def remove_contest_participant(contest_code: str, user_id: int):
     client = fs_db()
     client.collection("contest_participants").document(_contest_participant_doc_id(contest_code, user_id)).delete()
     for d in client.collection("contest_votes").where("contest_code", "==", contest_code).stream():
-        if d.to_dict().get("participant_user_id") == user_id:
+        vd = d.to_dict()
+        if vd.get("participant_user_id") == user_id:
+            if vd.get("status", "confirmed") == "confirmed" and vd.get("points_awarded"):
+                reverse_contest_owner_points(vd.get("owner_id"), vd.get("points_awarded"))
             d.reference.delete()
 
 
@@ -3379,46 +3441,78 @@ def set_participant_channel_message(contest_code: str, user_id: int, message_id:
 
 
 def has_voted(contest_code: str, voter_id: int) -> bool:
+    """يعيد True فقط إذا كان لدى المصوّت تصويت «مؤكد» حاليًا. التصويتات
+    الملغاة (بسبب مغادرة القنوات الإلزامية) لا تُحتسب هنا، ما يسمح للمصوّت
+    بالتصويت من جديد إذا عاد واشترك لاحقًا."""
     doc = fs_db().collection("contest_votes").document(f"{contest_code}_{voter_id}").get()
-    return doc.exists
+    if not doc.exists:
+        return False
+    return doc.to_dict().get("status", "confirmed") == "confirmed"
 
 
-def add_vote(contest_code: str, voter_id: int, participant_user_id: int):
+def register_confirmed_contest_vote(contest_code: str, voter_id: int, participant_user_id: int,
+                                     owner_id: int) -> bool:
+    """يسجّل تصويتًا «مؤكدًا» بعد اجتياز كل الشروط (اشتراك + تحقق + عدم تلاعب)،
+    ويمنح صاحب المسابقة نقاطه فورًا لهذا الصوت. إن كان هناك تصويت سابق أُلغي
+    لنفس المصوّت في نفس المسابقة، يُستبدل بتصويت جديد مؤكد بدل رفضه. يعيد
+    True إذا سُجّل التصويت فعليًا، وFalse إذا كان هناك تصويت مؤكد سابقًا بالفعل."""
     ref = fs_db().collection("contest_votes").document(f"{contest_code}_{voter_id}")
-    if not ref.get().exists:
-        ref.set({
-            "contest_code": contest_code,
-            "voter_id": voter_id,
-            "participant_user_id": participant_user_id,
-            "voted_at": datetime.now(timezone.utc).isoformat(),
-        })
+    snap = ref.get()
+    if snap.exists and snap.to_dict().get("status", "confirmed") == "confirmed":
+        return False
+    ref.set({
+        "contest_code": contest_code,
+        "voter_id": voter_id,
+        "participant_user_id": participant_user_id,
+        "owner_id": owner_id,
+        "voted_at": datetime.now(timezone.utc).isoformat(),
+        "status": "confirmed",
+        "points_awarded": 0,
+    })
+    amount = award_contest_owner_points(owner_id)
+    if amount:
+        ref.update({"points_awarded": amount})
+    return True
 
 
 def has_voted_for(contest_code: str, voter_id: int, participant_user_id: int) -> bool:
     """يتحقق من أن المستخدم صوّت تحديدًا لهذا المتسابق (وليس لأي متسابق آخر في نفس
-    المسابقة) — يُستخدم للتحقق من شرط «تصويت متسابق» قبل السماح بالمشاركة في السحب."""
+    المسابقة) — يُستخدم للتحقق من شرط «تصويت متسابق» قبل السماح بالمشاركة في السحب.
+    لا يُحتسب أي تصويت مُلغى بسبب مغادرة القنوات الإلزامية."""
     doc = fs_db().collection("contest_votes").document(f"{contest_code}_{voter_id}").get()
     if not doc.exists:
         return False
-    return doc.to_dict().get("participant_user_id") == participant_user_id
+    data = doc.to_dict()
+    return (
+        data.get("status", "confirmed") == "confirmed"
+        and data.get("participant_user_id") == participant_user_id
+    )
 
 
 def get_participant_votes(contest_code: str, participant_user_id: int) -> int:
     docs = fs_db().collection("contest_votes").where("contest_code", "==", contest_code).stream()
-    return sum(1 for d in docs if d.to_dict().get("participant_user_id") == participant_user_id)
+    return sum(
+        1 for d in docs
+        if d.to_dict().get("participant_user_id") == participant_user_id
+        and d.to_dict().get("status", "confirmed") == "confirmed"
+    )
 
 
 def get_contest_leaderboard(contest_code: str):
     """
     يُعيد قائمة كل المتسابقين مرتّبة تنازليًا حسب عدد الأصوات (الأعلى أولًا)،
     وعند التعادل يُقدَّم من انضمّ أولًا. كل عنصر: (user_id, display_name, participant_code, votes).
+    التصويتات الملغاة (بسبب مغادرة القنوات الإلزامية) لا تُحتسب ضمن العدد.
     """
     client = fs_db()
     participants = list(client.collection("contest_participants").where("contest_code", "==", contest_code).stream())
     votes = list(client.collection("contest_votes").where("contest_code", "==", contest_code).stream())
     vote_counts = {}
     for v in votes:
-        pid = v.to_dict().get("participant_user_id")
+        vd = v.to_dict()
+        if vd.get("status", "confirmed") != "confirmed":
+            continue
+        pid = vd.get("participant_user_id")
         vote_counts[pid] = vote_counts.get(pid, 0) + 1
     rows = []
     for p in participants:
@@ -4215,6 +4309,35 @@ async def handle_contest_vote_entry(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(text=_bt, entities=_be)
         return
 
+    # شرط بريميوم: إن كانت المسابقة مخصّصة لمصوّتي بريميوم فقط، يُرفض أي
+    # مستخدم غير مفعّل بريميوم هنا فورًا قبل أي خطوة أخرى، ويُعاد نفس الفحص
+    # عند «تحقق» وعند تسجيل التصويت النهائي كطبقة حماية إضافية.
+    if contest.get("premium_only") and not user.is_premium:
+        text, entities = build_contest_vote_premium_blocked_message()
+        await update.message.reply_text(text=text, entities=entities)
+        return
+
+    # بوابة الاشتراك الإجباري: لا تُعرض الكابتشا مباشرة إن لم يكن المستخدم
+    # مشتركًا فعليًا في القناة الإلزامية؛ بل تُعرض له بوابة اشتراك + زر
+    # «تحقق» صريح، ولا يُحتسب أي تصويت قبل اجتياز هذا الفحص فعليًا.
+    if not await is_user_subscribed(context, user.id):
+        gate_text, gate_entities = build_contest_vote_gate_message()
+        await update.message.reply_text(
+            text=gate_text,
+            entities=gate_entities,
+            reply_markup=build_contest_vote_gate_keyboard(contest_code, participant_id),
+        )
+        return
+
+    text, entities, keyboard = _build_contest_vote_captcha_payload(context, contest_code, participant_id)
+    await update.message.reply_text(text=text, entities=entities, reply_markup=keyboard)
+
+
+def _build_contest_vote_captcha_payload(context: ContextTypes.DEFAULT_TYPE, contest_code: str,
+                                         participant_id: int) -> tuple:
+    """يبني رسالة/كيبورد كابتشا التصويت ويخزّن جلستها. تُستخدم عند اجتياز
+    بوابة الشروط مباشرة (لا شرط اشتراك) وأيضًا بعد الضغط على زر «تحقق» في
+    بوابة الاشتراك، حتى تظهر نفس الكابتشا في الحالتين."""
     correct_emoji = random.choice(CAPTCHA_EMOJIS)
     decoys_pool = [e for e in CAPTCHA_EMOJIS if e != correct_emoji]
     decoy_count = min(CAPTCHA_OPTIONS_COUNT - 1, len(decoys_pool))
@@ -4234,11 +4357,54 @@ async def handle_contest_vote_entry(update: Update, context: ContextTypes.DEFAUL
     }
 
     text, entities = build_vote_captcha_message(correct_emoji)
-    await update.message.reply_text(
-        text=text,
-        entities=entities,
-        reply_markup=build_vote_captcha_keyboard(token, options, correct_index),
-    )
+    keyboard = build_vote_captcha_keyboard(token, options, correct_index)
+    return text, entities, keyboard
+
+
+async def contest_vote_gate_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج ضغط زر «تحقق ✅» في بوابة اشتراك التصويت (compcond:{contest_code}:{participant_id}).
+    يُعيد التحقق الفعلي (وليس من كاش قديم) من اشتراك المستخدم، ومن شرط
+    بريميوم إن وُجد، قبل السماح له بالانتقال لخطوة الكابتشا النهائية."""
+    query = update.callback_query
+    try:
+        _, contest_code, participant_id_raw = query.data.split(":", 2)
+        participant_id = int(participant_id_raw)
+    except (ValueError, IndexError):
+        await query.answer("⚠️ طلب غير صالح.", show_alert=True)
+        return
+
+    user = query.from_user
+
+    contest = get_contest(contest_code)
+    if not contest or contest["status"] != "open":
+        await query.answer("⚠️ انتهت هذه المسابقة.", show_alert=True)
+        return
+    if user.id == participant_id:
+        await query.answer("🚫 لا يمكنك التصويت لنفسك.", show_alert=True)
+        return
+    if has_voted(contest_code, user.id):
+        await query.answer("✅ لقد قمت بالتصويت مسبقًا في هذه المسابقة.", show_alert=True)
+        return
+    if not get_contest_participant(contest_code, participant_id):
+        await query.answer("⚠️ هذا المتسابق لم يعد مسجّلًا.", show_alert=True)
+        return
+    if contest.get("premium_only") and not user.is_premium:
+        await query.answer("💎 هذه المسابقة للتصويت لمستخدمي بريميوم فقط.", show_alert=True)
+        return
+
+    if not await is_user_subscribed(context, user.id, force_refresh=True):
+        await query.answer(
+            "⚠️ لم يتم العثور على اشتراكك، اشترك في القناة ثم اضغط تحقق مجددًا.",
+            show_alert=True,
+        )
+        return
+
+    await query.answer("✅ تم التحقق من الاشتراك، أكمل التحقق أدناه.")
+    text, entities, keyboard = _build_contest_vote_captcha_payload(context, contest_code, participant_id)
+    try:
+        await query.edit_message_text(text=text, entities=entities, reply_markup=keyboard)
+    except Exception:
+        await query.message.reply_text(text=text, entities=entities, reply_markup=keyboard)
 
 
 def _build_giveaway_captcha_payload(context: ContextTypes.DEFAULT_TYPE, gw_code: str,
@@ -5199,6 +5365,105 @@ async def _contest_participation_callback_inner(update: Update, context: Context
         return
 
 
+async def cancel_contest_vote_if_unsubscribed(context: ContextTypes.DEFAULT_TYPE, vote_doc) -> bool:
+    """نظام الأمان وإلغاء التصويت: يتحقق من استمرار اشتراك مصوّت واحد في القناة
+    الإلزامية. إن غادرها بعد احتساب صوته يُلغي هذا النظام تلقائيًا:
+    - يُسجَّل التصويت كـ«ملغى بسبب مغادرة القنوات الإلزامية» (لا يُحذف، للتوثيق) —
+      وهذا يُسقطه فورًا من عدد أصوات المتسابق (get_participant_votes/leaderboard
+      لا يحتسبان إلا التصويتات المؤكدة).
+    - يُخصم من صاحب المسابقة أي نقاط كانت قد مُنحت مقابل هذا التصويت تحديدًا.
+    - يسمح هذا للمصوّت بالتصويت من جديد إذا عاد واشترك لاحقًا (has_voted تعيد
+      False لأي تصويت غير مؤكد)، مع خضوعه لنفس كابتشا منع الرشق من جديد.
+    يعيد True إذا أُلغي التصويت فعليًا في هذه المرة.
+    """
+    data = vote_doc.to_dict()
+    if data.get("status", "confirmed") != "confirmed":
+        return False
+
+    voter_id = data.get("voter_id")
+    if not voter_id:
+        return False
+
+    subscribed = await is_user_subscribed(context, voter_id, force_refresh=True)
+    if subscribed:
+        return False
+
+    vote_doc.reference.update({
+        "status": "cancelled_unsubscribed",
+        "cancelled_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    amount = data.get("points_awarded") or 0
+    owner_id = data.get("owner_id")
+    if amount and owner_id:
+        reverse_contest_owner_points(owner_id, amount)
+
+    contest_code = data.get("contest_code")
+    participant_id = data.get("participant_user_id")
+    if contest_code and participant_id:
+        contest = get_contest(contest_code)
+        if contest and contest.get("status") == "open":
+            participant = get_contest_participant(contest_code, participant_id)
+            if participant and participant.get("channel_message_id"):
+                new_votes = get_participant_votes(contest_code, participant_id)
+                try:
+                    await context.bot.edit_message_reply_markup(
+                        chat_id=contest["chat_id"],
+                        message_id=participant["channel_message_id"],
+                        reply_markup=build_contest_vote_keyboard(
+                            contest_code, participant_id, new_votes, participant["participant_code"]
+                        ),
+                    )
+                except Exception:
+                    pass
+    return True
+
+
+async def contest_votes_subscription_audit(context: ContextTypes.DEFAULT_TYPE):
+    """فحص دوري (نظام الأمان): يمرّ على كل التصويتات المؤكدة في المسابقات
+    المفتوحة حاليًا، ويتحقق من استمرار اشتراك كل مصوّت في القناة الإلزامية.
+    من غادر القناة تُلغى نقطته تلقائيًا (اكتشاف من خرج من القنوات وإلغاء
+    أصواتهم تلقائيًا دون انتظار أن يفتح البوت مجددًا)."""
+    client = fs_db()
+    try:
+        open_codes = [
+            c.to_dict().get("contest_code")
+            for c in client.collection("contests").where("status", "==", "open").stream()
+        ]
+    except Exception:
+        logger.exception("contest_votes_subscription_audit: فشل جلب المسابقات المفتوحة")
+        return
+    if not open_codes:
+        return
+
+    checked = 0
+    cancelled = 0
+    for contest_code in open_codes:
+        if not contest_code:
+            continue
+        try:
+            docs = list(client.collection("contest_votes").where("contest_code", "==", contest_code).stream())
+        except Exception:
+            logger.exception("contest_votes_subscription_audit: فشل جلب أصوات المسابقة %s", contest_code)
+            continue
+        for d in docs:
+            if d.to_dict().get("status", "confirmed") != "confirmed":
+                continue
+            checked += 1
+            try:
+                if await cancel_contest_vote_if_unsubscribed(context, d):
+                    cancelled += 1
+            except Exception:
+                logger.exception("contest_votes_subscription_audit: فشل فحص التصويت %s", d.id)
+            await asyncio.sleep(0.05)
+
+    if checked:
+        logger.info(
+            "contest_votes_subscription_audit: تم فحص %d صوتًا، أُلغي منها %d بسبب مغادرة القناة الإلزامية",
+            checked, cancelled,
+        )
+
+
 async def vote_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     يعالج ضغط المستخدم على أحد أزرار كابتشا التصويت (compcap:{token}:{idx}).
@@ -5262,7 +5527,28 @@ async def vote_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("⚠️ هذا المتسابق لم يعد مسجّلًا.", show_alert=True)
         return
 
-    add_vote(contest_code, voter.id, participant_id)
+    # طبقة حماية أخيرة: إعادة فحص شرط بريميوم مباشرة قبل احتساب التصويت،
+    # حتى لو تغيّرت حالة اشتراك المستخدم في بريميوم بين فتح الكابتشا والضغط
+    # على الرمز الصحيح — فلا يُحتسب أي صوت من مستخدم غير مؤهل مهما حدث.
+    if contest.get("premium_only") and not voter.is_premium:
+        sessions.pop(token, None)
+        await query.answer("💎 هذه المسابقة للتصويت لمستخدمي بريميوم فقط.", show_alert=True)
+        return
+
+    # نظام الأمان: لا يُحتسب أي تصويت إلا بعد التأكد من أن المصوّت لا يزال
+    # مشتركًا فعليًا في القناة الإلزامية لحظة التحقق (وليس فقط لحظة فتح البوت).
+    if not await is_user_subscribed(context, voter.id, force_refresh=True):
+        await query.answer(
+            "⚠️ يجب الاشتراك في القناة الإلزامية أولاً، اشترك ثم اضغط نفس الزر مجددًا للتحقق.",
+            show_alert=True,
+        )
+        return
+
+    registered = register_confirmed_contest_vote(contest_code, voter.id, participant_id, contest["owner_id"])
+    if not registered:
+        sessions.pop(token, None)
+        await query.answer("✅ لقد قمت بالتصويت مسبقًا في هذه المسابقة.", show_alert=True)
+        return
     new_votes = get_participant_votes(contest_code, participant_id)
     sessions.pop(token, None)
 
@@ -7121,6 +7407,10 @@ def main():
             giveaway_autospin_countdown_tick, interval=600, first=60,
             name="giveaway_autospin_countdown_tick",
         )
+        app.job_queue.run_repeating(
+            contest_votes_subscription_audit, interval=1800, first=120,
+            name="contest_votes_subscription_audit",
+        )
 
     app.add_error_handler(_global_error_handler)
 
@@ -7167,6 +7457,7 @@ def main():
         pattern=r"^(comp_reject_join:|comp_confirm_join:|comp_withdraw:)",
     ))
     app.add_handler(CallbackQueryHandler(vote_captcha_callback, pattern=r"^compcap:"))
+    app.add_handler(CallbackQueryHandler(contest_vote_gate_check_callback, pattern=r"^compcond:"))
     app.add_handler(CallbackQueryHandler(contest_results_callback, pattern=r"^comp_view_results:"))
 
     app.add_handler(CallbackQueryHandler(
