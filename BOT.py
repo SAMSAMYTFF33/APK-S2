@@ -764,6 +764,23 @@ async def check_giveaway_condition_channels(
     return True
 
 
+async def check_giveaway_boost(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int,
+) -> bool:
+    """يتحقق مما إذا كان المستخدم قد عزّز (Boost) قناة السحب فعليًا، عبر
+    استدعاء getUserChatBoosts الأصلي في تيليجرام (يُستخدم عند تفعيل خيار
+    «تعزيز القناة» — Image A1/A2). يُعيد True فقط إذا كانت لدى المستخدم
+    تعزيزة واحدة على الأقل مسجّلة على هذه القناة تحديدًا (Image A4/A5)."""
+    try:
+        result = await context.bot.get_user_chat_boosts(chat_id=chat_id, user_id=user_id)
+        return bool(result.boosts)
+    except Exception:
+        logger.exception(
+            "تعذّر التحقق من تعزيز المستخدم %s للقناة %s", user_id, chat_id,
+        )
+        return False
+
+
 async def _check_bot_can_verify_channel(context: ContextTypes.DEFAULT_TYPE, username: str) -> str:
     """يتحقق من أن البوت نفسه مُضاف كمشرف (Admin) في قناة الاشتراك الإجباري
     الجديدة. هذا شرط ضروري لعمل get_chat_member بشكل صحيح — إن لم يكن البوت
@@ -2060,8 +2077,10 @@ GIVEAWAY_SETTINGS_DEFAULTS = {
 
 # الحد الأقصى لعدد قنوات الشرط التي يمكن ربطها بسحب واحد.
 GW_CONDITION_CHANNELS_MAX = 2
-# رموز دائرية مرقّمة تُستخدم لعرض كل قناة شرط برقمها ضمن منشور السحب (Image 3).
-GW_CONDITION_CIRCLE_NUMS = ["❶", "❷"]
+# رموز دائرية مرقّمة تُستخدم لعرض كل بند شرط برقمه ضمن منشور السحب (Image A3):
+# قناة/قناتا الشرط أولاً، ثم بند «تعزيز القناة» إن كان مفعّلاً (لذلك 3 رموز
+# كحد أقصى: قناتا شرط + تعزيز).
+GW_CONDITION_CIRCLE_NUMS = ["❶", "❷", "❸"]
 
 
 def build_giveaway_settings_message() -> tuple:
@@ -2548,7 +2567,8 @@ def build_giveaway_autospin_notice_text(giveaway) -> str:
 
 
 def build_giveaway_channel_message(cliche_text: str, cliche_entities, vote_link: str = None,
-                                    condition_channels=None, autospin: dict = None) -> tuple:
+                                    condition_channels=None, boost_link: str = None,
+                                    autospin: dict = None) -> tuple:
     """منشور السحب الذي يُنشر في القناة/القروب (Image 5).
 
     إذا كان السحب مشروطًا بالتصويت لمتسابق (vote_link)، يُضاف أعلى تذييل العلامة
@@ -2556,18 +2576,26 @@ def build_giveaway_channel_message(cliche_text: str, cliche_entities, vote_link:
     نفس مسار التصويت للمتسابق مباشرة عبر البوت (Image 6).
 
     وإذا كان السحب مشروطًا بالاشتراك في قناة شرط واحدة أو قناتين (condition_channels:
-    قائمة عناصر {"title", "url"})، يُضاف اقتباس «الشرط» يحتوي سطرًا مرقّمًا
-    (❶ / ❷) لكل قناة، تحمل كلمة «هنا» فيه رابط تلك القناة تحديدًا (Image 3)."""
+    قائمة عناصر {"title", "url"}) و/أو بتعزيز (Boost) القناة (boost_link)، يُضاف
+    اقتباس واحد «الشرط» يحتوي سطرًا مرقّمًا (❶ / ❷ / ❸) لكل بند: قناة/قناتا
+    الشرط أولاً ثم بند «تعزيز» إن وُجد، كل سطر تحمل فيه كلمة «هنا» الرابط
+    الخاص بذلك البند تحديدًا (Image A3). بند «تعزيز» يفتح نافذة تعزيز القناة
+    الأصلية في تيليجرام مباشرة عبر رابط https://t.me/boost/<username> (Image A4)."""
     extra_parts = []
     condition_channels = condition_channels or []
-    if condition_channels:
+    condition_items = []
+    for channel in condition_channels[:GW_CONDITION_CHANNELS_MAX]:
+        link = channel.get("url") or f"https://t.me/{str(channel.get('ref', '')).lstrip('@')}"
+        condition_items.append(("الإشتراك", link))
+    if boost_link:
+        condition_items.append(("تعزيز", boost_link))
+    if condition_items:
         quote_content = ["• الشرط ", ("⬇️", EMOJI["arrow_down"])]
-        for idx, channel in enumerate(condition_channels[:GW_CONDITION_CHANNELS_MAX]):
+        for idx, (label, link) in enumerate(condition_items):
             circle = GW_CONDITION_CIRCLE_NUMS[idx] if idx < len(GW_CONDITION_CIRCLE_NUMS) else f"{idx + 1}."
-            link = channel.get("url") or f"https://t.me/{str(channel.get('ref', '')).lstrip('@')}"
             quote_content += [
                 "\n", f"{circle} ",
-                (["الإشتراك"], "bold", None),
+                ([label], "bold", None),
                 " ›› ",
                 (["هـــنـــا"], "link", link),
             ]
@@ -3194,6 +3222,21 @@ async def build_contest_post_link(context: ContextTypes.DEFAULT_TYPE, chat_id: i
     if str_id.startswith("-100"):
         return f"https://t.me/c/{str_id[4:]}/{message_id}"
     return None
+
+
+async def build_giveaway_boost_link(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str:
+    """يبني رابط تعزيز (Boost) القناة المرتبطة بسحب مفعّل عليه خيار «تعزيز
+    القناة» (Image A1/A2)، بصيغة https://t.me/boost/<username> التي يتعرّف
+    عليها تطبيق تيليجرام تلقائيًا ويفتح نافذة التعزيز الأصلية عند الضغط عليها
+    (Image A4). يعيد نصًا فارغًا إن تعذّر جلب يوزر القناة (مثلاً قناة خاصة بلا
+    يوزر عام)، لأن رابط التعزيز يتطلب يوزر عامًا للقناة."""
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        if chat.username:
+            return f"https://t.me/boost/{chat.username}"
+    except Exception:
+        logger.exception("تعذّر جلب يوزر القناة %s لبناء رابط التعزيز", chat_id)
+    return ""
 
 
 async def announce_new_post(context: ContextTypes.DEFAULT_TYPE, source_chat_id: int,
@@ -4324,6 +4367,12 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(build_giveaway_condition_subscribe_alert(), show_alert=True)
         return
 
+    if giveaway.get("boost_required") and not await check_giveaway_boost(
+        context, user.id, giveaway["chat_id"],
+    ):
+        await query.answer("❌ يجب عليك تعزيز القناة اولا", show_alert=True)
+        return
+
     vote_contest_code = giveaway.get("vote_contest_code")
     vote_participant_id = giveaway.get("vote_participant_id")
     vote_required = bool(vote_contest_code and vote_participant_id)
@@ -4387,6 +4436,12 @@ async def gw_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if not await check_giveaway_condition_channels(context, query.from_user.id, giveaway):
         await query.answer(build_giveaway_condition_subscribe_alert(), show_alert=True)
+        return
+
+    if giveaway.get("boost_required") and not await check_giveaway_boost(
+        context, query.from_user.id, giveaway["chat_id"],
+    ):
+        await query.answer("❌ يجب عليك تعزيز القناة اولا", show_alert=True)
         return
 
     vote_contest_code = giveaway.get("vote_contest_code")
@@ -4465,8 +4520,13 @@ async def gw_repost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if vote_contest_code and vote_participant_id else None
     )
     condition_channels = giveaway.get("condition_channels") or []
+    boost_link = (
+        await build_giveaway_boost_link(context, giveaway["chat_id"])
+        if giveaway.get("boost_required") else ""
+    )
     post_text, post_entities = build_giveaway_channel_message(
         giveaway["cliche_text"], cliche_entities, vote_link=vote_link, condition_channels=condition_channels,
+        boost_link=boost_link,
     )
     post_keyboard = build_giveaway_channel_keyboard(
         gw_code, total, antispam=bool(giveaway["antispam"]), status=giveaway["status"],
@@ -4698,9 +4758,14 @@ async def giveaway_autospin_countdown_tick(context: ContextTypes.DEFAULT_TYPE):
                 build_giveaway_vote_condition_link(vote_contest_code, vote_participant_id)
                 if vote_contest_code and vote_participant_id else None
             )
+            boost_link = (
+                await build_giveaway_boost_link(context, giveaway["chat_id"])
+                if giveaway.get("boost_required") else ""
+            )
             post_text, post_entities = build_giveaway_channel_message(
                 giveaway["cliche_text"], cliche_entities, vote_link=vote_link,
                 condition_channels=giveaway.get("condition_channels") or [],
+                boost_link=boost_link,
                 autospin={"mode": "time", "notice_text": build_giveaway_autospin_notice_text(giveaway)},
             )
             await context.bot.edit_message_text(
@@ -6499,6 +6564,9 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if vote_contest_code and vote_participant_id else None
     )
     condition_channels = settings.get("gw_condition_channels") or []
+    boost_link = (
+        await build_giveaway_boost_link(context, chat_id) if settings.get("gw_boost") else ""
+    )
 
     # إعداد عبارة «سحب تلقائي» المزخرفة (Image 9) إن كان أحد وضعيه مفعّلاً.
     autospin_mode = settings.get("gw_autospin_mode")
@@ -6513,7 +6581,7 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     post_text, post_entities = build_giveaway_channel_message(
         cliche_text, cliche_entities, vote_link=vote_link, condition_channels=condition_channels,
-        autospin=autospin_notice,
+        boost_link=boost_link, autospin=autospin_notice,
     )
     post_keyboard = build_giveaway_channel_keyboard(gw_code, 0, antispam=bool(settings.get("gw_antispam", False)))
     try:
