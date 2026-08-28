@@ -1,19 +1,10 @@
-import os  
-# ------------------------------------------------------------
-# 1) توكن البوت
-# ------------------------------------------------------------
+import os
 TOKEN = "8872823199:AAGlOZmzYOb9C3esalQBsWW9I32HkV5BBkI"
 BOT_USERNAME = "NOP3bot"
 
-# ------------------------------------------------------------
-# 2) معرّفات (ID) حسابات مسؤولي/مالكي البوت
-# ------------------------------------------------------------
 ADMIN_IDS = [123456789]
 POINTS_ADMIN_ID = 7638322813
 
-# قائمة معرّفات مالكي البوت — من يظهر له زر «قسم المالك» ويملك صلاحية الوصول
-# لكل الإعدادات الحساسة (قسم ربح + الاشتراك الإجباري). أي معرّف يُضاف هنا
-# يصبح مالكًا كاملاً للبوت بنفس صلاحيات المالك الأساسي.
 OWNER_IDS = [POINTS_ADMIN_ID, 8676850552]
 
 
@@ -22,27 +13,11 @@ def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
 
 
-# ------------------------------------------------------------
-# 3) قناة الاشتراك الإجباري
-# ------------------------------------------------------------
-# يجب أن يكون المستخدم مشتركًا فيها قبل استخدام البوت. هذه القيم تُستخدم فقط
-# كافتراضي أولي عند أول تشغيل — بعدها تُقرأ القيمة الفعلية من قاعدة البيانات
-# (settings) لأن المالك يمكنه تغييرها من «قسم المالك».
 REQUIRED_CHANNEL_USERNAME = "e_ggf"
 REQUIRED_CHANNEL_URL = "https://t.me/e_ggf"
 REQUIRED_CHANNEL_BUTTON_TEXT = "VORTEX  𓏺"
-# عدد المشتركين الافتراضي الذي يتم عنده التغيير التلقائي لقناة الاشتراك الإجباري
-# (قابل للتخصيص من قسم المالك ← اشتراك اجباري ← تخصيص عدد الاشتراكات المطلوبة).
 REQUIRED_CHANNEL_DEFAULT_TARGET = "1000"
 
-# ------------------------------------------------------------
-# 4) بيانات قاعدة بيانات Firebase Firestore
-# ------------------------------------------------------------
-# بيانات حساب الخدمة (Service Account) الخاص بمشروع Firebase. كل الحقول غير
-# الحسّاسة مكتوبة مباشرة هنا. الحقل الحسّاس الوحيد (private_key) يُقرأ حصرًا
-# من متغير بيئة حتى لا يُخزَّن كنص صريح داخل الكود المصدري. ضع القيمة التالية
-# كمتغير بيئة قبل تشغيل البوت:
-#   FIREBASE_PRIVATE_KEY   -> محتوى private_key كاملاً (يمكن ترك \n كما هي، سيتم تحويلها تلقائيًا)
 FIREBASE_PROJECT_ID = "wep-app-1771a"
 FIREBASE_PRIVATE_KEY_ID = "4e6f499aee9cf5a54366a87c45b3760782f43b41"
 FIREBASE_CLIENT_EMAIL = "firebase-adminsdk-fbsvc@wep-app-1771a.iam.gserviceaccount.com"
@@ -53,8 +28,6 @@ FIREBASE_CLIENT_CERT_URL = (
 )
 
 _raw_private_key = os.environ.get("FIREBASE_PRIVATE_KEY", "")
-# دعم الحالتين: مفتاح مُدخل بأسطر حقيقية، أو بمتوالية "\n" نصية (شائع عند وضعه
-# كمتغير بيئة عبر لوحات تحكم الاستضافة التي لا تقبل أسطر متعددة فعلية).
 if "\\n" in _raw_private_key and "\n" not in _raw_private_key:
     _raw_private_key = _raw_private_key.replace("\\n", "\n")
 
@@ -72,10 +45,6 @@ FIREBASE_SERVICE_ACCOUNT = {
     "universe_domain": "googleapis.com",
 }
 
-# ============================================================
-#              نهاية قسم الإعدادات الحساسة — لا تعدّل تحت هذا السطر
-#         (من هنا فصاعدًا تبدأ عمليات الاستيراد والكود الطبيعي للبوت)
-# ============================================================
 
 import asyncio
 import json
@@ -96,13 +65,8 @@ logging.basicConfig(
 )
 _boot_logger = logging.getLogger("contest_bot.bootstrap")
 
-# ============================================================
-# تثبيت ذاتي لمكوّن JobQueue إن لم يكن مثبّتًا (يعتمد عليه إنهاء المسابقات تلقائيًا
-# عند انقضاء الوقت المحدد). هذا يغني عن الحاجة لتشغيل أمر pip يدويًا بشكل منفصل —
-# يكفي تشغيل هذا الملف وسيتم التثبيت تلقائيًا عند أول إقلاع فقط.
-# ============================================================
 try:
-    import apscheduler  # noqa: F401
+    import apscheduler
 except ImportError:
     _boot_logger.warning("مكتبة JobQueue غير مثبّتة — جارٍ تثبيتها تلقائيًا الآن (مرة واحدة فقط)...")
     try:
@@ -121,12 +85,8 @@ except ImportError:
             _exc,
         )
 
-# ============================================================
-# تثبيت ذاتي لمكتبة firebase-admin (تُستخدم للاتصال بقاعدة بيانات Firestore
-# الحقيقية بدل ملف SQLite المحلي). نفس منطق التثبيت الذاتي أعلاه بالضبط.
-# ============================================================
 try:
-    import firebase_admin  # noqa: F401
+    import firebase_admin
 except ImportError:
     _boot_logger.warning("مكتبة firebase-admin غير مثبّتة — جارٍ تثبيتها تلقائيًا الآن (مرة واحدة فقط)...")
     try:
@@ -174,14 +134,6 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-# ============================================================
-#                       الإعدادات العامة
-# ============================================================
-# ملاحظة: توكن البوت، معرّفات المسؤولين/المالكين، وبيانات قناة الاشتراك
-# الإجباري تم نقلها بالكامل إلى أعلى الملف تمامًا (قبل الاستيرادات) لتسهيل
-# تعديلها دون الحاجة للبحث في عمق الكود. تبقى القيم نفسها متاحة هنا كأسماء
-# متغيرات عامة (TOKEN, BOT_USERNAME, ADMIN_IDS, POINTS_ADMIN_ID, OWNER_IDS,
-# is_owner, REQUIRED_CHANNEL_*) لأن باقي الكود يستخدمها بهذه الأسماء تمامًا.
 DEFAULT_POINTS_TITLE = "🎁 ربح من البوت"
 DEFAULT_POINTS_CONDITIONS = (
     "الربح يكون فقط من قسم «إنشاء سحب».\n"
@@ -190,31 +142,21 @@ DEFAULT_POINTS_CONDITIONS = (
 TECH_SUPPORT_USERNAME = "y66vlBOT"
 SUPPORT_BOT_STARS_AMOUNT = 5
 
-# اسم العلامة التجارية الظاهر داخل رسائل البوت.
-# TEXT_LINK يجعل الاسم أزرق وقابلاً للضغط ويفتح القناة مباشرة.
 BRAND_NAME = "𝚁𝙾𝚄𝙻𝙴𝚃𝚃𝙴 𝚅𝙾𝚁𝚃𝙴𝚇"
 BRAND_URL = "https://t.me/e_ggf"
 
-# رابط كلمة «السحوبات» التي تظهر بجانب اسم العلامة التجارية (بصيغة:
-# "BRAND_NAME < السحوبات") في القائمة الرئيسية وفي منشورات السحوبات والمسابقات.
 GIVEAWAYS_LINK_TEXT = "السحوبات"
 GIVEAWAYS_CHANNEL_URL = "https://t.me/n_bbo"
 
-# قناة الإعلانات العامة: بعد نشر أي سحب أو مسابقة بنجاح في قناة/جروب المستخدم،
-# يُنشر إعلان إضافي هنا (مع رابط مباشر للمنشور الأصلي) لتوسيع دائرة الانتشار.
 ANNOUNCE_CHANNEL_USERNAME = "n_bbo"
 ANNOUNCE_CHANNEL_URL = "https://t.me/n_bbo"
 ANNOUNCE_CHANNEL_CHAT_ID = f"@{ANNOUNCE_CHANNEL_USERNAME}"
 
-# ملاحظة: بيانات الاتصال بقاعدة بيانات Firebase Firestore (FIREBASE_PROJECT_ID،
-# FIREBASE_SERVICE_ACCOUNT، ...إلخ) تم نقلها بالكامل إلى أعلى الملف تمامًا
-# (تحت التوكن مباشرة وقبل الاستيرادات) لتسهيل تعديلها. الأسماء نفسها متاحة
-# هنا كمتغيرات عامة لأن fs_db() وباقي طبقة قاعدة البيانات تستخدمها كما هي.
 
 ROULETTE_COUNTS = [5, 10, 15, 20, 25, 30, 50, 100]
 
-DEFAULT_HIDE_PARTICIPANTS = "1"                       # 1 = مخفي (الافتراضي) | 0 = ظاهر
-DEFAULT_GAME_CLICHE = f"أهلا وسهلا بكم في {BRAND_NAME}"      # الكليشة الافتراضية للعبة
+DEFAULT_HIDE_PARTICIPANTS = "1"
+DEFAULT_GAME_CLICHE = f"أهلا وسهلا بكم في {BRAND_NAME}"
 
 ROULETTE_THUMBS = {
     n: f"https://wsrv.nl/?url=raw.githubusercontent.com/SAMSAMYTFF33/WEB/main/assets/Number{n}.png&w=100&h=100&output=jpg&q=60&v=2" for n in ROULETTE_COUNTS
@@ -286,7 +228,6 @@ EMOJI = {
     "delete_all_btn": "5913597928487784523",
     "cross_flag_off": "5954244021508380732",
     "check_flag_on": "5429381339851796035",
-    # -------- إيموجيات خاصة بقسم «السحب» (giveaway) --------
     "num_three": "5260650672000348972",
     "num_four": "5260544569128269433",
     "num_five": "5260655426529146332",
@@ -296,14 +237,10 @@ EMOJI = {
     "gw_new_participant": "6032994772321309200",
     "gw_view_profile": "5904630315946611415",
     "gw_kick_btn": "5240241223632954241",
-    # -------- إيموجيات خاصة بـ «السحب التلقائي» (autospin) --------
     "gw_atime_lightning": "5965286318001889755",
     "gw_atime_clock": "5852614259082530343",
 }
 
-# قائمة إيموجيات الكابتشا (تُستخدم عند التحقق من التصويت لمتسابق) — يتم اختيار
-# إيموجي "هدف" عشوائي من هذه القائمة، ثم تُعرض مجموعة عشوائية منها (تتضمن الهدف)
-# كأزرار على المستخدم اختيار الرمز الصحيح المطابق للهدف المعروض في الرسالة.
 CAPTCHA_EMOJIS = [
     "5402477260982731644",
     "5449449325434266744",
@@ -319,12 +256,9 @@ CAPTCHA_EMOJIS = [
     "5145427681680032825",
 ]
 
-# عدد الخيارات الظاهرة في قائمة الكابتشا (يتضمن الرمز الصحيح + بقية الرموز كتمويه)
 CAPTCHA_OPTIONS_COUNT = 3
-# مدة صلاحية جلسة الكابتشا بالثواني
 CAPTCHA_SESSION_TTL_SECONDS = 10 * 60
 
-# قيم الوقت المتاحة لاختيار وقت انتهاء المسابقة تلقائياً (بالدقائق)
 CONTEST_TIME_OPTIONS = [
     [(5, "بعد 5 دقايق"), (1, "بعد 1 دقيقة")],
     [(30, "بعد 30 دقيقة"), (60, "بعد 1 ساعة")],
@@ -335,7 +269,15 @@ CONTEST_TIME_OPTIONS = [
     [(4320, "بعد 3 ايام"), (10080, "بعد 1 اسبوع")],
 ]
 
-# -------------------- دالة التنسيق المتداخلة (المطورة) --------------------
+def _build_single_back_keyboard(text: str, callback_data: str, style: str, emoji_key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            text, callback_data=callback_data,
+            style=style, **emoji_kwargs(emoji_key),
+        )],
+    ])
+
+
 def build_text_with_emojis(parts) -> tuple:
     """
     تقوم ببناء النص والكيانات (entities) لدعم التنسيقات المتداخلة:
@@ -348,7 +290,7 @@ def build_text_with_emojis(parts) -> tuple:
     """
     text = ""
     entities = []
-    
+
     def add_bold(start_offset: int, end_offset: int):
         """إضافة كيان عريض للنص مع الحفاظ على الكيانات المتداخلة."""
         if end_offset > start_offset:
@@ -369,7 +311,6 @@ def build_text_with_emojis(parts) -> tuple:
     def process_part(p, inside_bold: bool = False):
         nonlocal text, entities
         if isinstance(p, tuple):
-            # حالة منشن عادي (باستخدام user object)
             if len(p) == 3 and p[1] == "mention":
                 display_name, _, user_obj = p
                 offset = len(text.encode("utf-16-le")) // 2
@@ -378,7 +319,6 @@ def build_text_with_emojis(parts) -> tuple:
                 text += display_name
                 if not inside_bold:
                     add_bold(offset, offset + length)
-            # حالة منشن برابط (اسم أزرق) باستخدام user_id
             elif len(p) == 3 and p[1] == "mention_id":
                 display_name, _, user_id = p
                 offset = len(text.encode("utf-16-le")) // 2
@@ -387,23 +327,19 @@ def build_text_with_emojis(parts) -> tuple:
                 text += display_name
                 if not inside_bold:
                     add_bold(offset, offset + length)
-            # حالة إيموجي مخصص
             elif len(p) == 2:
                 placeholder, custom_emoji_id = p
                 offset = len(text.encode("utf-16-le")) // 2
                 length = len(placeholder.encode("utf-16-le")) // 2
                 entities.append(MessageEntity(type=MessageEntity.CUSTOM_EMOJI, offset=offset, length=length, custom_emoji_id=custom_emoji_id))
                 text += placeholder
-            # حالة تنسيق (bold / blockquote / italic / spoiler) مع محتوى قد يكون قائمة (للتنسيق المتداخل)
             elif len(p) == 3 and p[1] in ["bold", "blockquote", "italic", "spoiler"]:
                 content, ent_type, _ = p
                 start_offset = len(text.encode("utf-16-le")) // 2
                 if isinstance(content, list):
-                    # معالجة المحتوى الداخلي (قد يحتوي على منشنات أو إيموجيات)
                     for sub in content:
                         process_part(sub, inside_bold or ent_type == "bold")
                 else:
-                    # نعالج النص العادي
                     append_text(content, make_bold=inside_bold or ent_type != "bold")
                 end_offset = len(text.encode("utf-16-le")) // 2
                 length = end_offset - start_offset
@@ -414,7 +350,6 @@ def build_text_with_emojis(parts) -> tuple:
                     "spoiler": MessageEntity.SPOILER,
                 }[ent_type]
                 entities.append(MessageEntity(type=t_type, offset=start_offset, length=length))
-            # حالة رابط نصي (TEXT_LINK) بلون أزرق قابل للضغط
             elif len(p) == 3 and p[1] == "link":
                 content, _, url = p
                 start_offset = len(text.encode("utf-16-le")) // 2
@@ -427,14 +362,13 @@ def build_text_with_emojis(parts) -> tuple:
                 length = end_offset - start_offset
                 entities.append(MessageEntity(type=MessageEntity.TEXT_LINK, offset=start_offset, length=length, url=url))
             else:
-                # أي شيء آخر يُعامل كنص
                 append_text(p, make_bold=not inside_bold)
         else:
             append_text(p, make_bold=not inside_bold)
 
     for part in parts:
         process_part(part)
-        
+
     return text, entities
 
 
@@ -457,7 +391,6 @@ def bold_notice(message: str) -> tuple:
     return build_text_with_emojis([([message], "bold", None)])
 
 
-# -------------------- دوال مساعدة --------------------
 def emoji_kwargs(key: str) -> dict:
     value = EMOJI.get(key, "0")
     if value and value != "0":
@@ -567,9 +500,6 @@ def build_support_bot_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-# ============================================================
-#              الاشتراك الإجباري في القناة
-# ============================================================
 def get_required_channel_username() -> str:
     """اسم يوزر قناة الاشتراك الإجباري الحالية (بدون @) — قابل للتغيير من قسم المالك."""
     return (get_setting("required_channel_username") or REQUIRED_CHANNEL_USERNAME).lstrip("@")
@@ -633,7 +563,6 @@ def build_subscription_required_keyboard() -> InlineKeyboardMarkup:
 
 
 _SUBSCRIPTION_CACHE = {}
-# لا نحتفظ بنتيجة الرفض طويلًا؛ المستخدم قد يشترك ثم يضغط «تحقق» مباشرة.
 SUBSCRIPTION_CACHE_TTL = 60
 SUBSCRIPTION_NEGATIVE_CACHE_TTL = 3
 
@@ -652,17 +581,11 @@ async def is_user_subscribed(
             return cached["value"]
     channel_username = get_required_channel_username()
     result = False
-    # محاولتان كحد أقصى: إن حدّد تيليجرام عدد الطلبات (Flood control) — وهو وارد
-    # جدًا مباشرة بعد تبديل القناة عندما يضغط عدد كبير من المستخدمين "تحقق" في
-    # نفس اللحظة — ننتظر المدة التي يطلبها تيليجرام (إن كانت قصيرة) ونعيد
-    # المحاولة مرة واحدة بدل الحكم فورًا بأن المستخدم غير مشترك.
     for attempt in range(2):
         try:
             member = await context.bot.get_chat_member(
                 chat_id=f"@{channel_username}", user_id=user_id
             )
-            # restricted مع is_member=True يعني أن المستخدم ما زال مشتركًا،
-            # حتى لو كانت صلاحياته في القناة مقيّدة.
             result = (
                 member.status in ("member", "administrator", "creator")
                 or (member.status == "restricted" and bool(getattr(member, "is_member", False)))
@@ -685,11 +608,6 @@ async def is_user_subscribed(
             result = False
             break
         except Exception:
-            # أي خطأ آخر هنا (القناة غير موجودة، أو البوت ليس مشرفًا فيها...) يُعامَل
-            # حاليًا كـ"غير مشترك" لنفس هذا المستخدم فقط، لكنه في الواقع قد يعني أن
-            # التحقق سيفشل لكل المستخدمين وليس هذا المستخدم تحديدًا — راجع دالة
-            # _check_bot_can_verify_channel التي تُنبّه المالكين عند تغيير القناة
-            # بالضبط لهذا السبب.
             logger.exception(
                 "تعذّر التحقق من اشتراك المستخدم %s في القناة @%s",
                 user_id, channel_username,
@@ -700,9 +618,6 @@ async def is_user_subscribed(
     return result
 
 
-# كاش منفصل للتحقق من الاشتراك في «قنوات الشرط» الخاصة بكل سحب (تختلف عن قناة
-# الاشتراك الإجباري العامة للبوت). المفتاح: (user_id, chat_ref) حيث chat_ref هو
-# إما "@username" أو معرّف الشات الرقمي (للقنوات الخاصة).
 _GW_CONDITION_SUB_CACHE = {}
 
 
@@ -982,9 +897,6 @@ def build_back_to_competition_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-# ============================================================
-#              المسابقات الحديثة (إدارة المسابقات الجارية)
-# ============================================================
 def build_recent_contests_list_message() -> tuple:
     """شاشة اختيار القناة عند وجود أكثر من مسابقة جارية."""
     parts = [
@@ -1149,12 +1061,7 @@ def build_contest_cliche_message() -> tuple:
 
 
 def build_contest_cliche_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "رجوع", callback_data="comp_start_create",
-            style="danger", **emoji_kwargs("back_section_btn"),
-        )],
-    ])
+    return _build_single_back_keyboard("رجوع", "comp_start_create", "danger", "back_section_btn")
 
 
 def build_contest_count_message() -> tuple:
@@ -1170,12 +1077,7 @@ def build_contest_count_message() -> tuple:
 
 
 def build_contest_count_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "رجوع", callback_data="comp_back_to_klesha",
-            style="danger", **emoji_kwargs("back_section_btn"),
-        )],
-    ])
+    return _build_single_back_keyboard("رجوع", "comp_back_to_klesha", "danger", "back_section_btn")
 
 
 def build_contest_end_method_message() -> tuple:
@@ -1280,12 +1182,7 @@ def build_contest_winners_message() -> tuple:
 
 
 def build_contest_winners_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "رجوع", callback_data="comp_back_to_end_type",
-            style="danger", **emoji_kwargs("back_winners_btn"),
-        )],
-    ])
+    return _build_single_back_keyboard("رجوع", "comp_back_to_end_type", "danger", "back_winners_btn")
 
 
 def build_contest_winners_confirm_message() -> tuple:
@@ -1299,7 +1196,6 @@ def build_contest_winners_confirm_message() -> tuple:
     return build_text_with_emojis(parts)
 
 
-# القيم الافتراضية لإعدادات المسابقة (تُخزَّن لكل مستخدم أثناء إنشاء المسابقة)
 CONTEST_SETTINGS_DEFAULTS = {
     "contest_notify_win": False,
     "contest_announce_results": False,
@@ -1686,7 +1582,6 @@ def build_contest_registered_keyboard(contest_code: str, user_id: int, participa
             style="success",
         )
     except Exception:
-        # في حال عدم دعم زر النسخ في هذه البيئة، نعرض الكود كنص بدل تعطّل الرسالة كاملة.
         copy_btn = InlineKeyboardButton("🎟 كودك: " + participant_code, callback_data="noop")
     return InlineKeyboardMarkup([
         [copy_btn],
@@ -1786,7 +1681,6 @@ def roulette_body_text(target: int, current: int) -> str:
         f"• {BRAND_NAME} > جميع البوتات"
     )
 
-# -------------------- رسائل الروليت المزخرفة --------------------
 def build_waiting_spin_message(target: int, current: int, participants: list) -> tuple:
     """
     participants: قائمة من tuples (user_id, display_name)
@@ -1800,7 +1694,7 @@ def build_waiting_spin_message(target: int, current: int, participants: list) ->
         ], "blockquote", None),
         "\n\n"
     ]
-    
+
     if not hide and participants:
         parts.append(("🫧 قائمة المشاركين:\n", "bold", None))
         bq_parts = []
@@ -1813,12 +1707,12 @@ def build_waiting_spin_message(target: int, current: int, participants: list) ->
             bq_parts.append(suffix)
         parts.append((bq_parts, "blockquote", None))
         parts.append("\n\n")
-        
+
     parts.append(([
         ("🎯", EMOJI["target"]),
         " في انتظار تدوير الروليت  ”"
     ], "blockquote", None))
-    
+
     return build_text_with_emojis(parts)
 
 def build_result_message(winner_id: int, winner_name: str, participants: list) -> tuple:
@@ -1835,7 +1729,7 @@ def build_result_message(winner_id: int, winner_name: str, participants: list) -
         ], "blockquote", None),
         "\n\n"
     ]
-    
+
     if not hide and participants:
         parts.append((f"🔹 جميع المشاركين ({len(participants)}):\n", "bold", None))
         bq_parts = []
@@ -1848,7 +1742,7 @@ def build_result_message(winner_id: int, winner_name: str, participants: list) -
             bq_parts.append(suffix)
         parts.append((bq_parts, "blockquote", None))
         parts.append("\n\n")
-        
+
     parts.append(f"• {BRAND_NAME} > جميع البوتات")
     return build_text_with_emojis(parts)
 
@@ -1863,9 +1757,6 @@ def result_keyboard(roulette_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("↻ لعب مره اخرى", switch_inline_query="", style="success")],
     ])
 
-# ============================================================
-#                    قسم «إنشاء سحب» (Giveaway)
-# ============================================================
 def build_giveaway_target_message() -> tuple:
     """شاشة «يرجى تحديد القناة أو القروب للسحب» (Image 1)."""
     parts = [
@@ -1940,18 +1831,10 @@ def build_giveaway_delete_keyboard(owner_id: int) -> InlineKeyboardMarkup:
 
 
 def build_back_to_giveaway_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "رجوع", callback_data="gw_start_create",
-            style="danger", **emoji_kwargs("back_section_btn"),
-        )],
-    ])
+    return _build_single_back_keyboard("رجوع", "gw_start_create", "danger", "back_section_btn")
 
 
-# ============================================================
-#                     قسم «سحوباتي» (My Draws)
-# ============================================================
-GW_LIST_PAGE_SIZE = 8  # عدد أزرار السحوبات في كل صفحة (لتفادي تكدّس الأزرار عند كثرتها)
+GW_LIST_PAGE_SIZE = 8
 
 
 def build_my_giveaways_list_message(page: int, total_pages: int) -> tuple:
@@ -2051,35 +1934,21 @@ def build_giveaway_cliche_keyboard() -> InlineKeyboardMarkup:
     return build_back_to_giveaway_keyboard()
 
 
-# القيم الافتراضية لإعدادات السحب (تُخزَّن لكل مستخدم أثناء إنشاء السحب)
 GIVEAWAY_SETTINGS_DEFAULTS = {
     "gw_boost": False,
     "gw_premium": False,
     "gw_antispam": False,
-    # شرط «تصويت متسابق»: يُملأ بعد ربط كود متسابق صالح (انظر gw_opt_vote).
     "gw_vote_contest_code": None,
     "gw_vote_participant_id": None,
     "gw_vote_participant_code": None,
     "gw_vote_display_name": None,
-    # شرط «قناة شرط»: الاشتراك في قناة أو قناتين محددتين (عامة عبر يوزر، أو
-    # خاصة عبر معرّف الشات) قبل السماح بالمشاركة في السحب — تُملأ بعد
-    # gw_opt_condition. كل عنصر بالقائمة: {"ref": ..., "title": ..., "url": ...}
-    # حيث ref هو "@username" أو معرّف الشات الرقمي (يُستخدم مباشرة مع get_chat_member).
     "gw_condition_channels": [],
-    # شرط «سحب تلقائي»: mode هي إما "count" (عدد مشاركين محدد) أو "time" (وقت
-    # محدد) أو None إن لم يُفعَّل بعد. target هو عدد المشاركين المطلوب في حالة
-    # "count"، وminutes هو عدد الدقائق المتراكمة في حالة "time" (تُملأ إما من
-    # قائمة الأوقات الجاهزة أو من قائمة «وقت مخصص» التراكمية).
     "gw_autospin_mode": None,
     "gw_autospin_target": None,
     "gw_autospin_minutes": None,
 }
 
-# الحد الأقصى لعدد قنوات الشرط التي يمكن ربطها بسحب واحد.
 GW_CONDITION_CHANNELS_MAX = 2
-# رموز دائرية مرقّمة تُستخدم لعرض كل بند شرط برقمه ضمن منشور السحب (Image A3):
-# قناة/قناتا الشرط أولاً، ثم بند «تعزيز القناة» إن كان مفعّلاً (لذلك 3 رموز
-# كحد أقصى: قناتا شرط + تعزيز).
 GW_CONDITION_CIRCLE_NUMS = ["❶", "❷", "❸"]
 
 
@@ -2117,8 +1986,6 @@ def build_giveaway_settings_keyboard(user_data: dict) -> InlineKeyboardMarkup:
     premium = user_data.get("gw_premium", GIVEAWAY_SETTINGS_DEFAULTS["gw_premium"])
     antispam = user_data.get("gw_antispam", GIVEAWAY_SETTINGS_DEFAULTS["gw_antispam"])
 
-    # زر «تصويت متسابق»: إن كان هناك كود متسابق مربوط فعليًا، يتغيّر اسم الزر
-    # ليعرض اسم المتسابق (وعدد أصواته الحالي) بدل النص الافتراضي (Image 4).
     vote_contest_code = user_data.get("gw_vote_contest_code")
     vote_participant_id = user_data.get("gw_vote_participant_id")
     if vote_contest_code and vote_participant_id:
@@ -2132,9 +1999,6 @@ def build_giveaway_settings_keyboard(user_data: dict) -> InlineKeyboardMarkup:
         vote_btn = InlineKeyboardButton("تصويت متسابق", callback_data="gw_opt_vote",
                                          style="primary", **emoji_kwargs("gw_vote_icon"))
 
-    # زر «قناة شرط»: إن كانت قناة شرط واحدة أو أكثر مربوطة فعليًا، يتغيّر اسم
-    # الزر ليعرض اسم أول قناة مباشرة، ويُضاف "+1" إن أُضيفت قناة ثانية أيضًا
-    # (بنفس شكل "EARN HIVE +1" في الصورة المرجعية) بدل النص الافتراضي.
     condition_channels = user_data.get("gw_condition_channels") or []
     if condition_channels:
         label = condition_channels[0]["title"]
@@ -2151,8 +2015,6 @@ def build_giveaway_settings_keyboard(user_data: dict) -> InlineKeyboardMarkup:
             style="primary", **emoji_kwargs("gw_condition_channel"),
         )
 
-    # زر «سحب تلقائي»: إن كان مفعّلاً (عدد أو وقت)، يتغيّر اسم الزر ليعرض القيمة
-    # الفعلية المحددة بدل النص الافتراضي (بنفس أسلوب أزرار الشروط الأخرى أعلاه).
     autospin_mode = user_data.get("gw_autospin_mode", GIVEAWAY_SETTINGS_DEFAULTS["gw_autospin_mode"])
     if autospin_mode == "count" and user_data.get("gw_autospin_target"):
         autospin_label = f"سحب تلقائي: {user_data['gw_autospin_target']} مشترك"
@@ -2251,12 +2113,7 @@ def build_giveaway_autospin_count_message() -> tuple:
 
 
 def build_giveaway_autospin_count_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "رجوع للخيارات", callback_data="gw_atime_back",
-            style="danger", **emoji_kwargs("back_section_btn"),
-        )],
-    ])
+    return _build_single_back_keyboard("رجوع للخيارات", "gw_atime_back", "danger", "back_section_btn")
 
 
 def build_giveaway_autospin_time_message(selected_label: str = "غير محدد") -> tuple:
@@ -2297,8 +2154,6 @@ def build_giveaway_autospin_time_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-# أزرار التعديل الدقيق لقائمة «وقت مخصص» التراكمية (Image 5/7): كل زر يحمل
-# مقدار الزيادة/التنقيص بالدقائق (سالب = تنقيص).
 GW_AUTOSPIN_CUSTOM_STEPS = [
     [(-1, "- 1 دقيقة"), (1, "+ 1 دقيقة")],
     [(-5, "- 5 دقيقة"), (5, "+ 5 دقيقة")],
@@ -2349,12 +2204,7 @@ def build_giveaway_vote_code_message() -> tuple:
 
 
 def build_giveaway_vote_code_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "رجوع", callback_data="gw_back_to_options",
-            style="danger", **emoji_kwargs("back_section_btn"),
-        )],
-    ])
+    return _build_single_back_keyboard("رجوع", "gw_back_to_options", "danger", "back_section_btn")
 
 
 def build_giveaway_vote_code_error_message() -> tuple:
@@ -2428,12 +2278,7 @@ def build_giveaway_condition_public_message() -> tuple:
 
 
 def build_giveaway_condition_public_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "رجوع للخيارات", callback_data="gw_opt_condition",
-            style="danger", **emoji_kwargs("back_section_btn"),
-        )],
-    ])
+    return _build_single_back_keyboard("رجوع للخيارات", "gw_opt_condition", "danger", "back_section_btn")
 
 
 def build_giveaway_condition_private_message(added_count: int = 0) -> tuple:
@@ -2530,12 +2375,7 @@ def build_giveaway_winners_message() -> tuple:
 
 
 def build_giveaway_winners_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "رجوع للخيارات", callback_data="gw_back_to_options",
-            style="danger", **emoji_kwargs("back_section_btn"),
-        )],
-    ])
+    return _build_single_back_keyboard("رجوع للخيارات", "gw_back_to_options", "danger", "back_section_btn")
 
 
 def build_giveaway_publish_success_message() -> tuple:
@@ -2756,12 +2596,6 @@ def build_giveaway_ended_message(cliche_text: str, cliche_entities, winners: lis
     return build_text_with_emojis(parts)
 
 
-# ============================================================
-#                     قاعدة البيانات
-# ============================================================
-# ============================================================
-#            الاتصال بـ Firestore (بديل الاتصال المشترك القديم)
-# ============================================================
 _FS_CLIENT = None
 _FS_LOCK = threading.Lock()
 
@@ -2871,13 +2705,6 @@ def init_db():
         if not ref.get().exists:
             ref.set({"value": v})
 
-# كاش داخل الذاكرة لقيم الإعدادات (settings). هذه القيم (حالة منع الرشق، نص
-# الكليشة، حالة قسم الربح، اسم قناة الاشتراك الإجباري...) تُقرأ من Firestore
-# في شبه كل ضغطة زر تقريبًا، لكنها لا تتغيّر إلا نادرًا (فقط عندما يعدّلها
-# المالك من القائمة). قبل هذا الكاش كانت كل قراءة تعني رحلة شبكة كاملة إلى
-# Firestore تُجمّد حلقة أحداث البوت بالكامل لحظيًا (لكل المستخدمين وليس فقط
-# صاحب الضغطة) — وهذا كان السبب الرئيسي وراء بطء استجابة الأزرار. الآن تُقرأ
-# القيمة من الذاكرة مباشرة، وتُحدَّث الذاكرة تلقائيًا عند أي تعديل فعلي.
 _SETTINGS_CACHE = {}
 
 def get_setting(key: str) -> str:
@@ -2945,19 +2772,11 @@ def count_participants(roulette_id: int) -> int:
     docs = fs_db().collection("counted_users").where("roulette_id", "==", roulette_id).stream()
     return sum(1 for _ in docs)
 
-def get_participants(roulette_id: int):
-    docs = fs_db().collection("counted_users").where("roulette_id", "==", roulette_id).stream()
-    return [d.to_dict()["user_id"] for d in docs]
-
 def get_participants_with_names(roulette_id: int):
     docs = list(fs_db().collection("counted_users").where("roulette_id", "==", roulette_id).stream())
     rows = [d.to_dict() for d in docs]
     rows.sort(key=lambda r: r.get("counted_at") or "")
     return [(r["user_id"], r.get("display_name") or str(r["user_id"])) for r in rows]
-
-def add_points(owner_id: int, amount: int):
-    ref = fs_db().collection("owner_points").document(str(owner_id))
-    _fs_bump_counter(ref, "points", amount, extra={"owner_id": owner_id})
 
 def get_points(owner_id: int) -> int:
     doc = fs_db().collection("owner_points").document(str(owner_id)).get()
@@ -2991,20 +2810,7 @@ def get_top_channel_points(limit: int = 5):
     candidates.sort(key=lambda r: (r.get("points") or 0, r.get("updated_at") or ""), reverse=True)
     return candidates[:max(1, min(int(limit), 5))]
 
-def has_been_rewarded(user_id: int) -> bool:
-    doc = fs_db().collection("rewarded_users").document(str(user_id)).get()
-    return doc.exists
 
-def mark_rewarded(user_id: int, roulette_id: int, owner_id: int):
-    ref = fs_db().collection("rewarded_users").document(str(user_id))
-    if not ref.get().exists:
-        ref.set({
-            "user_id": user_id,
-            "first_roulette_id": roulette_id,
-            "first_owner_id": owner_id,
-            "first_giveaway_code": None,
-            "rewarded_at": datetime.now(timezone.utc).isoformat(),
-        })
 
 def register_bot_user_and_check_new(user_id: int) -> bool:
     """
@@ -3044,7 +2850,6 @@ def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int
             "rewarded_at": datetime.now(timezone.utc).isoformat(),
         })
     except AlreadyExists:
-        # هذا المستخدم مكافَأ بالفعل من قبل (عالميًا مرة واحدة فقط) — لا نمنح نقاطًا مجددًا.
         return False
 
     raw_value = get_setting("points_per_user")
@@ -3079,9 +2884,6 @@ def get_remind_win_state(user_id: int):
         return None
     return bool(doc.to_dict().get("enabled"))
 
-# ============================================================
-#          تسجيل القنوات/القروبات عند إضافة البوت كمشرف
-# ============================================================
 def save_registered_chat(chat_id: int, owner_id: int, chat_title: str, chat_type: str):
     fs_db().collection("registered_chats").document(str(chat_id)).set({
         "chat_id": chat_id,
@@ -3100,9 +2902,6 @@ def get_registered_chats(owner_id: int):
     rows.sort(key=lambda r: r.get("registered_at") or "", reverse=True)
     return rows
 
-# ============================================================
-#                     نظام المسابقات (Contests)
-# ============================================================
 def entities_to_json(entities) -> str:
     if not entities:
         return "[]"
@@ -3246,7 +3045,6 @@ async def announce_new_post(context: ContextTypes.DEFAULT_TYPE, source_chat_id: 
     مباشرة، لتوسيع دائرة انتشار السحوبات والمسابقات. لا يرفع أي استثناء أبدًا حتى لا
     يؤثر فشل الإعلان على نجاح النشر الأساسي في قناة المستخدم.
     """
-    # طلب get_chat واحد فقط (بدلاً من طلبين مكررين لنفس القناة) لتقليل زمن الاستجابة.
     try:
         chat = await context.bot.get_chat(source_chat_id)
         label = f"@{chat.username}" if chat.username else (chat.title or "قناتك")
@@ -3413,7 +3211,6 @@ def get_open_time_contests():
     return rows
 
 
-# -------------------- دوال قسم «السحب» (Giveaway) --------------------
 def generate_gw_code() -> str:
     """كود فريد من 8 محارف hex يُستخدم في بيانات أزرار السحب المنشور."""
     while True:
@@ -3427,9 +3224,6 @@ def create_giveaway(gw_code: str, owner_id: int, chat_id: int, cliche_text: str,
     autospin_mode = settings.get("gw_autospin_mode")
     autospin_target = settings.get("gw_autospin_target")
     autospin_minutes = settings.get("gw_autospin_minutes")
-    # نحسب لحظة الانتهاء الفعلية عند الإنشاء مباشرة (وليس عند كل قراءة) حتى تبقى
-    # ثابتة حتى بعد إعادة تشغيل البوت — تُستخدم لجدولة المؤقت ولتحديث العد
-    # التنازلي المعروض في المنشور كل 10 دقائق.
     autospin_ends_at = (
         (datetime.now(timezone.utc) + timedelta(minutes=autospin_minutes)).isoformat()
         if autospin_mode == "time" and autospin_minutes else None
@@ -3452,7 +3246,6 @@ def create_giveaway(gw_code: str, owner_id: int, chat_id: int, cliche_text: str,
         "channel_message_id": None,
         "status": "open",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        # -------- حقول «السحب التلقائي» --------
         "autospin_mode": autospin_mode,
         "autospin_target": autospin_target,
         "autospin_minutes": autospin_minutes,
@@ -3561,8 +3354,6 @@ async def bot_chat_status_update(update: Update, context: ContextTypes.DEFAULT_T
     if chat.type not in ("channel", "group", "supergroup"):
         return
 
-    # قناة الإعلانات العامة ليست قناة يملكها المستخدمون — لا تُسجَّل ولا تظهر أبدًا
-    # ضمن قوائم اختيار القنوات (إنشاء سحب/مسابقة أو حذف قنوات).
     if chat.username and chat.username.lower() == ANNOUNCE_CHANNEL_USERNAME.lower():
         return
 
@@ -3610,8 +3401,6 @@ def build_points_message(user_id: int) -> tuple:
 
 
 def build_points_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    # زر «⚙️ إعدادات» انتقل من هنا إلى «قسم المالك ← قسم ربح» — لم يعد يظهر في
-    # هذه الواجهة العامة حتى للمالك نفسه.
     rows = [[InlineKeyboardButton(
         "🔙 رجوع", callback_data="back_main_menu",
         style="danger", **emoji_kwargs("back_section_btn"),
@@ -3646,12 +3435,7 @@ def build_points_statistics_message() -> tuple:
 
 
 def build_points_statistics_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "🔙 رجوع", callback_data="back_main_menu",
-            style="danger", **emoji_kwargs("back_section_btn"),
-        )],
-    ])
+    return _build_single_back_keyboard("🔙 رجوع", "back_main_menu", "danger", "back_section_btn")
 
 
 def build_points_settings_message() -> tuple:
@@ -3714,9 +3498,6 @@ def build_points_text_settings_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-# ============================================================
-#                     قسم المالك (Owner Section)
-# ============================================================
 def build_owner_section_message() -> tuple:
     return build_text_with_emojis([
         ([
@@ -3897,9 +3678,6 @@ def build_quick_roulette_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ============================================================
-#        قائمة «⚙️ الإعدادات والخصوصية» الخاصة بروليت سريع
-# ============================================================
 def build_roulette_privacy_settings_text() -> str:
     hide = get_setting("hide_participants") == "1"
     participants_status = "مخفي" if hide else "ظاهر"
@@ -3959,9 +3737,6 @@ def roulette_share_keyboard(roulette_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔷 تدوير الروليت 🔷", callback_data=f"rr_spin_{roulette_id}", style="danger")],
     ])
 
-# ============================================================
-#                    معالجات الأوامر والكولباك
-# ============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribed = await is_user_subscribed(context, update.effective_user.id)
     if not subscribed:
@@ -3971,10 +3746,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # نسجّل أول تواصل لهذا المستخدم مع البوت (مهما كان مصدر الدخول) مرة واحدة فقط.
-    # is_genuinely_new تكون True فقط إذا كانت هذه أول مرة يتواصل فيها المستخدم مع
-    # البوت إطلاقًا — تُستخدم لاحقًا لمنع احتساب نقطة لصاحب السحب إذا كان المستخدم
-    # قد استخدم البوت من قبل (مثلاً دخل عبر رابط عادي) قبل مشاركته في هذا السحب.
     is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id)
 
     args = context.args
@@ -4009,7 +3780,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """يُستدعى عند الضغط على زر «تحقق من الاشتراك» — يعيد فحص الاشتراك في القناة."""
     query = update.callback_query
-    # إجبار Telegram على فحص جديد؛ لا نعتمد على نتيجة «غير مشترك» القديمة.
     _SUBSCRIPTION_CACHE.pop(query.from_user.id, None)
     subscribed = await is_user_subscribed(
         context, query.from_user.id, force_refresh=True
@@ -4200,7 +3970,6 @@ async def handle_contest_vote_entry(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(text=_bt, entities=_be)
         return
 
-    # اختيار رمز الهدف الصحيح، ثم عيّنة عشوائية من بقية الرموز كتمويه.
     correct_emoji = random.choice(CAPTCHA_EMOJIS)
     decoys_pool = [e for e in CAPTCHA_EMOJIS if e != correct_emoji]
     decoy_count = min(CAPTCHA_OPTIONS_COUNT - 1, len(decoys_pool))
@@ -4227,9 +3996,6 @@ async def handle_contest_vote_entry(update: Update, context: ContextTypes.DEFAUL
     )
 
 
-# ============================================================
-#            روابط دخول خاصة بقسم «السحب» (Giveaway)
-# ============================================================
 async def handle_giveaway_captcha_entry(
     update: Update, context: ContextTypes.DEFAULT_TYPE, gw_code: str, is_genuinely_new: bool = False,
 ):
@@ -4303,11 +4069,6 @@ async def finalize_giveaway_join(context: ContextTypes.DEFAULT_TYPE, gw_code: st
     added = add_giveaway_participant(gw_code, user.id, display_name, user.username)
     if not added:
         return
-    # الربح مخصص لسحوبات «إنشاء سحب» التي فعّل صاحبها منع الرشق، ولا يصل هذا الموضع
-    # إلا بعد نجاح الكابتشا في مسار gwcap. كذلك لا نمنح نقطة إلا إذا كان المستخدم
-    # جديدًا كليًا على البوت (لم يستخدمه من قبل بأي طريقة، ولو عبر رابط عادي) —
-    # وإلا يمكن لأي "قديم" يعيد المشاركة أن يُحتسب كمستخدم جديد خطأً.
-    # INSERT OR IGNORE داخل الدالة يمنع التكرار حتى مع ضغطات متزامنة.
     if bool(giveaway["antispam"]) and is_genuinely_new:
         reward_giveaway_user(
             user.id, gw_code, giveaway["owner_id"], giveaway["chat_id"]
@@ -4342,9 +4103,7 @@ async def finalize_giveaway_join(context: ContextTypes.DEFAULT_TYPE, gw_code: st
     except Exception:
         pass
 
-    # «سحب تلقائي - عدد محدد»: إن وصل عدد المشاركين إلى الهدف المحدد، يُنفَّذ
-    # السحب تلقائيًا الآن مباشرة دون انتظار أي إجراء يدوي (Image 3).
-    if giveaway.get("autospin_mode") == "count" and giveaway.get("autospin_target") \
+    if giveaway.get("autospin_mode") == "count" and giveaway.get("autospin_target")\
             and total >= giveaway["autospin_target"]:
         await finish_giveaway_auto(context, gw_code)
 
@@ -4361,6 +4120,10 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     if is_giveaway_participant(gw_code, user.id):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
+        return
+
+    if giveaway.get("premium_only") and not user.is_premium:
+        await query.answer("💎 هذا السحب للأشخاص المفعلين مميز فقط!", show_alert=True)
         return
 
     if not await check_giveaway_condition_channels(context, user.id, giveaway):
@@ -4383,10 +4146,6 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if giveaway["antispam"]:
-        # حماية من الرشق مفعّلة: تحويل المستخدم مباشرة إلى البوت عبر رابط ?start=gwcap_{gw_code}
-        # (بنفس آلية زر التصويت 🤍 في المسابقات) دون إرسال أي رسالة خاصة وسيطة تحتوي رابطًا.
-        # هذا يحدث فقط كخط أمان لكيبورد قديم لم يُحدَّث بعد؛ الكيبورد الحالي يجعل هذا الزر
-        # رابطًا مباشرًا أصلًا فلا يمرّ عبر هذا الكولباك مطلقًا.
         await query.answer(
             url=f"https://t.me/{BOT_USERNAME}?start=gwcap_{gw_code}",
         )
@@ -4432,6 +4191,10 @@ async def gw_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if is_giveaway_participant(gw_code, query.from_user.id):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
+        return
+
+    if giveaway.get("premium_only") and not query.from_user.is_premium:
+        await query.answer("💎 هذا السحب للأشخاص المفعلين مميز فقط!", show_alert=True)
         return
 
     if not await check_giveaway_condition_channels(context, query.from_user.id, giveaway):
@@ -4560,7 +4323,6 @@ async def gw_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("⚠️ هذا السحب متوقف بالفعل.", show_alert=True)
         return
 
-    # نُجيب فورًا قبل أي عملية أخرى حتى يختفي مؤشر التحميل على الزر بسرعة.
     await query.answer("⏸ تم إيقاف استقبال المشاركات.")
     set_giveaway_status(gw_code, "paused")
     total = count_giveaway_participants(gw_code)
@@ -4601,7 +4363,7 @@ async def gw_resume_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pass
 
 
-_GW_DRAW_STATE = {}  # gw_code -> {"winners": [...], "pool": [...], "chat_id": int, "message_id": int}
+_GW_DRAW_STATE = {}
 
 
 def build_gw_draw_result_keyboard(gw_code: str) -> InlineKeyboardMarkup:
@@ -4681,7 +4443,7 @@ async def finish_giveaway_auto(context: ContextTypes.DEFAULT_TYPE, gw_code: str)
     انقضاء الوقت المحدد) — دون انتظار ضغط «ايقاف وسحب» يدويًا أولًا."""
     giveaway = get_giveaway(gw_code)
     if not giveaway or giveaway["status"] != "open":
-        return  # انتهى مسبقًا (يدويًا أو بسباق تشغيل) — لا شيء لفعله.
+        return
     winners = await _execute_giveaway_draw(context, gw_code, giveaway, disable_original_keyboard=True)
     for user_id, _name in winners:
         await notify_giveaway_winner(context, user_id, giveaway["chat_id"])
@@ -4725,7 +4487,6 @@ async def reschedule_pending_giveaway_timers(app):
         end_at = giveaway_autospin_end_datetime(giveaway)
         remaining = (end_at - now).total_seconds()
         if remaining <= 0:
-            # انتهى وقتها أثناء توقف البوت — نُنفّذ السحب فورًا.
             class _Ctx:
                 bot = app.bot
             await finish_giveaway_auto(_Ctx(), giveaway["gw_code"])
@@ -4777,7 +4538,6 @@ async def giveaway_autospin_countdown_tick(context: ContextTypes.DEFAULT_TYPE):
                 ),
             )
         except Exception:
-            # فشل التحديث (مثلاً النص لم يتغيّر منذ آخر تحديث) ليس خطأً فادحًا — نتجاهله.
             pass
 
 
@@ -4798,8 +4558,6 @@ async def gw_draw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.answer("🎲 جارٍ سحب الفائزين...")
-    # منشور المشاركة الأصلي سيُغلق يدويًا هنا عبر query.message مباشرة (السطر بعدها)،
-    # لذا لا حاجة لتكرار إغلاقه ضمن الدالة المشتركة.
     winners = await _execute_giveaway_draw(context, gw_code, giveaway, disable_original_keyboard=False)
     try:
         await query.message.edit_reply_markup(reply_markup=None)
@@ -4843,9 +4601,6 @@ async def gw_reroll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await notify_giveaway_winner(context, new_winner[0], state["chat_id"])
 
 
-# الجزء تاني من نفس كود نضرا لعدم استطاعة نمادج دكاء إصناعي قراء ملف كبير تم تقسيمه
-#         إنهاء المسابقة تلقائيًا عند انقضاء الوقت المحدد
-# ============================================================
 def contest_end_datetime(contest) -> datetime:
     """يحسب موعد انتهاء مسابقة معتمدة على وقت محدد (created_at + time_minutes)."""
     created = datetime.fromisoformat(contest["created_at"])
@@ -4863,7 +4618,7 @@ async def finish_contest_by_time(bot, contest_code: str):
     """
     contest = get_contest(contest_code)
     if not contest or contest["status"] != "open":
-        return  # انتهت مسبقًا (يدويًا أو بسباق تشغيل) — لا شيء لفعله.
+        return
 
     set_contest_status(contest_code, "ended")
 
@@ -4874,7 +4629,6 @@ async def finish_contest_by_time(bot, contest_code: str):
     ended_text, ended_entities = build_contest_ended_message(contest["cliche_text"], None, winners)
     ended_keyboard = build_contest_ended_keyboard(contest_code)
 
-    # منشور جديد منفصل دائمًا — لا نُعدّل منشور المشاركة الأصلي إطلاقًا.
     try:
         await bot.send_message(
             chat_id=contest["chat_id"],
@@ -4885,7 +4639,6 @@ async def finish_contest_by_time(bot, contest_code: str):
     except Exception as exc:
         logger.warning("finish_contest_by_time: فشل نشر منشور النتيجة الجديد للمسابقة %s: %s",
                         contest_code, exc)
-        # محاولة أخيرة بدون كيانات CUSTOM_EMOJI في حال كان أحدها هو سبب الرفض.
         stripped = [e for e in (ended_entities or []) if getattr(e, "type", None) != MessageEntity.CUSTOM_EMOJI]
         if len(stripped) != len(ended_entities or []):
             try:
@@ -4934,9 +4687,6 @@ def schedule_contest_time_end(job_queue, contest_code: str, delay_seconds: float
     if delay_seconds is None:
         return
     if job_queue is None:
-        # هذا هو السبب الأكثر شيوعًا لعدم إنهاء المسابقة تلقائيًا وعدم إرسال أي رسالة على
-        # الإطلاق عند انقضاء الوقت: JobQueue غير مُفعّلة (المكتبة الفرعية APScheduler غير
-        # مثبّتة). يجب تثبيت: pip install "python-telegram-bot[job-queue]"
         logger.error(
             "schedule_contest_time_end: job_queue غير متاحة — لن تُنهى المسابقة %s تلقائيًا! "
             "تأكد من تثبيت المكتبة عبر: pip install \"python-telegram-bot[job-queue]\"",
@@ -4960,7 +4710,6 @@ async def reschedule_pending_contest_timers(app):
         end_at = contest_end_datetime(contest)
         remaining = (end_at - now).total_seconds()
         if remaining <= 0:
-            # انتهى وقتها أثناء توقف البوت — نُنهيها فورًا.
             await finish_contest_by_time(app.bot, contest["contest_code"])
         else:
             schedule_contest_time_end(app.job_queue, contest["contest_code"], remaining)
@@ -4976,8 +4725,6 @@ async def contest_results_callback(update: Update, context: ContextTypes.DEFAULT
         await query.answer("⚠️ هذه المسابقة لم تعد متاحة.", show_alert=True)
         return
 
-    # التحقق من أن الضاغط على الزر هو مشرف في القناة/القروب الذي نُشرت فيه المسابقة —
-    # عرض النتائج متاح لمشرفي القناة فقط (صورة image 2).
     is_admin = False
     try:
         member = await context.bot.get_chat_member(contest["chat_id"], query.from_user.id)
@@ -5008,8 +4755,6 @@ async def contest_participation_callback(update: Update, context: ContextTypes.D
     try:
         await _contest_participation_callback_inner(update, context)
     except Exception:
-        # شبكة أمان: لا نترك أي زر معلّقًا بدون رد حتى لو حدث خطأ غير متوقع —
-        # هذا كان السبب الشائع خلف ظاهرة «الزر لا يستجيب».
         try:
             await query.answer("⚠️ حدث خطأ غير متوقع، حاول مرة أخرى.", show_alert=True)
         except Exception:
@@ -5030,7 +4775,6 @@ async def safe_edit_message_text(query, text, entities=None, reply_markup=None):
     except Exception as exc:
         logger.warning("safe_edit_message_text: المحاولة الأولى فشلت: %s", exc)
 
-    # إعادة المحاولة بدون أي كيانات CUSTOM_EMOJI (نُبقي BOLD/BLOCKQUOTE/إلخ).
     stripped = [e for e in (entities or []) if getattr(e, "type", None) != MessageEntity.CUSTOM_EMOJI]
     if len(stripped) != len(entities or []):
         try:
@@ -5040,7 +4784,6 @@ async def safe_edit_message_text(query, text, entities=None, reply_markup=None):
         except Exception as exc:
             logger.warning("safe_edit_message_text: فشلت المحاولة الثانية أيضًا: %s", exc)
 
-    # ملاذ أخير: نص عادي بلا أي تنسيق أو أزرار، المهم أن تصل الرسالة.
     try:
         await query.edit_message_text(text=text)
         logger.info("safe_edit_message_text: نجحت المحاولة الثالثة (نص عادي بلا تنسيق).")
@@ -5071,8 +4814,6 @@ async def _contest_participation_callback_inner(update: Update, context: Context
 
         existing = get_contest_participant(contest_code, user.id)
         if existing:
-            # مسجّل بالفعل (مثلاً محاولة سابقة نجح فيها التسجيل لكن فشل تحديث الرسالة) —
-            # نعيد عرض رسالة التسجيل بدل رسالة تنبيه فقط حتى لا تبقى القائمة القديمة ظاهرة.
             await query.answer()
             text, entities = build_contest_registered_message(existing["display_name"], existing["participant_code"])
             await safe_edit_message_text(
@@ -5091,7 +4832,6 @@ async def _contest_participation_callback_inner(update: Update, context: Context
             await query.answer("⚠️ اكتمل عدد المشاركين المسموح في هذه المسابقة.", show_alert=True)
             return
 
-        # نُجيب على الزر فورًا حتى لا يبقى معلّقًا (سبين لانهائي) في حال حدوث أي خطأ لاحقًا.
         await query.answer()
 
         display_name = user.first_name or user.username or str(user.id)
@@ -5099,9 +4839,6 @@ async def _contest_participation_callback_inner(update: Update, context: Context
         try:
             add_contest_participant(contest_code, user.id, display_name, participant_code)
         except sqlite3.IntegrityError:
-            # ضغط مزدوج/متسارع على زر «قبول» قد يؤدي لمحاولة تسجيل مكررة قبل أن يكتمل
-            # الفحص أعلاه — نتعامل معها كتسجيل ناجح بدل ترك الخطأ يوقف تنفيذ الدالة
-            # (وهذا كان سبب عدم استجابة زر التأكيد أحيانًا).
             existing = get_contest_participant(contest_code, user.id)
             if existing:
                 display_name = existing["display_name"]
@@ -5111,16 +4848,12 @@ async def _contest_participation_callback_inner(update: Update, context: Context
                 await query.message.reply_text(text=_bt, entities=_be)
                 return
 
-        # تبديل قائمة «تأكيد المشاركة» إلى رسالة التسجيل الناجح (image 4).
-        # نستخدم try/except حتى لو فشل التحديث (مثلاً لأي سبب في العرض) لا يتوقف تنفيذ
-        # نشر منشور التصويت في القناة أدناه.
         text, entities = build_contest_registered_message(display_name, participant_code)
         await safe_edit_message_text(
             query, text, entities,
             reply_markup=build_contest_registered_keyboard(contest_code, user.id, participant_code),
         )
 
-        # نشر منشور تصويت جديد فورًا في القناة/القروب (image 5).
         vote_text, vote_entities = build_contest_vote_post_message(display_name)
         try:
             sent = await context.bot.send_message(
@@ -5194,12 +4927,9 @@ async def vote_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if chosen_index != session["correct_index"]:
-        # رمز خاطئ: لا يتم تسجيل أي تصويت، ويبقى بإمكان المستخدم إعادة المحاولة.
         await query.answer(build_vote_captcha_wrong_alert(), show_alert=True)
         return
 
-    # رمز صحيح: نعيد التحقق من صلاحية التصويت قبل تسجيله فعليًا (قد يكون الوقت قد
-    # مرّ بين عرض الكابتشا وتأكيدها).
     contest_code = session["contest_code"]
     participant_id = session["participant_id"]
     voter = query.from_user
@@ -5243,7 +4973,6 @@ async def vote_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         pass
 
-    # تحديث عدد الأصوات على منشور المتسابق في القناة/القروب.
     if participant["channel_message_id"]:
         try:
             await context.bot.edit_message_reply_markup(
@@ -5295,13 +5024,10 @@ async def rr_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         show_alert=True,
     )
 
-# ============================================================
-#                     الاستعلام المضمّن
-# ============================================================
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     owner_id = update.inline_query.from_user.id
     results = []
-    
+
     try:
         ids_map = create_roulettes_batch(owner_id, ROULETTE_COUNTS)
         for n in ROULETTE_COUNTS:
@@ -5318,7 +5044,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     reply_markup=roulette_share_keyboard(roulette_id),
                 )
             )
-        
+
         await update.inline_query.answer(results, cache_time=0, is_personal=True)
     except Exception as e:
         print(f"Inline Query Error: {e}")
@@ -5333,9 +5059,6 @@ async def chosen_result_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
     set_inline_message_id(roulette_id, chosen.inline_message_id)
 
-# ============================================================
-#              معالجات التدوير (المعدلة)
-# ============================================================
 async def rr_spin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     roulette_id = int(query.data.replace("rr_spin_", ""))
@@ -5359,7 +5082,6 @@ async def rr_spin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("يجب وجود مشاركين اثنين على الأقل!", show_alert=True)
         return
 
-    # الضغطة الأولى: عرض شاشة «اكتمل العدد» وانتظار التدوير
     if status == "open":
         await query.answer()
         set_roulette_status(roulette_id, "waiting_spin")
@@ -5373,7 +5095,6 @@ async def rr_spin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # الضغطة الثانية: اختيار الفائز فعليًا وعرض النتيجة
     if status == "waiting_spin":
         await query.answer()
         winner_id, winner_name = random.choice(participants)
@@ -5414,9 +5135,6 @@ async def rr_respin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=result_keyboard(roulette_id),
     )
 
-# ============================================================
-#              معالجات الإعدادات العامة
-# ============================================================
 async def qr_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -5581,9 +5299,6 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    # ------------------------------------------------------------
-    #                      قسم المالك
-    # ------------------------------------------------------------
     if query.data == "owner_section":
         if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
@@ -5851,7 +5566,6 @@ async def channel_forward_handler(update: Update, context: ContextTypes.DEFAULT_
         except Exception as exc:
             logger.warning("تعذر حذف رسالة القناة المُعادة: %s", exc)
 
-    # قناة الإعلانات العامة لا يمكن تسجيلها كقناة شخصية عبر هذا المسار أيضًا.
     if origin_chat.username and origin_chat.username.lower() == ANNOUNCE_CHANNEL_USERNAME.lower():
         _bt, _be = bold_notice("⚠️ لا يمكن تسجيل هذه القناة.")
         await message.reply_text(text=_bt, entities=_be)
@@ -5880,10 +5594,6 @@ async def channel_forward_handler(update: Update, context: ContextTypes.DEFAULT_
         await delete_forwarded_message()
         return
 
-    # مسار «قناة شرط خاصة» لإنشاء السحب: بدل تسجيل القناة كقناة عادية للنشر
-    # فيها، نربطها كشرط اشتراك إجباري لهذا السحب فقط (لا نحوّل المستخدم لأي
-    # بوت آخر — التحقق يتم داخليًا لاحقًا عبر is_user_subscribed_to_chat).
-    # يمكن تكرار هذا المسار مرتين لإضافة قناتين خاصتين كحد أقصى (Image 2/3).
     if context.user_data.get("awaiting") == "gw_condition_channel_private":
         pending = context.user_data.setdefault("gw_condition_channels_pending", [])
         if any(str(c.get("ref")) == str(origin_chat.id) for c in pending):
@@ -5911,7 +5621,6 @@ async def channel_forward_handler(update: Update, context: ContextTypes.DEFAULT_
         pending.append({"ref": origin_chat.id, "title": chat_title, "url": invite_url})
 
         if len(pending) >= GW_CONDITION_CHANNELS_MAX:
-            # اكتمل الحد الأقصى (قناتان) — نُنهي المسار تلقائيًا.
             context.user_data["gw_condition_channels"] = pending
             context.user_data.pop("gw_condition_channels_pending", None)
             context.user_data.pop("awaiting", None)
@@ -5930,7 +5639,6 @@ async def channel_forward_handler(update: Update, context: ContextTypes.DEFAULT_
                 reply_markup=build_giveaway_settings_keyboard(context.user_data),
             )
         else:
-            # قناة أولى فقط حتى الآن — نمنح خيار إضافة قناة ثانية أو الإنهاء.
             text, entities = build_giveaway_condition_private_message(added_count=len(pending))
             await message.reply_text(
                 text=text,
@@ -6272,8 +5980,6 @@ async def contest_management_callback(update: Update, context: ContextTypes.DEFA
         )
         return
 
-    # الميزات التالية (تغيير عدد المقاعد، تغيير إعدادات المسابقة، إزالة متسابق)
-    # قيد التطوير حاليًا.
     await query.answer("🚧 هذه الميزة قيد التطوير حاليًا.", show_alert=True)
 
 
@@ -6364,7 +6070,6 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     if query.data == "comp_end_votes":
-        # يُستكمل لاحقًا مع باقي خطوات إنشاء المسابقة (تحديد القيمة النهائية والنشر في القناة).
         _bt, _be = bold_notice("جاري تجهيز هذه الخطوة قريبًا 🛠")
         await query.message.reply_text(text=_bt, entities=_be)
         return
@@ -6404,7 +6109,6 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     if query.data in ("comp_atime_show_manual", "comp_atime_show_custom"):
-        # يُستكمل لاحقًا: إدخال وقت مخصص يدويًا (زيادة/تنقيص أو رقم مباشر).
         _bt, _be = bold_notice("جاري تجهيز هذه الخطوة قريبًا 🛠")
         await query.message.reply_text(text=_bt, entities=_be)
         return
@@ -6455,11 +6159,9 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
 
         await query.answer()
 
-        # 1) فورًا: استبدال قائمة الإعدادات برسالة «تم نشر المسابقة بنجاح» (image 1).
         success_text, success_entities = build_publish_success_message()
         await query.edit_message_text(text=success_text, entities=success_entities)
 
-        # 2) إنشاء المسابقة في قاعدة البيانات.
         contest_code = generate_contest_code()
         create_contest(
             contest_code=contest_code,
@@ -6474,7 +6176,6 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
             settings=settings,
         )
 
-        # 3) نشر منشور المسابقة فعليًا في القناة/القروب الذي حدده المستخدم (image 2).
         post_text, post_entities = build_contest_channel_message(
             cliche_text, cliche_entities, target_count, end_type, time_minutes
         )
@@ -6487,20 +6188,15 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
                 reply_markup=post_keyboard,
             )
             set_contest_channel_message(contest_code, sent.message_id)
-            # 3.1) إعلان إضافي في قناة الإعلانات العامة لتوسيع دائرة الانتشار.
-            # يعمل في الخلفية (لا يُنتظر) حتى لا يُبطئ استجابة نشر المسابقة للمستخدم.
             asyncio.create_task(announce_new_post(context, chat_id, sent.message_id, "contest"))
         except Exception:
             await query.message.reply_text(
                 "⚠️ تعذر نشر المسابقة في القناة/القروب المحدد، تأكد من أن البوت مايزال مشرفًا هناك."
             )
 
-        # 4) في حال كانت المسابقة معتمدة على وقت محدد: جدولة إنهائها تلقائيًا واختيار
-        # الفائز/الفائزين صاحب أعلى الأصوات عند انقضاء الوقت.
         if end_type == "time" and time_minutes:
             schedule_contest_time_end(context.job_queue, contest_code, time_minutes * 60)
 
-        # تنظيف بيانات الجلسة المؤقتة الخاصة بإنشاء المسابقة.
         for key in list(ud.keys()):
             if key.startswith("contest_"):
                 ud.pop(key, None)
@@ -6540,11 +6236,9 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
     winners_count = ud.get("gw_winners_count")
     settings = {k: ud.get(k, d) for k, d in GIVEAWAY_SETTINGS_DEFAULTS.items()}
 
-    # 1) فورًا: رسالة «تم نشر السحب بنجاح».
     success_text, success_entities = build_giveaway_publish_success_message()
     await update.message.reply_text(text=success_text, entities=success_entities)
 
-    # 2) إنشاء السحب في قاعدة البيانات.
     gw_code = generate_gw_code()
     create_giveaway(
         gw_code=gw_code,
@@ -6556,7 +6250,6 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings=settings,
     )
 
-    # 3) نشر منشور السحب فعليًا في القناة/القروب المحدد (Image 5).
     vote_contest_code = settings.get("gw_vote_contest_code")
     vote_participant_id = settings.get("gw_vote_participant_id")
     vote_link = (
@@ -6568,7 +6261,6 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await build_giveaway_boost_link(context, chat_id) if settings.get("gw_boost") else ""
     )
 
-    # إعداد عبارة «سحب تلقائي» المزخرفة (Image 9) إن كان أحد وضعيه مفعّلاً.
     autospin_mode = settings.get("gw_autospin_mode")
     autospin_notice = None
     if autospin_mode == "count" and settings.get("gw_autospin_target"):
@@ -6592,11 +6284,7 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=post_keyboard,
         )
         set_giveaway_channel_message(gw_code, sent.message_id)
-        # 3.1) إعلان إضافي في قناة الإعلانات العامة لتوسيع دائرة الانتشار.
-        # يعمل في الخلفية (لا يُنتظر) حتى لا يُبطئ استجابة نشر السحب للمستخدم.
         asyncio.create_task(announce_new_post(context, chat_id, sent.message_id, "giveaway", {"winners_count": winners_count}))
-        # 3.2) وضع «سحب تلقائي - وقت محدد»: نجدول مؤقتًا لتنفيذ السحب فعليًا عند
-        # وصول العداد للصفر (بنفس آلية مؤقتات المسابقات — schedule_contest_time_end).
         if autospin_mode == "time" and settings.get("gw_autospin_minutes"):
             schedule_giveaway_autospin_time(
                 context.job_queue, gw_code, settings["gw_autospin_minutes"] * 60,
@@ -6606,7 +6294,6 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ تعذر نشر السحب في القناة/القروب المحدد، تأكد من أن البوت مايزال مشرفًا هناك."
         )
 
-    # تنظيف بيانات الجلسة المؤقتة الخاصة بإنشاء السحب.
     for key in list(ud.keys()):
         if key.startswith("gw_"):
             ud.pop(key, None)
@@ -6628,7 +6315,7 @@ async def show_my_giveaways_list(query, context: ContextTypes.DEFAULT_TYPE, page
         )
         return
 
-    total_pages = max(1, -(-len(giveaways) // GW_LIST_PAGE_SIZE))  # سقف القسمة بدون استيراد math
+    total_pages = max(1, -(-len(giveaways) // GW_LIST_PAGE_SIZE))
     page = max(1, min(page, total_pages))
     text, entities = build_my_giveaways_list_message(page, total_pages)
     await query.edit_message_text(
@@ -6775,7 +6462,6 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "gw_opt_vote":
-        # شرط «تصويت متسابق»: نطلب من المستخدم إرسال كود المتسابق ليتم ربطه بالسحب.
         context.user_data["awaiting"] = "gw_vote_code"
         text, entities = build_giveaway_vote_code_message()
         await query.edit_message_text(
@@ -6786,7 +6472,6 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "gw_opt_autospin":
-        # السحب التلقائي: نعرض أولاً قائمة اختيار طريقة الانتهاء (عدد/وقت) — Image 2.
         text, entities = build_giveaway_autospin_end_method_message()
         await query.edit_message_text(
             text=text,
@@ -6796,7 +6481,6 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "gw_atime_back":
-        # رجوع من شاشة «عدد محدد» أو «وقت محدد» إلى شاشة اختيار طريقة الانتهاء.
         context.user_data.pop("awaiting", None)
         text, entities = build_giveaway_autospin_end_method_message()
         await query.edit_message_text(
@@ -6807,7 +6491,6 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "gw_atime_end_count":
-        # «عدد محدد»: نطلب من المستخدم إرسال عدد المشاركين المطلوب — Image 3.
         context.user_data["awaiting"] = "gw_autospin_count"
         text, entities = build_giveaway_autospin_count_message()
         await query.edit_message_text(
@@ -6818,7 +6501,6 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "gw_atime_end_time":
-        # «وقت محدد»: نعرض قائمة الأوقات الجاهزة — Image 4.
         context.user_data.pop("awaiting", None)
         text, entities = build_giveaway_autospin_time_message()
         await query.edit_message_text(
@@ -6829,8 +6511,6 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data.startswith("gw_atime_set_"):
-        # اختيار وقت جاهز من القائمة (Image 4) → يُحفظ فورًا ونعود لقائمة الإعدادات
-        # الأولى مع تحديث اسم زر «سحب تلقائي» ليعرض الوقت الفعلي المختار.
         minutes = int(data.replace("gw_atime_set_", ""))
         for key, default in GIVEAWAY_SETTINGS_DEFAULTS.items():
             context.user_data.setdefault(key, default)
@@ -6846,8 +6526,6 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "gw_atime_show_custom":
-        # قائمة «وقت مخصص» التراكمية (Image 5/7): نبدأ من القيمة الحالية إن كانت
-        # محفوظة مسبقًا بوضع «وقت»، وإلا نبدأ من «غير محدد».
         if context.user_data.get("gw_autospin_mode") == "time":
             context.user_data["gw_autospin_custom_minutes"] = context.user_data.get("gw_autospin_minutes") or 0
         else:
@@ -6863,7 +6541,6 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data.startswith("gw_atime_custom_delta:"):
-        # زر تعديل دقيق (+/-) — يُحدَّث المجموع التراكمي فورًا في نفس الشاشة (Image 7).
         delta = int(data.split(":", 1)[1])
         current = context.user_data.get("gw_autospin_custom_minutes", 0)
         context.user_data["gw_autospin_custom_minutes"] = max(0, current + delta)
@@ -6888,8 +6565,6 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "gw_atime_custom_confirm":
-        # «تأكيد الوقت» (Image 5) — يعود لقائمة إعدادات السحب الأولى مع تحديث زر
-        # «سحب تلقائي» ليعرض الوقت الفعلي المحسوب (مثلاً «ساعة و 11 دقيقة») — Image 8.
         total = context.user_data.get("gw_autospin_custom_minutes", 0)
         if not total or total <= 0:
             await query.answer("⚠️ اختر وقتًا أولاً باستخدام أزرار التعديل.", show_alert=True)
@@ -6908,7 +6583,6 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "gw_opt_condition":
-        # «قناة شرط»: نعرض أولاً قائمة اختيار نوع القناة (عامة/خاصة) — Image 2.
         context.user_data.pop("awaiting", None)
         context.user_data.pop("gw_condition_channels_pending", None)
         text, entities = build_giveaway_condition_type_message()
@@ -6941,7 +6615,6 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "gw_cond_private_done":
-        # إنهاء إضافة قنوات الشرط الخاصة بقناة واحدة فقط (بدون إضافة الثانية).
         pending = context.user_data.get("gw_condition_channels_pending") or []
         if not pending:
             await query.answer("⚠️ لم تُضِف أي قناة بعد.", show_alert=True)
@@ -6995,9 +6668,6 @@ async def _go_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
-# ============================================================
-#                      تشغيل البوت
-# ============================================================
 async def _global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """يسجّل أي خطأ غير متوقع بدل أن يختفي بصمت — هذا كان السبب في تعذّر تشخيص
     مشاكل مثل «الزر لا يستجيب أحيانًا» أو «لم تُرسل رسالة عند انتهاء الوقت»."""
@@ -7006,11 +6676,6 @@ async def _global_error_handler(update: object, context: ContextTypes.DEFAULT_TY
 
 def main():
     init_db()
-    # الإعدادات الافتراضية للمكتبة تستخدم اتصال شبكة واحد فقط (connection_pool_size=1)
-    # وتعالج التحديثات تباعًا واحدًا تلو الآخر (concurrent_updates=False) — هذا هو السبب
-    # الرئيسي لبطء الاتصال: كل ضغطة زر/رسالة تنتظر دورها خلف كل طلب آخر يجري في نفس
-    # اللحظة (حتى الطلبات الخلفية مثل إعلان قناة TREX9R). الإعدادات أدناه تفتح عدة
-    # اتصالات متوازية وتسمح بمعالجة عدة مستخدمين/أزرار في نفس الوقت بدل التسلسل.
     request = HTTPXRequest(
         connection_pool_size=20,
         connect_timeout=10.0,
@@ -7039,14 +6704,10 @@ def main():
         )
     else:
         logger.info("JobQueue مفعّلة بنجاح.")
-        # فحص دوري كل 10 دقائق لعدد مشتركي قناة الاشتراك الإجباري، لتفعيل التغيير
-        # التلقائي للقناة التالية إن كانت محددة من المالك ووصل عدد المشتركين للهدف.
         app.job_queue.run_repeating(
             check_required_channel_auto_switch, interval=600, first=30,
             name="required_channel_auto_switch",
         )
-        # فحص دوري كل 10 دقائق لتحديث جملة العد التنازلي داخل منشورات «سحب تلقائي -
-        # وقت محدد» المفتوحة (Image 9)، وكخط أمان إضافي لإنهاء أي سحب انقضى وقته.
         app.job_queue.run_repeating(
             giveaway_autospin_countdown_tick, interval=600, first=60,
             name="giveaway_autospin_countdown_tick",
@@ -7098,7 +6759,6 @@ def main():
     app.add_handler(CallbackQueryHandler(vote_captcha_callback, pattern=r"^compcap:"))
     app.add_handler(CallbackQueryHandler(contest_results_callback, pattern=r"^comp_view_results:"))
 
-    # -------- قسم «إنشاء سحب» (Giveaway) --------
     app.add_handler(CallbackQueryHandler(
         gw_section_callback,
         pattern=r"^(create_draw|gw_start_create|gw_reg_channel|gw_reg_group|gw_del_channels|gw_noop"
@@ -7131,18 +6791,12 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
     app.add_handler(ChatMemberHandler(bot_chat_status_update, ChatMemberHandler.MY_CHAT_MEMBER))
 
-    # إعادة جدولة مؤقتات المسابقات المفتوحة (المعتمدة على وقت محدد) بعد أي إعادة تشغيل للبوت،
-    # حتى لا تبقى معلّقة بدون اختيار فائز إذا انتهى وقتها أثناء توقف البوت.
-    # كما نسجّل هنا قائمة أوامر البوت (زر "/" بجانب حقل الكتابة) لتظهر /start
-    # مع وصفها حتى قبل أن يدخل المستخدم محادثة البوت لأول مرة.
     async def _post_init(app_):
         await app_.bot.set_my_commands([
             BotCommand("start", "رسالة البدء"),
         ])
         await reschedule_pending_contest_timers(app_)
         await reschedule_pending_giveaway_timers(app_)
-        # تنظيف: إزالة قناة الإعلانات العامة إن كانت قد سُجّلت سابقًا (قبل هذا الإصدار)
-        # كقناة عادية ضمن قوائم اختيار المستخدمين، حتى لا تظهر للنشر فيها بالخطأ.
         try:
             announce_chat = await app_.bot.get_chat(f"@{ANNOUNCE_CHANNEL_USERNAME}")
             remove_registered_chat(announce_chat.id)
