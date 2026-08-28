@@ -296,6 +296,9 @@ EMOJI = {
     "gw_new_participant": "6032994772321309200",
     "gw_view_profile": "5904630315946611415",
     "gw_kick_btn": "5240241223632954241",
+    # -------- إيموجيات خاصة بـ «السحب التلقائي» (autospin) --------
+    "gw_atime_lightning": "5965286318001889755",
+    "gw_atime_clock": "5852614259082530343",
 }
 
 # قائمة إيموجيات الكابتشا (تُستخدم عند التحقق من التصويت لمتسابق) — يتم اختيار
@@ -1401,6 +1404,42 @@ def format_minutes_label(minutes: int) -> str:
     return f"{minutes} دقيقة"
 
 
+def _duration_unit_label(n: int, one: str, two: str, few: str, many: str) -> str:
+    """صيغة عربية مختصرة لوحدة زمنية ضمن تسمية مركّبة (يوم/ساعة/دقيقة معًا) —
+    بدون «واحد/واحدة» كي لا تتكرر عبر كل وحدة (مثال: «يوم و ساعة و 11 دقيقة»)."""
+    if n == 1:
+        return one
+    if n == 2:
+        return two
+    if n <= 10:
+        return f"{n} {few}"
+    return f"{n} {many}"
+
+
+def format_duration_label(total_minutes) -> str:
+    """يحوّل عدد الدقائق المتراكم (من قائمة «وقت مخصص» التراكمية) إلى تسمية عربية
+    مقروءة. عند وجود وحدة واحدة فقط (مثلاً 60 دقيقة بالضبط) تُستخدم نفس صيغة
+    format_minutes_label الكاملة («ساعة واحدة»)، وعند تركيب أكثر من وحدة تُستخدم
+    صيغة مختصرة متسلسلة بـ«و» (مثال: «يوم و ساعة و 11 دقيقة»)، مطابقةً لتصميم
+    قائمة «وقت مخصص» (Image 7/8)."""
+    if not total_minutes or total_minutes <= 0:
+        return "غير محدد"
+    total_minutes = int(total_minutes)
+    days, rem = divmod(total_minutes, 1440)
+    hours, minutes = divmod(rem, 60)
+    units_present = sum(1 for x in (days, hours, minutes) if x)
+    if units_present <= 1:
+        return format_minutes_label(total_minutes)
+    parts = []
+    if days:
+        parts.append(_duration_unit_label(days, "يوم", "يومين", "أيام", "يوم"))
+    if hours:
+        parts.append(_duration_unit_label(hours, "ساعة", "ساعتين", "ساعات", "ساعة"))
+    if minutes:
+        parts.append(_duration_unit_label(minutes, "دقيقة", "دقيقتين", "دقائق", "دقيقة"))
+    return " و ".join(parts)
+
+
 def utf16_len(s: str) -> int:
     return len(s.encode("utf-16-le")) // 2
 
@@ -2010,6 +2049,13 @@ GIVEAWAY_SETTINGS_DEFAULTS = {
     # gw_opt_condition. كل عنصر بالقائمة: {"ref": ..., "title": ..., "url": ...}
     # حيث ref هو "@username" أو معرّف الشات الرقمي (يُستخدم مباشرة مع get_chat_member).
     "gw_condition_channels": [],
+    # شرط «سحب تلقائي»: mode هي إما "count" (عدد مشاركين محدد) أو "time" (وقت
+    # محدد) أو None إن لم يُفعَّل بعد. target هو عدد المشاركين المطلوب في حالة
+    # "count"، وminutes هو عدد الدقائق المتراكمة في حالة "time" (تُملأ إما من
+    # قائمة الأوقات الجاهزة أو من قائمة «وقت مخصص» التراكمية).
+    "gw_autospin_mode": None,
+    "gw_autospin_target": None,
+    "gw_autospin_minutes": None,
 }
 
 # الحد الأقصى لعدد قنوات الشرط التي يمكن ربطها بسحب واحد.
@@ -2086,6 +2132,27 @@ def build_giveaway_settings_keyboard(user_data: dict) -> InlineKeyboardMarkup:
             style="primary", **emoji_kwargs("gw_condition_channel"),
         )
 
+    # زر «سحب تلقائي»: إن كان مفعّلاً (عدد أو وقت)، يتغيّر اسم الزر ليعرض القيمة
+    # الفعلية المحددة بدل النص الافتراضي (بنفس أسلوب أزرار الشروط الأخرى أعلاه).
+    autospin_mode = user_data.get("gw_autospin_mode", GIVEAWAY_SETTINGS_DEFAULTS["gw_autospin_mode"])
+    if autospin_mode == "count" and user_data.get("gw_autospin_target"):
+        autospin_label = f"سحب تلقائي: {user_data['gw_autospin_target']} مشترك"
+        autospin_btn = InlineKeyboardButton(
+            autospin_label, callback_data="gw_opt_autospin",
+            style="success", **emoji_kwargs("target_pin"),
+        )
+    elif autospin_mode == "time" and user_data.get("gw_autospin_minutes"):
+        autospin_label = f"سحب تلقائي: {format_duration_label(user_data['gw_autospin_minutes'])}"
+        autospin_btn = InlineKeyboardButton(
+            autospin_label, callback_data="gw_opt_autospin",
+            style="success", **emoji_kwargs("gw_atime_clock"),
+        )
+    else:
+        autospin_btn = InlineKeyboardButton(
+            "سحب تلقائي", callback_data="gw_opt_autospin",
+            style="primary", **emoji_kwargs("draws_check"),
+        )
+
     return InlineKeyboardMarkup([
         [
             toggle_btn("تعزيز القناة", boost, "gw_toggle_boost"),
@@ -2097,8 +2164,7 @@ def build_giveaway_settings_keyboard(user_data: dict) -> InlineKeyboardMarkup:
         ],
         [
             toggle_btn("منع الرشق", antispam, "gw_toggle_antispam"),
-            InlineKeyboardButton("سحب تلقائي", callback_data="gw_opt_autospin",
-                                  style="primary", **emoji_kwargs("draws_check")),
+            autospin_btn,
         ],
         [InlineKeyboardButton(
             "نشر السحب", callback_data="gw_opt_create",
@@ -2109,6 +2175,145 @@ def build_giveaway_settings_keyboard(user_data: dict) -> InlineKeyboardMarkup:
             style="danger", **emoji_kwargs("back_section_btn"),
         )],
     ])
+
+
+def build_giveaway_autospin_end_method_message() -> tuple:
+    """شاشة «اختر طريقة انتهاء السحب» الخاصة بالسحب التلقائي (Image 2)."""
+    parts = [
+        (["اختر طريقة انتهاء السحب", ("❓", EMOJI["end_question"])], "bold", None),
+        "\n\n",
+        ([
+            ("🎯", EMOJI["target_pin"]), " عدد محدد ", ("⚡️", EMOJI["gw_atime_lightning"]),
+            " : ينتهي السحب تلقائيًا عند وصول عدد المشاركين إلى الرقم الذي تحدده",
+        ], "blockquote", None),
+        "\n\n",
+        ([
+            ("🕖", EMOJI["gw_atime_clock"]), " وقت محدد : ينتهي السحب عند انتهاء الوقت الذي "
+            "تحدده ويتم اختيار الفائزين ", ("🏆", EMOJI["trophy_win"]),
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_giveaway_autospin_end_method_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "عدد محدد", callback_data="gw_atime_end_count",
+                style="primary", **emoji_kwargs("target_pin"),
+            ),
+            InlineKeyboardButton(
+                "وقت محدد", callback_data="gw_atime_end_time",
+                style="primary", **emoji_kwargs("gw_atime_clock"),
+            ),
+        ],
+        [InlineKeyboardButton(
+            "رجوع للخيارات", callback_data="gw_back_to_options",
+            style="danger", **emoji_kwargs("back_section_btn"),
+        )],
+    ])
+
+
+def build_giveaway_autospin_count_message() -> tuple:
+    """شاشة «أرسل عدد المشاركين المطلوب» لتفعيل السحب التلقائي لعدد محدد (Image 3)."""
+    parts = [
+        ([
+            ("🎯", EMOJI["target_pin"]), " السحب التلقائي لـ عدد محدد",
+        ], "bold", None),
+        "\n\n",
+        "أرسل عدد المشاركين المطلوب لبدء السحب تلقائياً",
+        "\n\n",
+        ([
+            "مثال: إذا أردت تفعيل السحب التلقائي عند وصول عدد المشاركين إلى 100 "
+            "أرسل الرقم 100",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_giveaway_autospin_count_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "رجوع للخيارات", callback_data="gw_atime_back",
+            style="danger", **emoji_kwargs("back_section_btn"),
+        )],
+    ])
+
+
+def build_giveaway_autospin_time_message(selected_label: str = "غير محدد") -> tuple:
+    """شاشة «السحب التلقائي لـ وقت محدود» بعرض قائمة الأوقات الجاهزة (Image 4)."""
+    parts = [
+        ([
+            ("🕖", EMOJI["gw_atime_clock"]), " السحب التلقائي لـ وقت محدود",
+        ], "bold", None),
+        f"\nالوقت المختار: {selected_label}",
+        "\n\n",
+        "استخدم الأزرار أدناه لتحديد الوقت المطلوب لبدء السحب تلقائياً:",
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_giveaway_autospin_time_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for row in CONTEST_TIME_OPTIONS:
+        rows.append([
+            InlineKeyboardButton(
+                label, callback_data=f"gw_atime_set_{minutes}",
+                style="primary", **emoji_kwargs("time_option_btn"),
+            )
+            for minutes, label in row
+        ])
+    rows.append([
+        InlineKeyboardButton(
+            "وقت مخصص", callback_data="gw_atime_show_custom",
+            style="primary", **emoji_kwargs("time_manual_btn"),
+        ),
+    ])
+    rows.append([
+        InlineKeyboardButton(
+            "رجوع", callback_data="gw_atime_back",
+            style="danger", **emoji_kwargs("back_time_menu_btn"),
+        )
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+# أزرار التعديل الدقيق لقائمة «وقت مخصص» التراكمية (Image 5/7): كل زر يحمل
+# مقدار الزيادة/التنقيص بالدقائق (سالب = تنقيص).
+GW_AUTOSPIN_CUSTOM_STEPS = [
+    [(-1, "- 1 دقيقة"), (1, "+ 1 دقيقة")],
+    [(-5, "- 5 دقيقة"), (5, "+ 5 دقيقة")],
+    [(-10, "- 10 دقايق"), (10, "+ 10 دقايق")],
+    [(-60, "- 1 ساعة"), (60, "+ 1 ساعة")],
+    [(-1440, "- 1 يوم"), (1440, "+ 1 يوم")],
+]
+
+
+def build_giveaway_autospin_custom_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for row in GW_AUTOSPIN_CUSTOM_STEPS:
+        rows.append([
+            InlineKeyboardButton(
+                label, callback_data=f"gw_atime_custom_delta:{delta}",
+                style="primary", **emoji_kwargs("time_option_btn"),
+            )
+            for delta, label in row
+        ])
+    rows.append([InlineKeyboardButton(
+        "تأكيد الوقت", callback_data="gw_atime_custom_confirm",
+        style="success", **emoji_kwargs("yes_btn"),
+    )])
+    rows.append([
+        InlineKeyboardButton(
+            "إعادة تعيين", callback_data="gw_atime_custom_reset",
+            style="success", **emoji_kwargs("restore_defaults_btn"),
+        ),
+        InlineKeyboardButton(
+            "رجوع للخيارات", callback_data="gw_back_to_options",
+            style="danger", **emoji_kwargs("back_section_btn"),
+        ),
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_giveaway_vote_code_message() -> tuple:
@@ -2187,7 +2392,7 @@ def build_giveaway_condition_public_message() -> tuple:
         ([("📢", EMOJI["gw_condition_channel"]), " قناة الشرط العامة"], "bold", None),
         "\n\n",
         "الان ارسل لي يوزر قناة الشرط", "\n",
-        "مثال @YYYLLY",
+        "مثال @e_ggf",
         "\n\n",
         "لا تضف أي نص إضافي مع اليوزر",
         "\n\n",
@@ -2196,8 +2401,8 @@ def build_giveaway_condition_public_message() -> tuple:
         "\n\n",
         ([
             "يمكنك إضافة قناتين كحد أقصى، ويتم إدخال الأسماء بهذا الشكل:", "\n",
-            "@YYYLLY", "\n",
-            "@YY3HH",
+            "@e_ggf", "\n",
+            "@n_bbo",
         ], "blockquote", None),
     ]
     return build_text_with_emojis(parts)
@@ -2327,8 +2532,23 @@ def build_giveaway_vote_condition_link(vote_contest_code: str, vote_participant_
     return f"https://t.me/{BOT_USERNAME}?start=compvote_{vote_contest_code}_{vote_participant_id}"
 
 
+def build_giveaway_autospin_notice_text(giveaway) -> str:
+    """يبني نص عبارة «سحب تلقائي» المزخرفة المضافة أسفل منشور السحب (Image 9)،
+    والتي تُحدَّث تلقائيًا كل 10 دقائق في حالة «وقت محدد» حتى وصول العداد للصفر."""
+    mode = giveaway.get("autospin_mode")
+    if mode == "count":
+        target = giveaway.get("autospin_target")
+        return f"يُسحب تلقائيًا عند اكتمال {target} مشارك"
+    if mode == "time":
+        end_at = giveaway_autospin_end_datetime(giveaway)
+        remaining_minutes = max(0, (end_at - datetime.now(timezone.utc)).total_seconds() / 60)
+        remaining_label = format_duration_label(round(remaining_minutes)) if remaining_minutes >= 1 else "لحظات"
+        return f"يُسحب تلقائيًا بعد {remaining_label}"
+    return ""
+
+
 def build_giveaway_channel_message(cliche_text: str, cliche_entities, vote_link: str = None,
-                                    condition_channels=None) -> tuple:
+                                    condition_channels=None, autospin: dict = None) -> tuple:
     """منشور السحب الذي يُنشر في القناة/القروب (Image 5).
 
     إذا كان السحب مشروطًا بالتصويت لمتسابق (vote_link)، يُضاف أعلى تذييل العلامة
@@ -2360,6 +2580,12 @@ def build_giveaway_channel_message(cliche_text: str, cliche_entities, vote_link:
             " ›› ",
             (["هـــنـــا"], "link", vote_link),
         ]
+        extra_parts += ["\n\n", (quote_content, "blockquote", None)]
+
+    if autospin and autospin.get("mode") in ("count", "time"):
+        icon = ("🎯", EMOJI["target_pin"]) if autospin["mode"] == "count" else ("🕖", EMOJI["gw_atime_clock"])
+        notice_text = autospin.get("notice_text") or ""
+        quote_content = [icon, " ", notice_text]
         extra_parts += ["\n\n", (quote_content, "blockquote", None)]
 
     extra_text, extra_entities = build_text_with_emojis(extra_parts) if extra_parts else ("", [])
@@ -3155,6 +3381,16 @@ def generate_gw_code() -> str:
 
 def create_giveaway(gw_code: str, owner_id: int, chat_id: int, cliche_text: str,
                      cliche_entities, winners_count: int, settings: dict) -> None:
+    autospin_mode = settings.get("gw_autospin_mode")
+    autospin_target = settings.get("gw_autospin_target")
+    autospin_minutes = settings.get("gw_autospin_minutes")
+    # نحسب لحظة الانتهاء الفعلية عند الإنشاء مباشرة (وليس عند كل قراءة) حتى تبقى
+    # ثابتة حتى بعد إعادة تشغيل البوت — تُستخدم لجدولة المؤقت ولتحديث العد
+    # التنازلي المعروض في المنشور كل 10 دقائق.
+    autospin_ends_at = (
+        (datetime.now(timezone.utc) + timedelta(minutes=autospin_minutes)).isoformat()
+        if autospin_mode == "time" and autospin_minutes else None
+    )
     fs_db().collection("giveaways").document(gw_code).set({
         "gw_code": gw_code,
         "owner_id": owner_id,
@@ -3173,6 +3409,11 @@ def create_giveaway(gw_code: str, owner_id: int, chat_id: int, cliche_text: str,
         "channel_message_id": None,
         "status": "open",
         "created_at": datetime.now(timezone.utc).isoformat(),
+        # -------- حقول «السحب التلقائي» --------
+        "autospin_mode": autospin_mode,
+        "autospin_target": autospin_target,
+        "autospin_minutes": autospin_minutes,
+        "autospin_ends_at": autospin_ends_at,
     })
 
 
@@ -3237,6 +3478,25 @@ def get_giveaways_by_owner(owner_id: int):
     rows = [FSRow(d.to_dict()) for d in docs]
     rows.sort(key=lambda r: r.get("created_at") or "")
     return rows
+
+
+def get_open_time_giveaways():
+    """يُعيد كل السحوبات المفتوحة المعتمدة على «سحب تلقائي - وقت محدد» (لإعادة
+    جدولة المؤقتات بعد إعادة تشغيل البوت، ولتحديث العد التنازلي كل 10 دقائق)."""
+    docs = fs_db().collection("giveaways").where("status", "==", "open").stream()
+    rows = []
+    for d in docs:
+        data = d.to_dict()
+        if data.get("autospin_mode") == "time" and data.get("autospin_ends_at"):
+            rows.append(FSRow(data))
+    return rows
+
+
+def giveaway_autospin_end_datetime(giveaway) -> datetime:
+    end_at = datetime.fromisoformat(giveaway["autospin_ends_at"])
+    if end_at.tzinfo is None:
+        end_at = end_at.replace(tzinfo=timezone.utc)
+    return end_at
 
 
 def count_giveaway_new_rewarded(gw_code: str) -> int:
@@ -4039,6 +4299,12 @@ async def finalize_giveaway_join(context: ContextTypes.DEFAULT_TYPE, gw_code: st
     except Exception:
         pass
 
+    # «سحب تلقائي - عدد محدد»: إن وصل عدد المشاركين إلى الهدف المحدد، يُنفَّذ
+    # السحب تلقائيًا الآن مباشرة دون انتظار أي إجراء يدوي (Image 3).
+    if giveaway.get("autospin_mode") == "count" and giveaway.get("autospin_target") \
+            and total >= giveaway["autospin_target"]:
+        await finish_giveaway_auto(context, gw_code)
+
 
 async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """يعالج ضغط زر «اضغط لـ المشاركة» أسفل منشور السحب في القناة/القروب."""
@@ -4305,6 +4571,151 @@ async def notify_giveaway_winner(context: ContextTypes.DEFAULT_TYPE, user_id: in
         pass
 
 
+async def _execute_giveaway_draw(context: ContextTypes.DEFAULT_TYPE, gw_code: str, giveaway,
+                                  disable_original_keyboard: bool = True) -> list:
+    """المنطق المشترك لتنفيذ سحب الفائزين فعليًا (يقفل السحب، يختار الفائزين
+    عشوائيًا، وينشر منشور النتيجة). يُستخدم من:
+    - gw_draw_callback (بعد ضغط «ابدا السحب» يدويًا).
+    - finish_giveaway_auto (عند اكتمال السحب التلقائي — عدد أو وقت — دون أي
+      ضغط يدوي لزر «ايقاف وسحب» أولًا).
+    """
+    set_giveaway_status(gw_code, "closed")
+    participants = get_giveaway_participants(gw_code)
+    winners_count = giveaway["winners_count"] or 1
+    winners = random.sample(participants, min(winners_count, len(participants))) if participants else []
+    remaining_pool = [p for p in participants if p not in winners]
+
+    cliche_entities = json_to_entities(giveaway["cliche_entities"])
+    end_text, end_entities = build_giveaway_ended_message(giveaway["cliche_text"], cliche_entities, winners)
+    sent_message = None
+    try:
+        sent_message = await context.bot.send_message(
+            chat_id=giveaway["chat_id"], text=end_text, entities=end_entities,
+            reply_markup=build_gw_draw_result_keyboard(gw_code),
+        )
+    except Exception:
+        pass
+
+    if disable_original_keyboard and giveaway.get("channel_message_id"):
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=giveaway["chat_id"], message_id=giveaway["channel_message_id"], reply_markup=None,
+            )
+        except Exception:
+            pass
+
+    _GW_DRAW_STATE[gw_code] = {
+        "winners": winners,
+        "pool": remaining_pool,
+        "chat_id": giveaway["chat_id"],
+        "message_id": sent_message.message_id if sent_message else None,
+        "cliche_text": giveaway["cliche_text"],
+        "cliche_entities": giveaway["cliche_entities"],
+        "owner_id": giveaway["owner_id"],
+    }
+    return winners
+
+
+async def finish_giveaway_auto(context: ContextTypes.DEFAULT_TYPE, gw_code: str):
+    """يُستدعى تلقائيًا فور اكتمال شرط «سحب تلقائي» (عدد المشاركين المطلوب أو
+    انقضاء الوقت المحدد) — دون انتظار ضغط «ايقاف وسحب» يدويًا أولًا."""
+    giveaway = get_giveaway(gw_code)
+    if not giveaway or giveaway["status"] != "open":
+        return  # انتهى مسبقًا (يدويًا أو بسباق تشغيل) — لا شيء لفعله.
+    winners = await _execute_giveaway_draw(context, gw_code, giveaway, disable_original_keyboard=True)
+    for user_id, _name in winners:
+        await notify_giveaway_winner(context, user_id, giveaway["chat_id"])
+
+
+async def giveaway_autospin_time_job(context: ContextTypes.DEFAULT_TYPE):
+    gw_code = context.job.data
+    try:
+        await finish_giveaway_auto(context, gw_code)
+    except Exception:
+        logger.exception("giveaway_autospin_time_job: فشل تنفيذ السحب التلقائي %s", gw_code)
+
+
+def schedule_giveaway_autospin_time(job_queue, gw_code: str, delay_seconds: float):
+    """يجدول تنفيذ السحب التلقائي فعليًا عند انقضاء الوقت المحدد (Image 9) —
+    بنفس آلية schedule_contest_time_end تمامًا."""
+    if delay_seconds is None:
+        return
+    if job_queue is None:
+        logger.error(
+            "schedule_giveaway_autospin_time: job_queue غير متاحة — لن يُنفَّذ السحب التلقائي %s! "
+            "تأكد من تثبيت المكتبة عبر: pip install \"python-telegram-bot[job-queue]\"",
+            gw_code,
+        )
+        return
+    job_queue.run_once(
+        giveaway_autospin_time_job,
+        when=max(delay_seconds, 1),
+        data=gw_code,
+        name=f"gw_autospin_end_{gw_code}",
+    )
+    logger.info("schedule_giveaway_autospin_time: تمت جدولة السحب التلقائي %s بعد %.0f ثانية",
+                gw_code, delay_seconds)
+
+
+async def reschedule_pending_giveaway_timers(app):
+    """يُستدعى عند إقلاع البوت لإعادة جدولة مؤقتات «سحب تلقائي - وقت محدد» المفتوحة
+    (بعد أي إعادة تشغيل)، بنفس آلية reschedule_pending_contest_timers."""
+    now = datetime.now(timezone.utc)
+    for giveaway in get_open_time_giveaways():
+        end_at = giveaway_autospin_end_datetime(giveaway)
+        remaining = (end_at - now).total_seconds()
+        if remaining <= 0:
+            # انتهى وقتها أثناء توقف البوت — نُنفّذ السحب فورًا.
+            class _Ctx:
+                bot = app.bot
+            await finish_giveaway_auto(_Ctx(), giveaway["gw_code"])
+        else:
+            schedule_giveaway_autospin_time(app.job_queue, giveaway["gw_code"], remaining)
+
+
+async def giveaway_autospin_countdown_tick(context: ContextTypes.DEFAULT_TYPE):
+    """يعمل كل 10 دقائق (Image 9): يحدّث جملة العد التنازلي المعروضة داخل كل
+    منشور سحب مفعّل عليه «سحب تلقائي - وقت محدد» ولا يزال مفتوحًا، ويُنهي فورًا
+    أي سحب انقضى وقته فعليًا كخط أمان إضافي (احتياطًا لأي تعارض توقيت مع
+    المؤقت الفردي run_once)."""
+    for giveaway in get_open_time_giveaways():
+        gw_code = giveaway["gw_code"]
+        end_at = giveaway_autospin_end_datetime(giveaway)
+        remaining = (end_at - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
+            try:
+                await finish_giveaway_auto(context, gw_code)
+            except Exception:
+                logger.exception("giveaway_autospin_countdown_tick: فشل إنهاء السحب %s", gw_code)
+            continue
+        if not giveaway.get("channel_message_id"):
+            continue
+        try:
+            cliche_entities = json_to_entities(giveaway["cliche_entities"])
+            vote_contest_code = giveaway.get("vote_contest_code")
+            vote_participant_id = giveaway.get("vote_participant_id")
+            vote_link = (
+                build_giveaway_vote_condition_link(vote_contest_code, vote_participant_id)
+                if vote_contest_code and vote_participant_id else None
+            )
+            post_text, post_entities = build_giveaway_channel_message(
+                giveaway["cliche_text"], cliche_entities, vote_link=vote_link,
+                condition_channels=giveaway.get("condition_channels") or [],
+                autospin={"mode": "time", "notice_text": build_giveaway_autospin_notice_text(giveaway)},
+            )
+            await context.bot.edit_message_text(
+                chat_id=giveaway["chat_id"], message_id=giveaway["channel_message_id"],
+                text=post_text, entities=post_entities,
+                reply_markup=build_giveaway_channel_keyboard(
+                    gw_code, count_giveaway_participants(gw_code),
+                    antispam=bool(giveaway.get("antispam", False)), status=giveaway["status"],
+                ),
+            )
+        except Exception:
+            # فشل التحديث (مثلاً النص لم يتغيّر منذ آخر تحديث) ليس خطأً فادحًا — نتجاهله.
+            pass
+
+
 async def gw_draw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     يعالج ضغط زر «ابدا السحب» — يقفل السحب نهائيًا ويختار عدد الفائزين المحدد
@@ -4322,36 +4733,13 @@ async def gw_draw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.answer("🎲 جارٍ سحب الفائزين...")
-    set_giveaway_status(gw_code, "closed")
-    participants = get_giveaway_participants(gw_code)
-    winners_count = giveaway["winners_count"] or 1
-    winners = random.sample(participants, min(winners_count, len(participants))) if participants else []
-    remaining_pool = [p for p in participants if p not in winners]
-
-    cliche_entities = json_to_entities(giveaway["cliche_entities"])
-    end_text, end_entities = build_giveaway_ended_message(giveaway["cliche_text"], cliche_entities, winners)
-    sent_message = None
-    try:
-        sent_message = await context.bot.send_message(
-            chat_id=giveaway["chat_id"], text=end_text, entities=end_entities,
-            reply_markup=build_gw_draw_result_keyboard(gw_code),
-        )
-    except Exception:
-        pass
+    # منشور المشاركة الأصلي سيُغلق يدويًا هنا عبر query.message مباشرة (السطر بعدها)،
+    # لذا لا حاجة لتكرار إغلاقه ضمن الدالة المشتركة.
+    winners = await _execute_giveaway_draw(context, gw_code, giveaway, disable_original_keyboard=False)
     try:
         await query.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-
-    _GW_DRAW_STATE[gw_code] = {
-        "winners": winners,
-        "pool": remaining_pool,
-        "chat_id": giveaway["chat_id"],
-        "message_id": sent_message.message_id if sent_message else None,
-        "cliche_text": giveaway["cliche_text"],
-        "cliche_entities": giveaway["cliche_entities"],
-        "owner_id": giveaway["owner_id"],
-    }
     for user_id, _name in winners:
         await notify_giveaway_winner(context, user_id, giveaway["chat_id"])
 
@@ -5710,6 +6098,26 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if awaiting == "gw_autospin_count":
+        raw = (update.message.text or "").strip()
+        if not raw.isdigit() or int(raw) <= 0:
+            _bt, _be = bold_notice("من فضلك أرسل رقمًا صحيحًا أكبر من صفر لعدد المشاركين.")
+            await update.message.reply_text(text=_bt, entities=_be)
+            return
+        for key, default in GIVEAWAY_SETTINGS_DEFAULTS.items():
+            context.user_data.setdefault(key, default)
+        context.user_data["gw_autospin_mode"] = "count"
+        context.user_data["gw_autospin_target"] = int(raw)
+        context.user_data.pop("awaiting", None)
+
+        text, entities = build_giveaway_settings_message()
+        await update.message.reply_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_settings_keyboard(context.user_data),
+        )
+        return
+
     if awaiting == "gw_winners_count":
         raw = (update.message.text or "").strip()
         if not raw.isdigit() or int(raw) <= 0:
@@ -6091,8 +6499,21 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if vote_contest_code and vote_participant_id else None
     )
     condition_channels = settings.get("gw_condition_channels") or []
+
+    # إعداد عبارة «سحب تلقائي» المزخرفة (Image 9) إن كان أحد وضعيه مفعّلاً.
+    autospin_mode = settings.get("gw_autospin_mode")
+    autospin_notice = None
+    if autospin_mode == "count" and settings.get("gw_autospin_target"):
+        autospin_notice = {"mode": "count", "notice_text": f"يُسحب تلقائيًا عند اكتمال {settings['gw_autospin_target']} مشارك"}
+    elif autospin_mode == "time" and settings.get("gw_autospin_minutes"):
+        autospin_notice = {
+            "mode": "time",
+            "notice_text": f"يُسحب تلقائيًا بعد {format_duration_label(settings['gw_autospin_minutes'])}",
+        }
+
     post_text, post_entities = build_giveaway_channel_message(
         cliche_text, cliche_entities, vote_link=vote_link, condition_channels=condition_channels,
+        autospin=autospin_notice,
     )
     post_keyboard = build_giveaway_channel_keyboard(gw_code, 0, antispam=bool(settings.get("gw_antispam", False)))
     try:
@@ -6106,6 +6527,12 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 3.1) إعلان إضافي في قناة الإعلانات العامة لتوسيع دائرة الانتشار.
         # يعمل في الخلفية (لا يُنتظر) حتى لا يُبطئ استجابة نشر السحب للمستخدم.
         asyncio.create_task(announce_new_post(context, chat_id, sent.message_id, "giveaway", {"winners_count": winners_count}))
+        # 3.2) وضع «سحب تلقائي - وقت محدد»: نجدول مؤقتًا لتنفيذ السحب فعليًا عند
+        # وصول العداد للصفر (بنفس آلية مؤقتات المسابقات — schedule_contest_time_end).
+        if autospin_mode == "time" and settings.get("gw_autospin_minutes"):
+            schedule_giveaway_autospin_time(
+                context.job_queue, gw_code, settings["gw_autospin_minutes"] * 60,
+            )
     except Exception:
         await update.message.reply_text(
             "⚠️ تعذر نشر السحب في القناة/القروب المحدد، تأكد من أن البوت مايزال مشرفًا هناك."
@@ -6291,8 +6718,125 @@ async def gw_section_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if data == "gw_opt_autospin":
-        # السحب التلقائي: قيد التطوير حاليًا.
-        await query.answer("🚧 جاري تجهيز هذه الميزة قريبًا.", show_alert=True)
+        # السحب التلقائي: نعرض أولاً قائمة اختيار طريقة الانتهاء (عدد/وقت) — Image 2.
+        text, entities = build_giveaway_autospin_end_method_message()
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_autospin_end_method_keyboard(),
+        )
+        return
+
+    if data == "gw_atime_back":
+        # رجوع من شاشة «عدد محدد» أو «وقت محدد» إلى شاشة اختيار طريقة الانتهاء.
+        context.user_data.pop("awaiting", None)
+        text, entities = build_giveaway_autospin_end_method_message()
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_autospin_end_method_keyboard(),
+        )
+        return
+
+    if data == "gw_atime_end_count":
+        # «عدد محدد»: نطلب من المستخدم إرسال عدد المشاركين المطلوب — Image 3.
+        context.user_data["awaiting"] = "gw_autospin_count"
+        text, entities = build_giveaway_autospin_count_message()
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_autospin_count_keyboard(),
+        )
+        return
+
+    if data == "gw_atime_end_time":
+        # «وقت محدد»: نعرض قائمة الأوقات الجاهزة — Image 4.
+        context.user_data.pop("awaiting", None)
+        text, entities = build_giveaway_autospin_time_message()
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_autospin_time_keyboard(),
+        )
+        return
+
+    if data.startswith("gw_atime_set_"):
+        # اختيار وقت جاهز من القائمة (Image 4) → يُحفظ فورًا ونعود لقائمة الإعدادات
+        # الأولى مع تحديث اسم زر «سحب تلقائي» ليعرض الوقت الفعلي المختار.
+        minutes = int(data.replace("gw_atime_set_", ""))
+        for key, default in GIVEAWAY_SETTINGS_DEFAULTS.items():
+            context.user_data.setdefault(key, default)
+        context.user_data["gw_autospin_mode"] = "time"
+        context.user_data["gw_autospin_minutes"] = minutes
+        context.user_data.pop("awaiting", None)
+        text, entities = build_giveaway_settings_message()
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_settings_keyboard(context.user_data),
+        )
+        return
+
+    if data == "gw_atime_show_custom":
+        # قائمة «وقت مخصص» التراكمية (Image 5/7): نبدأ من القيمة الحالية إن كانت
+        # محفوظة مسبقًا بوضع «وقت»، وإلا نبدأ من «غير محدد».
+        if context.user_data.get("gw_autospin_mode") == "time":
+            context.user_data["gw_autospin_custom_minutes"] = context.user_data.get("gw_autospin_minutes") or 0
+        else:
+            context.user_data["gw_autospin_custom_minutes"] = 0
+        text, entities = build_giveaway_autospin_time_message(
+            format_duration_label(context.user_data["gw_autospin_custom_minutes"]),
+        )
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_autospin_custom_keyboard(),
+        )
+        return
+
+    if data.startswith("gw_atime_custom_delta:"):
+        # زر تعديل دقيق (+/-) — يُحدَّث المجموع التراكمي فورًا في نفس الشاشة (Image 7).
+        delta = int(data.split(":", 1)[1])
+        current = context.user_data.get("gw_autospin_custom_minutes", 0)
+        context.user_data["gw_autospin_custom_minutes"] = max(0, current + delta)
+        text, entities = build_giveaway_autospin_time_message(
+            format_duration_label(context.user_data["gw_autospin_custom_minutes"]),
+        )
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_autospin_custom_keyboard(),
+        )
+        return
+
+    if data == "gw_atime_custom_reset":
+        context.user_data["gw_autospin_custom_minutes"] = 0
+        text, entities = build_giveaway_autospin_time_message("غير محدد")
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_autospin_custom_keyboard(),
+        )
+        return
+
+    if data == "gw_atime_custom_confirm":
+        # «تأكيد الوقت» (Image 5) — يعود لقائمة إعدادات السحب الأولى مع تحديث زر
+        # «سحب تلقائي» ليعرض الوقت الفعلي المحسوب (مثلاً «ساعة و 11 دقيقة») — Image 8.
+        total = context.user_data.get("gw_autospin_custom_minutes", 0)
+        if not total or total <= 0:
+            await query.answer("⚠️ اختر وقتًا أولاً باستخدام أزرار التعديل.", show_alert=True)
+            return
+        for key, default in GIVEAWAY_SETTINGS_DEFAULTS.items():
+            context.user_data.setdefault(key, default)
+        context.user_data["gw_autospin_mode"] = "time"
+        context.user_data["gw_autospin_minutes"] = total
+        context.user_data.pop("gw_autospin_custom_minutes", None)
+        text, entities = build_giveaway_settings_message()
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_giveaway_settings_keyboard(context.user_data),
+        )
         return
 
     if data == "gw_opt_condition":
@@ -6433,6 +6977,12 @@ def main():
             check_required_channel_auto_switch, interval=600, first=30,
             name="required_channel_auto_switch",
         )
+        # فحص دوري كل 10 دقائق لتحديث جملة العد التنازلي داخل منشورات «سحب تلقائي -
+        # وقت محدد» المفتوحة (Image 9)، وكخط أمان إضافي لإنهاء أي سحب انقضى وقته.
+        app.job_queue.run_repeating(
+            giveaway_autospin_countdown_tick, interval=600, first=60,
+            name="giveaway_autospin_countdown_tick",
+        )
 
     app.add_error_handler(_global_error_handler)
 
@@ -6487,6 +7037,8 @@ def main():
                 r"|gw_delc:-?\d+|gw_sel:-?\d+|gw_back_main|gw_toggle_boost|gw_toggle_premium"
                 r"|gw_toggle_antispam|gw_opt_condition|gw_cond_public|gw_cond_private|gw_cond_private_done"
                 r"|gw_opt_vote|gw_opt_autospin|gw_opt_create"
+                r"|gw_atime_back|gw_atime_end_count|gw_atime_end_time|gw_atime_set_\d+|gw_atime_show_custom"
+                r"|gw_atime_custom_delta:-?\d+|gw_atime_custom_reset|gw_atime_custom_confirm"
                 r"|gw_back_to_options)$",
     ))
     app.add_handler(CallbackQueryHandler(
@@ -6520,6 +7072,7 @@ def main():
             BotCommand("start", "رسالة البدء"),
         ])
         await reschedule_pending_contest_timers(app_)
+        await reschedule_pending_giveaway_timers(app_)
         # تنظيف: إزالة قناة الإعلانات العامة إن كانت قد سُجّلت سابقًا (قبل هذا الإصدار)
         # كقناة عادية ضمن قوائم اختيار المستخدمين، حتى لا تظهر للنشر فيها بالخطأ.
         try:
