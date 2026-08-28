@@ -1164,11 +1164,11 @@ def build_contest_end_method_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def build_contest_time_menu_message() -> tuple:
+def build_contest_time_menu_message(selected_label: str = "غير محدد") -> tuple:
     """
     شاشة «⏰ وقت محدد للمسابقة»:
     - العنوان بخط عريض (Bold) + إيموجي الساعة.
-    - القيمة الحالية (غير محدد) في سطر مستقل.
+    - القيمة الحالية في سطر مستقل.
     - جملة التوجيه.
     """
     parts = [
@@ -1176,7 +1176,7 @@ def build_contest_time_menu_message() -> tuple:
             ("⏰", EMOJI["alarm_clock_title"]),
             "وقت محدد للمسابقة",
         ], "bold", None),
-        "\nغير محدد",
+        f"\nالوقت المختار: {selected_label}",
         "\n\n",
         "استخدم الأزرار أدناه لتحديد الوقت المطلوب لانتهاء المسابقة تلقائياً:",
     ]
@@ -1195,12 +1195,8 @@ def build_contest_time_menu_keyboard() -> InlineKeyboardMarkup:
         ])
     rows.append([
         InlineKeyboardButton(
-            "زيادة تنقيص", callback_data="comp_atime_show_manual",
+            "وقت مخصص", callback_data="comp_atime_show_custom",
             style="primary", **emoji_kwargs("time_manual_btn"),
-        ),
-        InlineKeyboardButton(
-            "وقت مخصص رقم", callback_data="comp_atime_show_custom",
-            style="primary", **emoji_kwargs("time_custom_btn"),
         ),
     ])
     rows.append([
@@ -1210,6 +1206,64 @@ def build_contest_time_menu_keyboard() -> InlineKeyboardMarkup:
         )
     ])
     return InlineKeyboardMarkup(rows)
+
+
+CONTEST_TIME_CUSTOM_STEPS = [
+    [(-1, "- 1 دقيقة"), (1, "+ 1 دقيقة")],
+    [(-5, "- 5 دقيقة"), (5, "+ 5 دقيقة")],
+    [(-10, "- 10 دقايق"), (10, "+ 10 دقايق")],
+    [(-60, "- 1 ساعة"), (60, "+ 1 ساعة")],
+    [(-1440, "- 1 يوم"), (1440, "+ 1 يوم")],
+]
+
+
+def build_contest_time_custom_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    for row in CONTEST_TIME_CUSTOM_STEPS:
+        rows.append([
+            InlineKeyboardButton(
+                label, callback_data=f"comp_atime_custom_delta:{delta}",
+                style="primary", **emoji_kwargs("time_option_btn"),
+            )
+            for delta, label in row
+        ])
+    rows.append([InlineKeyboardButton(
+        "تأكيد الوقت", callback_data="comp_atime_custom_confirm",
+        style="success", **emoji_kwargs("yes_btn"),
+    )])
+    rows.append([
+        InlineKeyboardButton(
+            "إعادة تعيين", callback_data="comp_atime_custom_reset",
+            style="success", **emoji_kwargs("restore_defaults_btn"),
+        ),
+        InlineKeyboardButton(
+            "رجوع للخيارات", callback_data="comp_back_to_end_type",
+            style="danger", **emoji_kwargs("back_section_btn"),
+        ),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_contest_votes_target_message() -> tuple:
+    """شاشة «أرسل عدد الأصوات المطلوب» لتفعيل إنهاء المسابقة تلقائيًا عند وصول
+    أحد المتسابقين لعدد الأصوات المحدد."""
+    parts = [
+        ([
+            ("🎯", EMOJI["votes_chart_btn"]), " عدد أصوات محدد",
+        ], "bold", None),
+        "\n\n",
+        "أرسل عدد الأصوات المطلوب لإنهاء المسابقة تلقائيًا عند وصول أحد المتسابقين إليه",
+        "\n\n",
+        ([
+            "مثال: إذا أردت إنهاء المسابقة عند وصول أحد المتسابقين إلى 100 صوت "
+            "أرسل الرقم 100",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_contest_votes_target_keyboard() -> InlineKeyboardMarkup:
+    return _build_single_back_keyboard("رجوع", "comp_back_to_end_type", "danger", "back_section_btn")
 
 
 def build_contest_winners_message() -> tuple:
@@ -1425,13 +1479,14 @@ def build_brand_footer() -> tuple:
 
 
 def build_contest_channel_message(cliche_text: str, cliche_entities, target_count: int,
-                                   end_type: str, time_minutes: int) -> tuple:
+                                   end_type: str, time_minutes: int, votes_target: int = None) -> tuple:
     """
     منشور المسابقة الذي يُنشر في القناة/القروب المحدد (صورة image 2):
     - كليشة المسابقة كما أرسلها صاحب المسابقة (بتنسيقاتها الأصلية).
     - عدد المشاركين المسموح بخط عريض.
     - تعليمات التسجيل داخل اقتباس ملوّن منفصل.
-    - وقت انتهاء المسابقة تلقائيًا داخل اقتباس ملوّن منفصل (إذا كان معتمدًا على الوقت).
+    - وقت انتهاء المسابقة تلقائيًا داخل اقتباس ملوّن منفصل (إذا كان معتمدًا على الوقت)،
+      أو عدد الأصوات الذي تنتهي عنده المسابقة (إذا كان معتمدًا على عدد الأصوات).
     - تذييل باسم العلامة التجارية بلون أزرق قابل للضغط.
     """
     extra_parts = [
@@ -1443,6 +1498,11 @@ def build_contest_channel_message(cliche_text: str, cliche_entities, target_coun
     if end_type == "time" and time_minutes:
         extra_parts.append("\n\n")
         extra_parts.append(([f"سيتم انتهاء المسابقة بعد {format_minutes_label(time_minutes)}  ”"], "blockquote", None))
+    elif end_type == "votes" and votes_target:
+        extra_parts.append("\n\n")
+        extra_parts.append(([
+            f"ستنتهي المسابقة عند وصول أحد المتسابقين إلى {votes_target} صوت  ”",
+        ], "blockquote", None))
 
     extra_text, extra_entities = build_text_with_emojis(extra_parts)
     footer_text, footer_entities = build_brand_footer()
@@ -2868,10 +2928,45 @@ def create_roulette(owner_id: int, target_count: int) -> int:
     })
     return rid
 
+def _next_roulette_ids(count: int) -> list:
+    """يحجز عدة معرّفات دفعة واحدة عبر معاملة واحدة فقط (بدل معاملة Firestore منفصلة
+    لكل رقم) — هذا هو أحد سببي بطء ظهور خيارات «روليت سريع»."""
+    client = fs_db()
+    counter_ref = client.collection("counters").document("roulettes")
+    transaction = client.transaction()
+
+    @firestore.transactional
+    def _txn(transaction):
+        snap = counter_ref.get(transaction=transaction)
+        current = (snap.to_dict().get("next_id", 0) if snap.exists else 0) or 0
+        transaction.set(counter_ref, {"next_id": current + count})
+        return list(range(current + 1, current + count + 1))
+
+    return _txn(transaction)
+
+
 def create_roulettes_batch(owner_id: int, target_counts: list) -> dict:
+    """ينشئ كل خيارات «روليت سريع» (لكل الأعداد في ROULETTE_COUNTS) في طلبين فقط
+    إلى Firestore (معاملة واحدة لحجز المعرّفات + كتابة دفعية واحدة)، بدل طلبين
+    منفصلين لكل عدد (16 طلب سابقًا لـ 8 أعداد) — هذا يسرّع كثيرًا ظهور القائمة
+    فور الضغط على «روليت سريع»."""
+    ids = _next_roulette_ids(len(target_counts))
+    client = fs_db()
+    batch = client.batch()
+    now_iso = datetime.now(timezone.utc).isoformat()
     result = {}
-    for n in target_counts:
-        result[n] = create_roulette(owner_id, n)
+    for n, rid in zip(target_counts, ids):
+        batch.set(client.collection("roulettes").document(str(rid)), {
+            "roulette_id": rid,
+            "owner_id": owner_id,
+            "target_count": n,
+            "inline_message_id": None,
+            "status": "open",
+            "created_at": now_iso,
+            "channel_id": 0,
+        })
+        result[n] = rid
+    batch.commit()
     return result
 
 def set_inline_message_id(roulette_id: int, inline_message_id: str):
@@ -3091,7 +3186,7 @@ def generate_participant_code(contest_code: str) -> str:
 
 def create_contest(contest_code: str, owner_id: int, chat_id: int, cliche_text: str,
                     cliche_entities, target_count: int, end_type: str, time_minutes,
-                    winners_count, settings: dict) -> None:
+                    winners_count, settings: dict, votes_target=None) -> None:
     fs_db().collection("contests").document(contest_code).set({
         "contest_code": contest_code,
         "owner_id": owner_id,
@@ -3101,6 +3196,7 @@ def create_contest(contest_code: str, owner_id: int, chat_id: int, cliche_text: 
         "target_count": target_count,
         "end_type": end_type,
         "time_minutes": time_minutes,
+        "votes_target": votes_target,
         "winners_count": winners_count,
         "notify_win": int(bool(settings.get("contest_notify_win", False))),
         "announce_results": int(bool(settings.get("contest_announce_results", False))),
@@ -3979,6 +4075,7 @@ async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TY
                 text=body_text,
                 entities=body_entities,
                 reply_markup=roulette_share_keyboard(roulette_id),
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
         except Exception:
             pass
@@ -4493,6 +4590,7 @@ async def gw_repost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             text=post_text,
             entities=post_entities,
             reply_markup=post_keyboard,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         set_giveaway_channel_message(gw_code, sent.message_id)
     except Exception:
@@ -4738,6 +4836,7 @@ async def giveaway_autospin_countdown_tick(context: ContextTypes.DEFAULT_TYPE):
                     gw_code, count_giveaway_participants(gw_code),
                     antispam=bool(giveaway.get("antispam", False)), status=giveaway["status"],
                 ),
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
         except Exception:
             pass
@@ -5187,6 +5286,18 @@ async def vote_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception:
             pass
 
+    # إنهاء تلقائي للمسابقات المعتمدة على «عدد أصوات محدد» عند وصول أي متسابق
+    # لعدد الأصوات المستهدف — بنفس آلية إنهاء المسابقات المعتمدة على الوقت.
+    if (
+        contest.get("end_type") == "votes"
+        and contest.get("votes_target")
+        and new_votes >= contest["votes_target"]
+    ):
+        try:
+            await finish_contest_by_time(context.bot, contest_code)
+        except Exception:
+            logger.exception("vote_captcha_callback: فشل إنهاء المسابقة %s تلقائيًا عند اكتمال الأصوات", contest_code)
+
 
 async def rr_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -5219,6 +5330,7 @@ async def rr_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=body_text,
             entities=body_entities,
             reply_markup=roulette_share_keyboard(roulette_id),
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
     except Exception as e:
         print(f"rr_join edit_message_text error: {e}")
@@ -5256,6 +5368,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     thumbnail_url=ROULETTE_THUMBS[n],
                     input_message_content=InputTextMessageContent(
                         body_text, entities=body_entities,
+                        link_preview_options=LinkPreviewOptions(is_disabled=True),
                     ),
                     reply_markup=roulette_share_keyboard(roulette_id),
                 )
@@ -5308,6 +5421,7 @@ async def rr_spin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=text,
             entities=entities,
             reply_markup=waiting_spin_keyboard(roulette_id),
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         return
 
@@ -5321,6 +5435,7 @@ async def rr_spin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=text,
             entities=entities,
             reply_markup=result_keyboard(roulette_id),
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         return
 
@@ -5349,6 +5464,7 @@ async def rr_respin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         text=text,
         entities=entities,
         reply_markup=result_keyboard(roulette_id),
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 async def qr_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5954,6 +6070,22 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if awaiting == "contest_votes_target":
+        raw = (update.message.text or "").strip()
+        if not raw.isdigit() or int(raw) <= 0:
+            _bt, _be = bold_notice("من فضلك أرسل رقمًا صحيحًا أكبر من صفر لعدد الأصوات.")
+            await update.message.reply_text(text=_bt, entities=_be)
+            return
+        context.user_data["contest_votes_target"] = int(raw)
+        context.user_data["awaiting"] = "contest_winners_count"
+        text, entities = build_contest_winners_message()
+        await update.message.reply_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_contest_winners_keyboard(),
+        )
+        return
+
     if awaiting == "contest_winners_count":
         raw = (update.message.text or "").strip()
         if not raw.isdigit() or int(raw) <= 0:
@@ -6286,8 +6418,15 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     if query.data == "comp_end_votes":
-        _bt, _be = bold_notice("جاري تجهيز هذه الخطوة قريبًا 🛠")
-        await query.message.reply_text(text=_bt, entities=_be)
+        context.user_data.pop("awaiting_setting", None)
+        context.user_data["contest_end_type"] = "votes"
+        context.user_data["awaiting"] = "contest_votes_target"
+        text, entities = build_contest_votes_target_message()
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_contest_votes_target_keyboard(),
+        )
         return
 
     if query.data == "comp_end_time":
@@ -6304,6 +6443,8 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
     if query.data == "comp_back_to_end_type":
         context.user_data.pop("awaiting", None)
         context.user_data.pop("contest_time_minutes", None)
+        context.user_data.pop("contest_time_custom_minutes", None)
+        context.user_data.pop("contest_votes_target", None)
         text, entities = build_contest_end_method_message()
         await query.edit_message_text(
             text=text,
@@ -6315,6 +6456,7 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
     if query.data.startswith("comp_atime_set_"):
         minutes = int(query.data.replace("comp_atime_set_", ""))
         context.user_data["contest_time_minutes"] = minutes
+        context.user_data.pop("contest_time_custom_minutes", None)
         context.user_data["awaiting"] = "contest_winners_count"
         text, entities = build_contest_winners_message()
         await query.edit_message_text(
@@ -6324,9 +6466,56 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
-    if query.data in ("comp_atime_show_manual", "comp_atime_show_custom"):
-        _bt, _be = bold_notice("جاري تجهيز هذه الخطوة قريبًا 🛠")
-        await query.message.reply_text(text=_bt, entities=_be)
+    if query.data == "comp_atime_show_custom":
+        context.user_data["contest_time_custom_minutes"] = context.user_data.get("contest_time_minutes") or 0
+        text, entities = build_contest_time_menu_message(
+            format_duration_label(context.user_data["contest_time_custom_minutes"]),
+        )
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_contest_time_custom_keyboard(),
+        )
+        return
+
+    if query.data.startswith("comp_atime_custom_delta:"):
+        delta = int(query.data.split(":", 1)[1])
+        current = context.user_data.get("contest_time_custom_minutes", 0)
+        context.user_data["contest_time_custom_minutes"] = max(0, current + delta)
+        text, entities = build_contest_time_menu_message(
+            format_duration_label(context.user_data["contest_time_custom_minutes"]),
+        )
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_contest_time_custom_keyboard(),
+        )
+        return
+
+    if query.data == "comp_atime_custom_reset":
+        context.user_data["contest_time_custom_minutes"] = 0
+        text, entities = build_contest_time_menu_message("غير محدد")
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_contest_time_custom_keyboard(),
+        )
+        return
+
+    if query.data == "comp_atime_custom_confirm":
+        total = context.user_data.get("contest_time_custom_minutes", 0)
+        if not total or total <= 0:
+            await query.answer("⚠️ اختر وقتًا أولاً باستخدام أزرار التعديل.", show_alert=True)
+            return
+        context.user_data["contest_time_minutes"] = total
+        context.user_data.pop("contest_time_custom_minutes", None)
+        context.user_data["awaiting"] = "contest_winners_count"
+        text, entities = build_contest_winners_message()
+        await query.edit_message_text(
+            text=text,
+            entities=entities,
+            reply_markup=build_contest_winners_keyboard(),
+        )
         return
 
     if query.data in (
@@ -6370,6 +6559,7 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
         cliche_entities = ud.get("contest_cliche_entities") or []
         end_type = ud.get("contest_end_type")
         time_minutes = ud.get("contest_time_minutes")
+        votes_target = ud.get("contest_votes_target")
         winners_count = ud.get("contest_winners_count")
         settings = {k: ud.get(k, d) for k, d in CONTEST_SETTINGS_DEFAULTS.items()}
 
@@ -6390,10 +6580,11 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
             time_minutes=time_minutes,
             winners_count=winners_count,
             settings=settings,
+            votes_target=votes_target,
         )
 
         post_text, post_entities = build_contest_channel_message(
-            cliche_text, cliche_entities, target_count, end_type, time_minutes
+            cliche_text, cliche_entities, target_count, end_type, time_minutes, votes_target,
         )
         post_keyboard = build_contest_channel_keyboard(contest_code)
         try:
@@ -6402,6 +6593,7 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
                 text=post_text,
                 entities=post_entities,
                 reply_markup=post_keyboard,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
             set_contest_channel_message(contest_code, sent.message_id)
             asyncio.create_task(announce_new_post(context, chat_id, sent.message_id, "contest"))
@@ -6498,6 +6690,7 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=post_text,
             entities=post_entities,
             reply_markup=post_keyboard,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         set_giveaway_channel_message(gw_code, sent.message_id)
         asyncio.create_task(announce_new_post(context, chat_id, sent.message_id, "giveaway", {"winners_count": winners_count}))
@@ -6954,7 +7147,8 @@ def main():
         contest_section_callback,
         pattern=r"^(comp_start_create|comp_reg_group|comp_reg_channel|back_main_menu|section_competition"
                 r"|comp_pick_chat_-?\d+|comp_back_to_klesha|comp_back_to_count|comp_end_votes|comp_end_time"
-                r"|comp_back_to_end_type|comp_atime_set_\d+|comp_atime_show_manual|comp_atime_show_custom"
+                r"|comp_back_to_end_type|comp_atime_set_\d+|comp_atime_show_custom"
+                r"|comp_atime_custom_delta:-?\d+|comp_atime_custom_reset|comp_atime_custom_confirm"
                 r"|comp_toggle_notify_win|comp_toggle_announce_results|comp_toggle_approve_participants"
                 r"|comp_toggle_premium_only|comp_back_to_winners|comp_publish|comp_recent)$",
     ))
