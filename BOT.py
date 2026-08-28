@@ -702,6 +702,61 @@ async def build_contest_channel_join_link(context: ContextTypes.DEFAULT_TYPE, ch
             return ""
 
 
+_CHAT_TITLE_CACHE = {}
+CHAT_TITLE_CACHE_TTL = 3600
+
+
+async def get_chat_title_cached(context: ContextTypes.DEFAULT_TYPE, chat_id) -> str:
+    """يجلب عنوان أي محادثة (قناة/قروب) مع كاش لمدة ساعة، لتفادي نداء get_chat
+    المتكرر عند بناء بوابات الشروط ورسائل التنبيه في كل ضغطة مشاركة."""
+    cached = _CHAT_TITLE_CACHE.get(chat_id)
+    if cached is not None and time.time() - cached["ts"] < CHAT_TITLE_CACHE_TTL:
+        return cached["title"]
+    title = ""
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        title = chat.title or ""
+    except Exception:
+        logger.exception("تعذّر جلب عنوان القناة %s", chat_id)
+    _CHAT_TITLE_CACHE[chat_id] = {"title": title, "ts": time.time()}
+    return title
+
+
+async def check_giveaway_host_channel_subscription(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, giveaway, force_refresh: bool = False,
+) -> bool:
+    """يتحقق من اشتراك المستخدم في القناة التي استُضيف فيها السحب نفسه
+    (giveaway['chat_id']) — شرط ضمني دائم لكل سحب، بنفس منطق
+    check_contest_channel_subscription المستخدمة للمسابقات، وبمعزل تام عن
+    قنوات الشرط الإضافية الاختيارية التي يضيفها المالك يدويًا
+    (condition_channels). دون هذا الشرط يمكن للمستخدم المشاركة في السحب دون
+    أن يكون منضمًا إطلاقًا إلى القناة التي نُشر فيها."""
+    chat_id = giveaway.get("chat_id") if hasattr(giveaway, "get") else giveaway["chat_id"]
+    if not chat_id:
+        return True
+    return await is_user_subscribed_to_chat(context, user_id, chat_id, force_refresh=force_refresh)
+
+
+async def build_giveaway_gate_context(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, giveaway,
+) -> dict:
+    """يجهّز حالة «البوابة الموحّدة» لسحب معيّن: هل يلزم عرض شرط الاشتراك في
+    قناة VORTEX، وهل يلزم عرض شرط الاشتراك في قناة استضافة السحب نفسها (مع
+    رابط وعنوان تلك القناة عند الحاجة) — بحيث يُبنى الزرّان معًا في شاشة واحدة
+    بدل بوابتين متتاليتين منفصلتين."""
+    need_vortex = not await is_user_subscribed(context, user_id)
+    host_channel_link = ""
+    host_channel_title = ""
+    if not await check_giveaway_host_channel_subscription(context, user_id, giveaway):
+        host_channel_link = await build_contest_channel_join_link(context, giveaway["chat_id"])
+        host_channel_title = await get_chat_title_cached(context, giveaway["chat_id"]) or "قناة السحب"
+    return {
+        "need_vortex": need_vortex,
+        "host_channel_link": host_channel_link,
+        "host_channel_title": host_channel_title,
+    }
+
+
 async def check_giveaway_condition_channels(
     context: ContextTypes.DEFAULT_TYPE, user_id: int, giveaway,
 ) -> bool:
@@ -742,6 +797,10 @@ async def check_giveaway_requirements(context: ContextTypes.DEFAULT_TYPE, user, 
     يُعيد (True, "") عند اجتياز كل الشروط، أو (False, نص التنبيه المناسب لأول شرط لم يتحقق)."""
     if giveaway.get("premium_only") and not user.is_premium:
         return False, "💎 هذا السحب للأشخاص المفعلين مميز فقط!"
+
+    if not await check_giveaway_host_channel_subscription(context, user.id, giveaway):
+        host_title = await get_chat_title_cached(context, giveaway["chat_id"])
+        return False, build_giveaway_host_channel_subscribe_alert(host_title)
 
     if not await check_giveaway_condition_channels(context, user.id, giveaway):
         return False, build_giveaway_condition_subscribe_alert()
@@ -2609,13 +2668,33 @@ def build_giveaway_condition_subscribe_alert() -> str:
     return "❌ يجب عليك الاشتراك في قناة الشرط اولاً"
 
 
-def build_giveaway_gate_message(giveaway) -> tuple:
+def build_giveaway_host_channel_subscribe_alert(host_channel_title: str = "") -> str:
+    """نص التنبيه الداخلي (show_alert) الذي يظهر عند الضغط المباشر على زر
+    «اضغط لـ المشاركة» أسفل منشور السحب حين يكون المستخدم مشتركًا في VORTEX
+    لكنه غير مشترك في القناة التي استضافت السحب نفسه — يظهر كتنبيه فوري دون
+    تحويل المستخدم إلى البوت، تمييزًا عن حالة عدم الاشتراك في VORTEX."""
+    if host_channel_title:
+        return f"❌ يجب عليك الاشتراك في «{host_channel_title}» أولاً للمشاركة في هذا السحب"
+    return "❌ يجب عليك الاشتراك في قناة السحب أولاً للمشاركة"
+
+
+def build_giveaway_gate_message(giveaway, need_vortex: bool = False,
+                                 host_channel_title: str = "") -> tuple:
     """رسالة «بوابة الشروط» التي تظهر للمستخدم داخل البوت بعد الضغط على زر
     المشاركة في سحب مفعّل عليه «منع الرشق» — تُعرض فقط عندما لا يكون قد
     اجتاز بعد شرط/شروط السحب (اشتراك في القنوات و/أو تعزيز)، وقبل ظهور زر
-    التحقق (الكابتشا) الذي يظهر بعد إكمال هذه الشروط."""
+    التحقق (الكابتشا) الذي يظهر بعد إكمال هذه الشروط.
+
+    عند need_vortex/host_channel_title تُدرَج أيضًا قناة VORTEX الإجبارية
+    و/أو قناة استضافة السحب نفسها ضمن قائمة الشروط، لعرضهما معًا مع بقية
+    الشروط في بوابة واحدة موحّدة بدل بوابتين متتاليتين."""
     channels = (giveaway.get("condition_channels") or [])[:GW_CONDITION_CHANNELS_MAX]
-    lines = [f"• {ch.get('title') or ch.get('ref') or 'القناة'}" for ch in channels]
+    lines = []
+    if need_vortex:
+        lines.append(f"• {REQUIRED_CHANNEL_BUTTON_TEXT}")
+    if host_channel_title:
+        lines.append(f"• {host_channel_title}")
+    lines += [f"• {ch.get('title') or ch.get('ref') or 'القناة'}" for ch in channels]
     if giveaway.get("boost_required"):
         lines.append("• تعزيز القناة (Boost)")
     vote_contest_code = giveaway.get("vote_contest_code")
@@ -2641,11 +2720,21 @@ def build_giveaway_gate_message(giveaway) -> tuple:
 
 
 def build_giveaway_gate_keyboard(gw_code: str, giveaway, is_genuinely_new: bool,
-                                  boost_link: str = "", vote_link: str = "") -> InlineKeyboardMarkup:
+                                  boost_link: str = "", vote_link: str = "",
+                                  need_vortex: bool = False, host_channel_link: str = "",
+                                  host_channel_title: str = "") -> InlineKeyboardMarkup:
     """كيبورد بوابة الشروط: زر لكل قناة/تعزيز/تصويت مطلوب، وزر «تحقق ✅» أسفلها.
     عند الضغط على «تحقق» يُعاد فحص الشروط؛ فإن اجتازها المستخدم تتحوّل نفس
-    الرسالة إلى كابتشا التحقق منع الرشق الموجودة مسبقًا."""
+    الرسالة إلى كابتشا التحقق منع الرشق الموجودة مسبقًا.
+
+    إن كان need_vortex/host_channel_link مفعّلين، يُضاف زر قناة VORTEX و/أو
+    زر قناة استضافة السحب أعلى بقية الأزرار — فقط للشرط الناقص فعليًا، دون
+    عرض زر لشرط مكتمل بالفعل."""
     rows = []
+    if need_vortex:
+        rows.append([InlineKeyboardButton(REQUIRED_CHANNEL_BUTTON_TEXT, url=get_required_channel_url())])
+    if host_channel_link:
+        rows.append([InlineKeyboardButton(host_channel_title or "قناة السحب", url=host_channel_link)])
     channels = (giveaway.get("condition_channels") or [])[:GW_CONDITION_CHANNELS_MAX]
     for ch in channels:
         title = ch.get("title") or "الإشتراك في القناة"
@@ -4331,6 +4420,18 @@ async def _dispatch_start_arg(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    if args and args[0].startswith("gwjoin_"):
+        # حالة خاصة: رابط المشاركة في سحب يُحال إلى بوابته الموحّدة الخاصة به
+        # مباشرة (VORTEX + قناة استضافة السحب معًا في شاشة واحدة) بدل بوابة
+        # VORTEX العامة أدناه، حتى لا يمر المستخدم بخطوتين متتاليتين لإتمام
+        # نفس الشرط عند فتح البوت عبر زر «اضغط لـ المشاركة».
+        is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id)
+        await handle_giveaway_join_entry(
+            update, context, args[0][len("gwjoin_"):], is_genuinely_new=is_genuinely_new,
+        )
+        return
+
     subscribed = await is_user_subscribed(context, update.effective_user.id)
     if not subscribed:
         # يُحفظ معامل الرابط العميق (إن وُجد) مؤقتًا لهذا المستخدم، حتى إن
@@ -4848,6 +4949,37 @@ async def gwcond_check_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
         return
 
+    # إعادة فحص قناة VORTEX وقناة استضافة السحب معًا (بكاش مُحدَّث)، فهذا الزر
+    # هو نفسه زر التأكيد في البوابة الموحّدة القادمة من رابط gwjoin_ — إن ظل
+    # أحدهما ناقصًا تُعاد نفس البوابة محدَّثة بدل رفض عام دون توضيح السبب.
+    _SUBSCRIPTION_CACHE.pop(user.id, None)
+    gate_ctx = await build_giveaway_gate_context(context, user.id, giveaway)
+    if gate_ctx["need_vortex"] or gate_ctx["host_channel_link"]:
+        await query.answer(
+            "⚠️ لم يتم العثور على اشتراكك بعد، اشترك في القنوات المطلوبة ثم أعد المحاولة.",
+            show_alert=True,
+        )
+        boost_link, vote_link = await build_giveaway_gate_links(context, giveaway)
+        gate_text, gate_entities = build_giveaway_gate_message(
+            giveaway,
+            need_vortex=gate_ctx["need_vortex"],
+            host_channel_title=gate_ctx["host_channel_title"],
+        )
+        try:
+            await query.edit_message_text(
+                text=gate_text,
+                entities=gate_entities,
+                reply_markup=build_giveaway_gate_keyboard(
+                    gw_code, giveaway, is_genuinely_new, boost_link=boost_link, vote_link=vote_link,
+                    need_vortex=gate_ctx["need_vortex"],
+                    host_channel_link=gate_ctx["host_channel_link"],
+                    host_channel_title=gate_ctx["host_channel_title"],
+                ),
+            )
+        except Exception:
+            pass
+        return
+
     ok, alert_text = await check_giveaway_requirements(context, user, giveaway)
     if not ok:
         await query.answer(alert_text, show_alert=True)
@@ -4952,8 +5084,37 @@ async def handle_giveaway_join_entry(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(text=_bt, entities=_be)
         return
 
+    # بوابة موحّدة: تُفحص قناة VORTEX الإجبارية وقناة استضافة السحب نفسها معًا
+    # هنا دفعة واحدة (بدل بوابة VORTEX منفصلة في start() ثم بوابة أخرى لقناة
+    # السحب لاحقًا)، وتُعرض للمستخدم شاشة واحدة فيها زر لكل شرط ناقص فعليًا
+    # فقط + زر تأكيد واحد، سواء كان ناقصًا الاشتراك في القناتين معًا أو في
+    # واحدة منهما فقط.
+    context.user_data.pop("pending_start_arg", None)
+    gate_ctx = await build_giveaway_gate_context(context, user.id, giveaway)
+    if gate_ctx["need_vortex"] or gate_ctx["host_channel_link"]:
+        boost_link, vote_link = await build_giveaway_gate_links(context, giveaway)
+        gate_text, gate_entities = build_giveaway_gate_message(
+            giveaway,
+            need_vortex=gate_ctx["need_vortex"],
+            host_channel_title=gate_ctx["host_channel_title"],
+        )
+        await update.message.reply_text(
+            text=gate_text,
+            entities=gate_entities,
+            reply_markup=build_giveaway_gate_keyboard(
+                gw_code, giveaway, is_genuinely_new, boost_link=boost_link, vote_link=vote_link,
+                need_vortex=gate_ctx["need_vortex"],
+                host_channel_link=gate_ctx["host_channel_link"],
+                host_channel_title=gate_ctx["host_channel_title"],
+            ),
+        )
+        return
+
     ok, _alert = await check_giveaway_requirements(context, user, giveaway)
     if not ok:
+        # الشروط المتبقية هنا هي فقط شروط السحب الإضافية الاختيارية (قنوات شرط
+        # يحددها المالك يدويًا / تعزيز / تصويت لمتسابق) — منفصلة عن VORTEX
+        # وقناة الاستضافة اللتين فُحصتا بالفعل أعلاه.
         boost_link, vote_link = await build_giveaway_gate_links(context, giveaway)
         gate_text, gate_entities = build_giveaway_gate_message(giveaway)
         await update.message.reply_text(
@@ -4991,13 +5152,19 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # فحص خلفي تلقائي: يجب أن يكون المستخدم مشتركًا في قناة البوت الإلزامية
     # (VORTEX) قبل إكمال أي مشاركة في أي سحب. بما أن هذا الزر كولباك مباشر
-    # داخل منشور القناة (لا يمر عبر start())، يُحوَّل المستخدم غير المشترك
-    # لمحادثة البوت الخاصة عبر رابط ?start=gwjoin_، حيث تُعرض له بوابة
-    # الاشتراك الاحترافية (زر VORTEX + زر تحقق) تلقائيًا قبل إكمال مشاركته.
+    # داخل منشور القناة (لا يمر عبر start())، يُحوَّل المستخدم غير المشترك في
+    # VORTEX لمحادثة البوت الخاصة عبر رابط ?start=gwjoin_، حيث تُعرض له
+    # البوابة الموحّدة (VORTEX + قناة استضافة السحب معًا في شاشة واحدة) قبل
+    # إكمال مشاركته — سواء كان ناقصًا الاشتراك في القناتين معًا أو في VORTEX
+    # فقط (handle_giveaway_join_entry تتحقق من الحالتين هناك).
     if not await is_user_subscribed(context, user.id):
         await query.answer(url=f"https://t.me/{BOT_USERNAME}?start=gwjoin_{gw_code}")
         return
 
+    # هنا المستخدم مشترك في VORTEX بالفعل؛ إن كان غير مشترك في قناة استضافة
+    # السحب نفسها (أو أي شرط إضافي آخر)، يظهر له تنبيه فوري (show_alert) يسمّي
+    # الشرط الناقص صراحةً دون تحويله إلى البوت — تمييزًا واضحًا عن حالة عدم
+    # الاشتراك في VORTEX أعلاه.
     ok, alert_text = await check_giveaway_requirements(context, user, giveaway)
     if not ok:
         await query.answer(alert_text, show_alert=True)
