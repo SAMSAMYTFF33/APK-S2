@@ -3160,6 +3160,91 @@ def reverse_contest_owner_points(owner_id: int, amount: int) -> None:
     owner_ref = fs_db().collection("owner_points").document(str(owner_id))
     _fs_bump_counter(owner_ref, "points", -amount, extra={"owner_id": owner_id})
 
+
+def create_withdraw_request(user_id: int, display_name: str, username: str,
+                             points_amount: int) -> str:
+    """
+    نظام السحب الحقيقي: ينشئ طلب سحب جديد بحالة «pending» (قيد الانتظار)
+    ويخصم كامل رصيد المستخدم من نقاطه فورًا عند تقديم الطلب — وليس عند
+    تأكيد المالك — حتى لا يستطيع سحب نفس النقاط مرتين أثناء انتظار المراجعة.
+    لا يُطلب من المستخدم أي نص إضافي؛ التواصل يتم عبر يوزر تليجرام الخاص به
+    مباشرة (username إلزامي قبل إنشاء أي طلب). يعيد معرّف الطلب (request_id).
+    """
+    client = fs_db()
+    ref = client.collection("withdraw_requests").document()
+    ref.set({
+        "request_id": ref.id,
+        "user_id": user_id,
+        "display_name": display_name,
+        "username": username,
+        "points_amount": points_amount,
+        "status": "pending",
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": None,
+    })
+    owner_ref = client.collection("owner_points").document(str(user_id))
+    _fs_bump_counter(owner_ref, "points", -points_amount, extra={"owner_id": user_id})
+    return ref.id
+
+
+def get_withdraw_request(request_id: str):
+    doc = fs_db().collection("withdraw_requests").document(request_id).get()
+    if not doc.exists:
+        return None
+    data = doc.to_dict()
+    data["request_id"] = doc.id
+    return data
+
+
+def get_user_withdraw_requests(user_id: int):
+    """يعيد كل طلبات سحب مستخدم مرتّبة تنازليًا (الأحدث أولاً)."""
+    docs = fs_db().collection("withdraw_requests").where("user_id", "==", user_id).stream()
+    rows = []
+    for d in docs:
+        data = d.to_dict()
+        data["request_id"] = d.id
+        rows.append(data)
+    rows.sort(key=lambda r: r.get("requested_at") or "", reverse=True)
+    return rows
+
+
+def get_user_latest_withdraw_request(user_id: int):
+    rows = get_user_withdraw_requests(user_id)
+    return rows[0] if rows else None
+
+
+def has_pending_withdraw_request(user_id: int) -> bool:
+    latest = get_user_latest_withdraw_request(user_id)
+    return bool(latest and latest.get("status") == "pending")
+
+
+def get_pending_withdraw_requests(limit: int = 15):
+    """يعيد كل طلبات السحب «قيد الانتظار» الحالية مرتّبة من الأقدم للأحدث
+    (تُعرض في قسم المالك — سجلات مطالبة سحب)."""
+    docs = fs_db().collection("withdraw_requests").where("status", "==", "pending").stream()
+    rows = []
+    for d in docs:
+        data = d.to_dict()
+        data["request_id"] = d.id
+        rows.append(data)
+    rows.sort(key=lambda r: r.get("requested_at") or "")
+    return rows[:limit]
+
+
+def mark_withdraw_completed(request_id: str) -> bool:
+    """يعلّم طلب سحب كـ«مكتمل» (استلمه المستخدم فعليًا) — يُستدعى فقط من
+    قسم المالك بعد إرسال المكافأة الحقيقية للمستخدم يدويًا. يعيد True فقط
+    إذا كان الطلب لا يزال «قيد الانتظار» فعليًا (يمنع التأكيد المزدوج)."""
+    ref = fs_db().collection("withdraw_requests").document(request_id)
+    doc = ref.get()
+    if not doc.exists or doc.to_dict().get("status") != "pending":
+        return False
+    ref.update({
+        "status": "completed",
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return True
+
 def toggle_remind_win(user_id: int) -> bool:
     ref = fs_db().collection("remind_win").document(str(user_id))
     doc = ref.get()
@@ -3706,35 +3791,61 @@ async def bot_chat_status_update(update: Update, context: ContextTypes.DEFAULT_T
 
 
 def build_points_message(user_id: int) -> tuple:
-    """واجهة ربح مختصرة: كل المحتوى عريض والجمل الأساسية مقتبسة."""
+    """واجهة ربح مختصرة: كل المحتوى عريض والجمل الأساسية مقتبسة. يعرض أيضًا
+    حالة آخر طلب سحب للمستخدم إن وُجد (قيد الانتظار / مكتمل)."""
     pts = get_points(user_id)
-    return build_text_with_emojis([
+    content = [
+        ("🎁", EMOJI["star"]),
+        " ", get_setting("points_title") or "ربح من البوت",
+        "\n\n",
         ([
-            ("🎁", EMOJI["star"]),
-            " ", get_setting("points_title") or "ربح من البوت",
-            "\n\n",
-            ([
-                f"💎 رصيدك الحالي: {pts} نقطة",
-                "\n",
-                f"🎯 المكافأة عند: {get_setting('points_required') or '0'} نقطة",
-                "\n",
-                f"🎁 المكافأة: {get_setting('reward_value') or '0'} {get_setting('reward_type') or ''}",
-            ], "blockquote", None),
-            "\n\n",
-            ([
-                "📌 الشروط:\n",
-                get_setting("points_conditions") or "الربح من قسم «إنشاء سحب» فقط.",
-                "\n\n”",
-            ], "blockquote", None),
-        ], "bold", None),
-    ])
+            f"💎 رصيدك الحالي: {pts} نقطة",
+            "\n",
+            f"🎯 المكافأة عند: {get_setting('points_required') or '0'} نقطة",
+        ], "blockquote", None),
+        "\n\n",
+        ([
+            "📌 الشروط:\n",
+            get_setting("points_conditions") or "الربح من قسم «إنشاء سحب» فقط.",
+            "\n\n”",
+        ], "blockquote", None),
+    ]
+    latest = get_user_latest_withdraw_request(user_id)
+    if latest:
+        status_label = "🟡 قيد الانتظار" if latest["status"] == "pending" else "🟢 مكتمل"
+        content.append("\n\n")
+        content.append(([
+            "📋 آخر طلب سحب لك:\n",
+            f"💎 عدد النقاط: {latest.get('points_amount', 0)}\n",
+            f"📌 الحالة: {status_label} ”",
+        ], "blockquote", None))
+    return build_text_with_emojis([(content, "bold", None)])
 
 
 def build_points_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(
+    """كيبورد قسم ربح: زر السحب يتغيّر حسب حالة المستخدم —
+    مقفل (رمادي/عادي) إن لم يصل بعد للحد المطلوب، أخضر واحترافي عند
+    الوصول إليه، أو تنبيه «قيد الانتظار» إن كان لديه طلب سابق لم يُستكمل."""
+    rows = []
+    required = int(get_setting("points_required") or "0")
+    if required > 0:
+        pts = get_points(user_id)
+        if has_pending_withdraw_request(user_id):
+            rows.append([InlineKeyboardButton(
+                "🟡 طلب السحب قيد الانتظار", callback_data="withdraw_pending",
+            )])
+        elif pts >= required:
+            rows.append([InlineKeyboardButton(
+                f"✅ سحب {pts} نقطة", callback_data="withdraw_start", style="success",
+            )])
+        else:
+            rows.append([InlineKeyboardButton(
+                f"🔒 سحب ({pts}/{required} نقطة)", callback_data="withdraw_locked",
+            )])
+    rows.append([InlineKeyboardButton(
         "🔙 رجوع", callback_data="back_main_menu",
         style="danger", **emoji_kwargs("back_section_btn"),
-    )]]
+    )])
     return InlineKeyboardMarkup(rows)
 
 
@@ -3778,9 +3889,7 @@ def build_points_settings_message() -> tuple:
             ([
                 f"🔘 الحالة: {status}\n",
                 f"💎 لكل مشارك جديد: {get_setting('points_per_user') or '1'} نقطة\n",
-                f"🎯 المطلوب للمكافأة: {get_setting('points_required') or '0'} نقطة\n",
-                f"🎁 نوع المكافأة: {get_setting('reward_type') or '-'}\n",
-                f"💰 قيمة المكافأة: {get_setting('reward_value') or '0'}",
+                f"🎯 الحد الأدنى للسحب: {get_setting('points_required') or '0'} نقطة",
             ], "blockquote", None),
             "\n\n",
             (["اختر الإعداد الذي تريد تعديله ”"], "blockquote", None),
@@ -3795,11 +3904,7 @@ def build_points_settings_keyboard() -> InlineKeyboardMarkup:
                                  callback_data="points_toggle", style="success" if get_setting("points_enabled") != "1" else "danger"),
             InlineKeyboardButton("💎 لكل مستخدم", callback_data="points_edit:points_per_user", style="primary"),
         ],
-        [
-            InlineKeyboardButton("🎯 حد المكافأة", callback_data="points_edit:points_required", style="primary"),
-            InlineKeyboardButton("🏷️ النوع", callback_data="points_edit:reward_type", style="primary"),
-        ],
-        [InlineKeyboardButton("💰 قيمة المكافأة", callback_data="points_edit:reward_value", style="primary")],
+        [InlineKeyboardButton("🎯 الحد الأدنى للسحب", callback_data="points_edit:points_required", style="primary")],
         [InlineKeyboardButton("📝 نصوص قسم ربح", callback_data="points_text_settings", style="primary")],
         [InlineKeyboardButton("↩️ العودة للوضع الافتراضي", callback_data="points_restore_defaults", style="success")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="owner_points_section", style="danger")],
@@ -3826,6 +3931,46 @@ def build_points_text_settings_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("↩️ افتراضي", callback_data="points_restore_defaults", style="success")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="points_settings", style="danger")],
     ])
+
+
+def build_owner_withdraw_section_message() -> tuple:
+    """سجلات مطالبة سحب — قسم المالك: يعرض كل طلبات السحب الحالية «قيد
+    الانتظار» مع يوزر ورقم كل مستخدم، ليتمكن المالك من التواصل معه مباشرة
+    عبر يوزره وإرسال المكافأة يدويًا، ثم تأكيد الاستلام عبر الزر الملحق."""
+    pending = get_pending_withdraw_requests()
+    content = [
+        "💳 سجلات طلبات السحب",
+        "\n\n",
+    ]
+    if not pending:
+        content.append((["📭 لا توجد طلبات سحب قيد الانتظار حاليًا ”"], "blockquote", None))
+    else:
+        for req in pending:
+            name = req.get("display_name") or str(req.get("user_id"))
+            username = req.get("username")
+            contact = f"@{username}" if username else "-"
+            content.append(([
+                f"👤 {name} (ID: {req.get('user_id')})\n",
+                f"🔗 يوزر: {contact}\n",
+                f"💎 النقاط: {req.get('points_amount', 0)}\n",
+                f"🕒 وقت الطلب: {req.get('requested_at', '')[:16]}",
+            ], "blockquote", None))
+            content.append("\n\n")
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_withdraw_section_keyboard() -> InlineKeyboardMarkup:
+    pending = get_pending_withdraw_requests()
+    rows = [
+        [InlineKeyboardButton(
+            f"✅ تأكيد استلام: {(req.get('display_name') or str(req.get('user_id')))[:20]}",
+            callback_data=f"wd_complete:{req['request_id']}", style="success",
+        )]
+        for req in pending
+    ]
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_points_section", style="danger",
+                                       **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_owner_section_message() -> tuple:
@@ -3862,6 +4007,10 @@ def build_owner_points_section_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(
             "⚙️ إعدادات", callback_data="points_settings",
             style="primary", **emoji_kwargs("gear"),
+        )],
+        [InlineKeyboardButton(
+            "💳 سجلات طلبات السحب", callback_data="owner_withdraw_section",
+            style="primary",
         )],
         [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
                               **emoji_kwargs("back_section_btn"))],
@@ -5941,6 +6090,131 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             text=text, entities=entities,
             reply_markup=build_owner_points_section_keyboard(),
         )
+        return
+
+    if query.data == "owner_withdraw_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_owner_withdraw_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_withdraw_section_keyboard(),
+        )
+        return
+
+    if query.data.startswith("wd_complete:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+            return
+        request_id = query.data.split(":", 1)[1]
+        req = get_withdraw_request(request_id)
+        if not req:
+            await query.answer("⚠️ هذا الطلب غير موجود.", show_alert=True)
+        elif req.get("status") != "pending":
+            await query.answer("✅ تم تأكيد هذا الطلب مسبقًا.", show_alert=True)
+        else:
+            mark_withdraw_completed(request_id)
+            await query.answer("✅ تم تعليم الطلب كمكتمل.")
+            try:
+                await context.bot.send_message(
+                    chat_id=req["user_id"],
+                    text=(
+                        "🎉 تم استلام طلب سحبك بنجاح وتحويل مكافأتك!\n\n"
+                        f"💎 عدد النقاط المسحوبة: {req.get('points_amount', 0)}\n"
+                        "📌 الحالة: 🟢 مكتمل"
+                    ),
+                )
+            except Exception:
+                pass
+        text, entities = build_owner_withdraw_section_message()
+        try:
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_withdraw_section_keyboard(),
+            )
+        except Exception:
+            pass
+        return
+
+    if query.data == "withdraw_locked":
+        required = int(get_setting("points_required") or "0")
+        pts = get_points(query.from_user.id)
+        await query.answer(
+            f"🔒 تحتاج {required} نقطة على الأقل للسحب، رصيدك الحالي: {pts} نقطة.",
+            show_alert=True,
+        )
+        return
+
+    if query.data == "withdraw_pending":
+        await query.answer(
+            "🟡 لديك طلب سحب قيد الانتظار بالفعل، سيتم التواصل معك بعد مراجعته.",
+            show_alert=True,
+        )
+        return
+
+    if query.data == "withdraw_start":
+        user = query.from_user
+        required = int(get_setting("points_required") or "0")
+        pts = get_points(user.id)
+        if required <= 0:
+            await query.answer("⚠️ ميزة السحب غير مفعّلة حاليًا.", show_alert=True)
+            return
+        if has_pending_withdraw_request(user.id):
+            await query.answer(
+                "🟡 لديك طلب سحب قيد الانتظار بالفعل، انتظر مراجعته أولاً.", show_alert=True,
+            )
+            return
+        if pts < required:
+            await query.answer(
+                f"🔒 تحتاج {required} نقطة على الأقل للسحب، رصيدك الحالي: {pts} نقطة.",
+                show_alert=True,
+            )
+            return
+        # التواصل مع صاحب طلب السحب يتم عبر يوزر تليجرام مباشرة، لذا لا يمكن
+        # إنشاء أي طلب لمستخدم بلا اسم مستخدم (username) — نطلب منه إضافته
+        # أولاً من إعدادات تليجرام قبل السماح له بالمتابعة.
+        if not user.username:
+            await query.answer(
+                "⚠️ يجب إضافة اسم مستخدم (Username) في إعدادات تليجرام أولاً "
+                "حتى نتمكن من التواصل معك لإرسال مكافأتك، ثم اضغط على زر السحب مجددًا.",
+                show_alert=True,
+            )
+            return
+
+        display_name = user.first_name or user.username or str(user.id)
+        request_id = create_withdraw_request(user.id, display_name, user.username, pts)
+
+        await query.answer(
+            f"✅ تم إرسال طلب سحبك بنجاح!\n💎 عدد النقاط: {pts}\n📌 الحالة: قيد الانتظار",
+            show_alert=True,
+        )
+
+        text, entities = build_points_message(user.id)
+        try:
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_points_keyboard(user.id),
+            )
+        except Exception:
+            pass
+
+        for owner_id in OWNER_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=owner_id,
+                    text=(
+                        "💳 طلب سحب جديد\n\n"
+                        f"👤 المستخدم: {display_name} (ID: {user.id})\n"
+                        f"🔗 يوزر: @{user.username}\n"
+                        f"💎 عدد النقاط: {pts}"
+                    ),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                        "✅ تأكيد الاستلام", callback_data=f"wd_complete:{request_id}", style="success",
+                    )]]),
+                )
+            except Exception:
+                pass
         return
 
     if query.data == "owner_sub_section":
