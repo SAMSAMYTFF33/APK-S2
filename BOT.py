@@ -13,8 +13,8 @@ def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
 
 
-REQUIRED_CHANNEL_USERNAME = "e_ggf"
-REQUIRED_CHANNEL_URL = "https://t.me/e_ggf"
+REQUIRED_CHANNEL_USERNAME = "w33lv"
+REQUIRED_CHANNEL_URL = "https://t.me/w33lv"
 REQUIRED_CHANNEL_BUTTON_TEXT = "VORTEX  𓏺"
 REQUIRED_CHANNEL_DEFAULT_TARGET = "1000"
 
@@ -58,6 +58,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
+from types import SimpleNamespace
 
 logging.basicConfig(
     level=logging.INFO,
@@ -666,6 +667,39 @@ async def is_user_subscribed_to_chat(
             break
     _GW_CONDITION_SUB_CACHE[cache_key] = {"value": result, "ts": time.time()}
     return result
+
+
+async def check_contest_channel_subscription(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, contest, force_refresh: bool = False,
+) -> bool:
+    """يتحقق تلقائيًا (في الخلفية) من عضوية المستخدم في القناة التي نُشرت فيها
+    المسابقة تحديدًا (contest['chat_id']) — بصرف النظر عن كيفية وصوله لرسالة
+    المسابقة (حتى لو من خارج القناة). هذا شرط ضمني دائم لكل مسابقة، ولا يُعرض
+    للمستخدم أي شيء بخصوصه إلا إذا تبيّن أنه غير مشترك فعلاً."""
+    chat_id = contest.get("chat_id") if hasattr(contest, "get") else contest["chat_id"]
+    if not chat_id:
+        return True
+    return await is_user_subscribed_to_chat(context, user_id, chat_id, force_refresh=force_refresh)
+
+
+async def build_contest_channel_join_link(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str:
+    """يبني رابط انضمام لقناة المسابقة: يوزر عام إن وُجد، وإلا رابط دعوة لقناة
+    خاصة. يُستخدم في زر «انضم إلى القناة» ببوابة شرط قناة المسابقة."""
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        if chat.username:
+            return f"https://t.me/{chat.username}"
+    except Exception:
+        logger.exception("تعذّر جلب معلومات قناة المسابقة %s لبناء رابط الانضمام", chat_id)
+    try:
+        invite_link = await context.bot.create_chat_invite_link(chat_id)
+        return invite_link.invite_link
+    except Exception:
+        try:
+            return await context.bot.export_chat_invite_link(chat_id)
+        except Exception:
+            logger.exception("تعذّر بناء رابط دعوة لقناة المسابقة %s", chat_id)
+            return ""
 
 
 async def check_giveaway_condition_channels(
@@ -1647,6 +1681,37 @@ def build_contest_join_confirm_keyboard(contest_code: str) -> InlineKeyboardMark
             ),
         ],
     ])
+
+
+def build_contest_channel_gate_message() -> tuple:
+    """رسالة «يجب الانضمام إلى قناة المسابقة أولاً» — لا تُعرض إلا عند اكتشاف
+    أن المستخدم غير مشترك فعليًا في القناة التي نُشرت فيها المسابقة (فحص
+    خلفي تلقائي)، ولا تظهر أبدًا ضمن رسالة المسابقة أو أي شروط دائمة أخرى."""
+    parts = [
+        "يجب عليك الانضمام إلى قناة المسابقة أولاً",
+        "\n",
+        "- لتتمكن من المشاركة في المسابقة : ",
+        ("🏁", EMOJI["target_pin"]),
+        "\n",
+        ([
+            ("‼️", EMOJI["sub_alert"]),
+            " | انضم ثم اضغط تحقق",
+            ("✅", EMOJI["sub_check"]),
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_contest_channel_gate_keyboard(contest_code: str, join_url: str) -> InlineKeyboardMarkup:
+    """كيبورد بوابة شرط قناة المسابقة: زر «انضم إلى القناة» (إن توفّر رابط) +
+    زر «تحقق ✅» الذي يعيد فحص العضوية فعليًا (بدون كاش) قبل إكمال المشاركة."""
+    rows = []
+    if join_url:
+        rows.append([InlineKeyboardButton("📢 انضم إلى القناة", url=join_url)])
+    rows.append([
+        InlineKeyboardButton("تحقق ✅", callback_data=f"compjoinchk:{contest_code}"),
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_contest_registered_message(display_name: str, participant_code: str) -> tuple:
@@ -4216,9 +4281,64 @@ def roulette_share_keyboard(roulette_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔷 تدوير الروليت 🔷", callback_data=f"rr_spin_{roulette_id}", style="danger")],
     ])
 
+class _ReplyOnlyMessageShim:
+    """كائن بديل خفيف يوفّر reply_text() فقط، يُستخدم لتمرير معالجات الروابط
+    العميقة (compjoin_/gwjoin_/... إلخ) نفسها دون أي تعديل عندما يتم استدعاؤها
+    من داخل رد على ضغطة زر (callback) بدل رسالة /start مباشرة — تحديدًا بعد
+    نجاح زر «تحقق من الاشتراك» في بوابة قناة البوت الإلزامية."""
+    def __init__(self, bot, chat_id: int):
+        self._bot = bot
+        self._chat_id = chat_id
+
+    async def reply_text(self, *args, **kwargs):
+        kwargs.pop("quote", None)
+        return await self._bot.send_message(chat_id=self._chat_id, *args, **kwargs)
+
+
+async def _dispatch_start_arg(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                               arg: str, is_genuinely_new: bool) -> bool:
+    """يوزّع معامل ?start=... على المعالج المناسب له (رابط مسابقة/سحب/روليت).
+    يُعيد True إن تم التعرّف على المعامل ومعالجته، أو False إن كان غير معروف
+    (فيُعرض حينها الترحيب الافتراضي). مُستخرجة كدالة مستقلة حتى تُستخدم في
+    start() مباشرة، وأيضًا بعد اجتياز بوابة الاشتراك الإجباري عبر زر «تحقق»
+    لإكمال نفس الطلب الأصلي الذي أوقفته البوابة، بدل عرض الترحيب العام."""
+    if arg.startswith("rr_"):
+        await handle_roulette_entry(update, context, arg[len("rr_"):])
+        return True
+    if arg.startswith("compjoin_"):
+        await handle_contest_join_entry(update, context, arg[len("compjoin_"):])
+        return True
+    if arg.startswith("compvote_"):
+        await handle_contest_vote_entry(update, context, arg[len("compvote_"):])
+        return True
+    if arg.startswith("gwcap_"):
+        await handle_giveaway_captcha_entry(
+            update, context, arg[len("gwcap_"):], is_genuinely_new=is_genuinely_new,
+        )
+        return True
+    if arg.startswith("gwjoin_"):
+        await handle_giveaway_join_entry(
+            update, context, arg[len("gwjoin_"):], is_genuinely_new=is_genuinely_new,
+        )
+        return True
+    if arg.startswith("gwshare_"):
+        await handle_giveaway_share_entry(update, context, arg[len("gwshare_"):])
+        return True
+    if arg == "gw_remind":
+        await handle_giveaway_remind_entry(update, context)
+        return True
+    return False
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribed = await is_user_subscribed(context, update.effective_user.id)
     if not subscribed:
+        # يُحفظ معامل الرابط العميق (إن وُجد) مؤقتًا لهذا المستخدم، حتى إن
+        # اجتاز اشتراكه لاحقًا عبر زر «تحقق من الاشتراك» تُستكمل نفس عملية
+        # المشاركة الأصلية (مسابقة/سحب) تلقائيًا بدل فقدان السياق وعرض
+        # الترحيب العام فقط.
+        if context.args:
+            context.user_data["pending_start_arg"] = context.args[0]
         text, entities = build_subscription_required_message()
         await update.message.reply_text(
             text, entities=entities, reply_markup=build_subscription_required_keyboard()
@@ -4228,26 +4348,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id)
 
     args = context.args
-    if args and args[0].startswith("rr_"):
-        await handle_roulette_entry(update, context, args[0][len("rr_"):])
+    if args and await _dispatch_start_arg(update, context, args[0], is_genuinely_new):
         return
-    if args and args[0].startswith("compjoin_"):
-        await handle_contest_join_entry(update, context, args[0][len("compjoin_"):])
-        return
-    if args and args[0].startswith("compvote_"):
-        await handle_contest_vote_entry(update, context, args[0][len("compvote_"):])
-        return
-    if args and args[0].startswith("gwcap_"):
-        await handle_giveaway_captcha_entry(
-            update, context, args[0][len("gwcap_"):], is_genuinely_new=is_genuinely_new,
-        )
-        return
-    if args and args[0].startswith("gwshare_"):
-        await handle_giveaway_share_entry(update, context, args[0][len("gwshare_"):])
-        return
-    if args and args[0] == "gw_remind":
-        await handle_giveaway_remind_entry(update, context)
-        return
+
     text, entities = build_welcome_message(update.effective_user)
     remind_state = get_remind_win_state(update.effective_user.id)
     await update.message.reply_text(
@@ -4257,7 +4360,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يُستدعى عند الضغط على زر «تحقق من الاشتراك» — يعيد فحص الاشتراك في القناة."""
+    """يُستدعى عند الضغط على زر «تحقق من الاشتراك» — يعيد فحص الاشتراك في القناة.
+    إن كان المستخدم قد وصل لهذه البوابة أثناء محاولة المشاركة في مسابقة/سحب
+    (عبر زر «اضغط للمشاركة»)، يُكمل له نفس طلبه الأصلي تلقائيًا بعد نجاح
+    التحقق، بدل عرض الترحيب العام فقط."""
     query = update.callback_query
     _SUBSCRIPTION_CACHE.pop(query.from_user.id, None)
     subscribed = await is_user_subscribed(
@@ -4267,6 +4373,26 @@ async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAUL
         await query.answer("⚠️ لم يتم العثور على اشتراكك، يرجى الاشتراك أولاً ثم إعادة المحاولة.", show_alert=True)
         return
     await query.answer()
+
+    pending_arg = context.user_data.pop("pending_start_arg", None)
+    if pending_arg:
+        is_genuinely_new = register_bot_user_and_check_new(query.from_user.id)
+        shim_update = SimpleNamespace(
+            effective_user=query.from_user,
+            message=_ReplyOnlyMessageShim(context.bot, query.from_user.id),
+        )
+        try:
+            handled = await _dispatch_start_arg(shim_update, context, pending_arg, is_genuinely_new)
+        except Exception:
+            logger.exception("تعذّر إكمال الطلب المعلّق %s بعد التحقق من الاشتراك", pending_arg)
+            handled = False
+        if handled:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            return
+
     text, entities = build_welcome_message(query.from_user)
     remind_state = get_remind_win_state(query.from_user.id)
     await query.edit_message_text(
@@ -4414,6 +4540,20 @@ async def handle_contest_join_entry(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(text=_bt, entities=_be)
         return
 
+    # فحص خلفي تلقائي: التأكد من أن المستخدم عضو فعلاً في القناة التي نُشرت
+    # فيها هذه المسابقة تحديدًا، بصرف النظر عن مصدر وصوله لرسالة المسابقة.
+    # لا يظهر له أي شيء بخصوص هذا الشرط إن كان مشتركًا بالفعل، وتُكمل
+    # المشاركة مباشرة كالمعتاد.
+    if not await check_contest_channel_subscription(context, user.id, contest):
+        join_url = await build_contest_channel_join_link(context, contest["chat_id"])
+        gate_text, gate_entities = build_contest_channel_gate_message()
+        await update.message.reply_text(
+            text=gate_text,
+            entities=gate_entities,
+            reply_markup=build_contest_channel_gate_keyboard(contest_code, join_url),
+        )
+        return
+
     display_name = user.first_name or user.username or str(user.id)
     text, entities = build_contest_join_confirm_message(display_name)
     await update.message.reply_text(
@@ -4421,6 +4561,66 @@ async def handle_contest_join_entry(update: Update, context: ContextTypes.DEFAUL
         entities=entities,
         reply_markup=build_contest_join_confirm_keyboard(contest_code),
     )
+
+
+async def contest_channel_gate_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج ضغط زر «تحقق ✅» في بوابة شرط قناة المسابقة (compjoinchk:{contest_code}).
+    يعيد الفحص الفعلي (بدون كاش) لعضوية المستخدم في قناة المسابقة؛ فإن اجتازه
+    تتحوّل نفس الرسالة إلى رسالة «تأكيد المشاركة» المعتادة، وإلا يبقى ممنوعًا
+    من إكمال المشاركة مع تذكيره بالانضمام أولًا."""
+    query = update.callback_query
+    try:
+        contest_code = query.data.split(":", 1)[1]
+    except (ValueError, IndexError):
+        await query.answer("⚠️ طلب غير صالح.", show_alert=True)
+        return
+
+    contest = get_contest(contest_code)
+    if not contest:
+        await query.answer("⚠️ هذه المسابقة غير موجودة أو انتهت.", show_alert=True)
+        return
+    if contest["status"] != "open":
+        await query.answer("⚠️ انتهت هذه المسابقة بالفعل.", show_alert=True)
+        return
+
+    user = query.from_user
+    existing = get_contest_participant(contest_code, user.id)
+    if existing:
+        await query.answer()
+        text, entities = build_contest_registered_message(existing["display_name"], existing["participant_code"])
+        await safe_edit_message_text(
+            query, text, entities,
+            reply_markup=build_contest_registered_keyboard(
+                contest_code, user.id, existing["participant_code"]
+            ),
+        )
+        return
+
+    current = count_contest_participants(contest_code)
+    if current >= contest["target_count"]:
+        await query.answer("⚠️ اكتمل عدد المشاركين المسموح في هذه المسابقة.", show_alert=True)
+        return
+
+    if not await check_contest_channel_subscription(context, user.id, contest, force_refresh=True):
+        await query.answer(
+            "❌ لم يتم العثور على اشتراكك، انضم إلى قناة المسابقة ثم اضغط تحقق مجددًا.",
+            show_alert=True,
+        )
+        return
+
+    await query.answer("✅ تم التحقق من اشتراكك، أكمل المشاركة أدناه.")
+    display_name = user.first_name or user.username or str(user.id)
+    text, entities = build_contest_join_confirm_message(display_name)
+    try:
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_contest_join_confirm_keyboard(contest_code),
+        )
+    except Exception:
+        await query.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_contest_join_confirm_keyboard(contest_code),
+        )
 
 
 async def handle_contest_vote_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_payload: str):
@@ -4732,6 +4932,49 @@ async def finalize_giveaway_join(context: ContextTypes.DEFAULT_TYPE, gw_code: st
         await finish_giveaway_auto(context, gw_code)
 
 
+async def handle_giveaway_join_entry(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                      gw_code: str, is_genuinely_new: bool = False):
+    """يُستدعى عند فتح البوت عبر رابط ?start=gwjoin_{gw_code} — وهو التحويل
+    التلقائي من زر «اضغط لـ المشاركة» أسفل منشور السحب في القناة عندما يكتشف
+    البوت أن المستخدم غير مشترك في قناة البوت الإلزامية (VORTEX). بما أن
+    start() يتحقق من هذا الاشتراك ويعرض بوابته الخاصة قبل الوصول لهذه الدالة،
+    فالمستخدم هنا يكون قد اجتاز شرط الاشتراك بالفعل، فتكمل نفس منطق المشاركة
+    المعتاد الموجود في gw_join_callback لكن عبر رسالة خاصة بدل استعلام كولباك."""
+    user = update.effective_user
+
+    giveaway = get_giveaway(gw_code)
+    if not giveaway or giveaway["status"] != "open":
+        _bt, _be = bold_notice("⚠️ هذا السحب غير متاح حالياً.")
+        await update.message.reply_text(text=_bt, entities=_be)
+        return
+    if is_giveaway_participant(gw_code, user.id):
+        _bt, _be = bold_notice("✅ أنت مسجّل بالفعل في هذا السحب.")
+        await update.message.reply_text(text=_bt, entities=_be)
+        return
+
+    ok, _alert = await check_giveaway_requirements(context, user, giveaway)
+    if not ok:
+        boost_link, vote_link = await build_giveaway_gate_links(context, giveaway)
+        gate_text, gate_entities = build_giveaway_gate_message(giveaway)
+        await update.message.reply_text(
+            text=gate_text,
+            entities=gate_entities,
+            reply_markup=build_giveaway_gate_keyboard(
+                gw_code, giveaway, is_genuinely_new, boost_link=boost_link, vote_link=vote_link,
+            ),
+        )
+        return
+
+    if giveaway["antispam"]:
+        text, entities, keyboard = _build_giveaway_captcha_payload(context, gw_code, is_genuinely_new)
+        await update.message.reply_text(text=text, entities=entities, reply_markup=keyboard)
+        return
+
+    await finalize_giveaway_join(context, gw_code, giveaway, user, is_genuinely_new=is_genuinely_new)
+    _bt, _be = bold_notice("✅ تم تسجيل مشاركتك بنجاح!")
+    await update.message.reply_text(text=_bt, entities=_be)
+
+
 async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """يعالج ضغط زر «اضغط لـ المشاركة» أسفل منشور السحب في القناة/القروب."""
     query = update.callback_query
@@ -4744,6 +4987,15 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     if is_giveaway_participant(gw_code, user.id):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
+        return
+
+    # فحص خلفي تلقائي: يجب أن يكون المستخدم مشتركًا في قناة البوت الإلزامية
+    # (VORTEX) قبل إكمال أي مشاركة في أي سحب. بما أن هذا الزر كولباك مباشر
+    # داخل منشور القناة (لا يمر عبر start())، يُحوَّل المستخدم غير المشترك
+    # لمحادثة البوت الخاصة عبر رابط ?start=gwjoin_، حيث تُعرض له بوابة
+    # الاشتراك الاحترافية (زر VORTEX + زر تحقق) تلقائيًا قبل إكمال مشاركته.
+    if not await is_user_subscribed(context, user.id):
+        await query.answer(url=f"https://t.me/{BOT_USERNAME}?start=gwjoin_{gw_code}")
         return
 
     ok, alert_text = await check_giveaway_requirements(context, user, giveaway)
@@ -5450,6 +5702,21 @@ async def _contest_participation_callback_inner(update: Update, context: Context
         current = count_contest_participants(contest_code)
         if current >= contest["target_count"]:
             await query.answer("⚠️ اكتمل عدد المشاركين المسموح في هذه المسابقة.", show_alert=True)
+            return
+
+        # طبقة حماية إضافية: قد يكون المستخدم قد غادر قناة المسابقة بين خطوة
+        # «تأكيد المشاركة» وضغط «قبول»، لذا يُعاد التحقق الفعلي من عضويته هنا
+        # أيضًا قبل تسجيله نهائيًا، بدل الاعتماد فقط على الفحص السابق.
+        if not await check_contest_channel_subscription(context, user.id, contest, force_refresh=True):
+            join_url = await build_contest_channel_join_link(context, contest["chat_id"])
+            gate_text, gate_entities = build_contest_channel_gate_message()
+            await query.answer(
+                "❌ يجب عليك الانضمام إلى قناة المسابقة أولاً", show_alert=True,
+            )
+            await safe_edit_message_text(
+                query, gate_text, gate_entities,
+                reply_markup=build_contest_channel_gate_keyboard(contest_code, join_url),
+            )
             return
 
         await query.answer()
@@ -7736,6 +8003,7 @@ def main():
     ))
     app.add_handler(CallbackQueryHandler(vote_captcha_callback, pattern=r"^compcap:"))
     app.add_handler(CallbackQueryHandler(contest_vote_gate_check_callback, pattern=r"^compcond:"))
+    app.add_handler(CallbackQueryHandler(contest_channel_gate_check_callback, pattern=r"^compjoinchk:"))
     app.add_handler(CallbackQueryHandler(contest_results_callback, pattern=r"^comp_view_results:"))
 
     app.add_handler(CallbackQueryHandler(
