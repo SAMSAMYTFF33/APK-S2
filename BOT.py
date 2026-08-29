@@ -752,40 +752,58 @@ def _migrate_legacy_required_channel() -> None:
         )
 
 
+def _required_channel_label(ch) -> str:
+    """اسم القناة المعروض للمستخدم: العنوان/النص المخصّص إن وُجد، وإلا يوزرها."""
+    return ch.get("button_text") or ch.get("title") or ("@" + ch.get("username", ""))
+
+
 def build_required_channels_rows(channels: list) -> list:
     """يبني صفًا واحدًا (زر انضمام) لكل قناة من القنوات الممرَّرة — يُستخدم في
     كل بوابات الاشتراك الإجباري (البوابة العامة، بوابة تصويت المسابقة،
     وبوابة شروط السحب) بنفس المنطق بدل تكراره في كل واحدة."""
     rows = []
     for ch in channels:
-        title = ch.get("button_text") or ch.get("title") or f"📢 @{ch.get('username', '')}"
+        custom_label = ch.get("button_text") or ch.get("title")
+        title = f"📢 {custom_label}" if custom_label else f"📢 الاشتراك في @{ch.get('username', '')}"
         url = ch.get("url") or f"https://t.me/{ch.get('username', '')}"
-        rows.append([InlineKeyboardButton(title, url=url)])
+        rows.append([InlineKeyboardButton(title, url=url, style="primary")])
     return rows
 
 
-def build_subscription_required_message(missing_channels: list = None) -> tuple:
-    """رسالة تطلب من المستخدم الاشتراك في القناة/القنوات قبل استخدام البوت."""
+def build_subscription_required_message(missing_channels: list = None, channels_status: list = None) -> tuple:
+    """رسالة تطلب من المستخدم الاشتراك في القناة/القنوات قبل استخدام البوت.
+
+    إن مُرِّرت channels_status (قائمة أزواج (channel, subscribed) لكل قنوات
+    الاشتراك الإجباري المفعّلة)، تُعرض حالة كل قناة على حدة (✅ مشترك /
+    ❌ غير مشترك) — مفيد عندما يكون المستخدم مشتركًا في بعض القنوات وخرج من
+    غيرها. وإلا (channels_status غير ممرَّرة) تُعرض القنوات الناقصة فقط،
+    كما في السابق."""
     missing_channels = missing_channels or []
-    label = "القنوات التالية" if len(missing_channels) > 1 else "القناة"
-    parts = [
-        f"عليك الأشتراك في {label} اولاً",
-        "\n",
-        "- لتتمكن من أستخدام البوت : ",
-        ("💻", EMOJI["sub_laptop"]),
+    display_rows = channels_status if channels_status is not None else [
+        (ch, False) for ch in missing_channels
     ]
-    if len(missing_channels) > 1:
+    total = len(display_rows)
+    label = "القنوات التالية" if total > 1 else "القناة التالية"
+
+    parts = [
+        "🔒 ", "خطوة أخيرة قبل استخدام البوت", "\n",
+        "\n",
+        f"يجب عليك الاشتراك في {label} أولاً:",
+    ]
+    if display_rows:
         lines = [
-            f"• {ch.get('button_text') or ch.get('title') or ('@' + ch.get('username', ''))}"
-            for ch in missing_channels
+            f"{'✅' if ok else '❌'} {_required_channel_label(ch)}"
+            for ch, ok in display_rows
         ]
         parts += ["\n", "\n".join(lines)]
     parts += [
         "\n",
+        "\n",
         ([
             ("‼️", EMOJI["sub_alert"]),
-            " | اشترك ثم اضغط تحقق",
+            " | اشترك في القنوات أعلاه، ثم اضغط ",
             ("✅", EMOJI["sub_check"]),
+            " «التحقق من الاشتراك»",
         ], "blockquote", None),
     ]
     return build_text_with_emojis(parts)
@@ -796,8 +814,12 @@ def build_subscription_required_keyboard(missing_channels: list = None) -> Inlin
     if missing_channels:
         rows = build_required_channels_rows(missing_channels)
     else:
-        rows = [[InlineKeyboardButton(REQUIRED_CHANNEL_BUTTON_TEXT, url=get_required_channel_url())]]
-    rows.append([InlineKeyboardButton("تحقق من الاشتراك", callback_data="check_sub_status")])
+        rows = [[InlineKeyboardButton(
+            f"📢 {REQUIRED_CHANNEL_BUTTON_TEXT}", url=get_required_channel_url(), style="primary",
+        )]]
+    rows.append([InlineKeyboardButton(
+        "✅ التحقق من الاشتراك", callback_data="check_sub_status", style="success",
+    )])
     return InlineKeyboardMarkup(rows)
 
 
@@ -806,15 +828,19 @@ SUBSCRIPTION_CACHE_TTL = 60
 SUBSCRIPTION_NEGATIVE_CACHE_TTL = 3
 
 
-async def get_missing_required_channels(
+async def get_required_channels_status(
     context: ContextTypes.DEFAULT_TYPE, user_id: int, force_refresh: bool = False
 ) -> list:
-    """يعيد قائمة قنوات الاشتراك الإجباري المفعّلة التي لم ينضم إليها المستخدم
-    بعد (قائمة فارغة إن كان مشتركًا في الجميع، أو لا توجد أي قناة إجبارية
-    حاليًا). يعتمد داخليًا على is_user_subscribed_to_chat لكل قناة، فيستفيد
-    من نفس الكاش ومنطق إعادة المحاولة عند تحديد تيليجرام لعدد الطلبات."""
+    """يتحقق من حالة اشتراك المستخدم الفعلية (اللحظية) في كل قنوات الاشتراك
+    الإجباري المفعّلة حاليًا — وليس الناقصة منها فقط — ويعيد قائمة أزواج
+    (channel, subscribed: bool) بنفس ترتيب القنوات. تُستخدم لعرض حالة كل
+    قناة على حدة في واجهة الاشتراك الإجباري. يعتمد داخليًا على
+    is_user_subscribed_to_chat لكل قناة (فحص حي عبر get_chat_member، مع كاش
+    قصير جدًا فقط لتفادي إبطاء استجابة الأزرار عند الضغطات المتكررة —
+    60 ثانية للحالة "مشترك" و3 ثوانٍ فقط للحالة "غير مشترك"، بلا أي تخزين
+    دائم لنتيجة قديمة)."""
     channels = get_required_channels(enabled_only=True)
-    missing = []
+    status = []
     for channel in channels:
         username = channel.get("username")
         if not username:
@@ -822,9 +848,18 @@ async def get_missing_required_channels(
         subscribed = await is_user_subscribed_to_chat(
             context, user_id, f"@{username}", force_refresh=force_refresh,
         )
-        if not subscribed:
-            missing.append(channel)
-    return missing
+        status.append((channel, subscribed))
+    return status
+
+
+async def get_missing_required_channels(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, force_refresh: bool = False
+) -> list:
+    """يعيد قائمة قنوات الاشتراك الإجباري المفعّلة التي لم ينضم إليها المستخدم
+    بعد (قائمة فارغة إن كان مشتركًا في الجميع، أو لا توجد أي قناة إجبارية
+    حاليًا)."""
+    status = await get_required_channels_status(context, user_id, force_refresh=force_refresh)
+    return [channel for channel, subscribed in status if not subscribed]
 
 
 async def is_user_subscribed(
@@ -835,6 +870,57 @@ async def is_user_subscribed(
     المستخدم مشتركًا في جميعها."""
     missing = await get_missing_required_channels(context, user_id, force_refresh=force_refresh)
     return not missing
+
+
+async def enforce_mandatory_subscription_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """بوابة عامة تُستدعى في بداية معالجات الرسائل النصية والأزرار العامة
+    (text_router وmain_menu_callback) لضمان أن المستخدم ما زال مشتركًا
+    فعليًا في كل قنوات الاشتراك الإجباري المفعّلة *في لحظة استخدامه للبوت*،
+    وليس فقط عند أول مرة اجتاز فيها الشرط. لا تعتمد على أي نتيجة تحقق قديمة
+    مخزّنة بشكل دائم — الفحص يتم دائمًا من حالة الاشتراك الفعلية عبر
+    get_chat_member (مع كاش قصير جدًا بالثواني فقط لتفادي إبطاء استجابة
+    الأزرار عند الضغطات المتكررة).
+
+    تعيد True إن كان يمكن للمستخدم المتابعة بشكل طبيعي، أو False إن تم
+    حجب الطلب وعرض بوابة الاشتراك الإجباري بدلاً منه (وعندها يجب على
+    المستدعي التوقف فورًا وعدم متابعة تنفيذ الطلب الأصلي).
+
+    ملاحظة: مالكو البوت (OWNER_IDS) مستثنون دائمًا من هذا الشرط، حتى لا
+    يُحجب وصولهم إلى قسم الإدارة (مثلاً لإضافة/تعديل قنوات الاشتراك نفسها)."""
+    user = update.effective_user
+    if not user or is_owner(user.id) or is_moderator(user.id):
+        return True
+
+    channels_status = await get_required_channels_status(context, user.id)
+    if not channels_status:
+        return True
+    missing_channels = [ch for ch, ok in channels_status if not ok]
+    if not missing_channels:
+        return True
+
+    text, entities = build_subscription_required_message(missing_channels, channels_status=channels_status)
+    keyboard = build_subscription_required_keyboard(missing_channels)
+
+    query = update.callback_query
+    if query is not None:
+        try:
+            await query.answer(
+                "⚠️ يجب الاشتراك في قنوات البوت الإجبارية أولاً لمتابعة استخدامه.",
+                show_alert=True,
+            )
+        except Exception:
+            pass
+        try:
+            await query.edit_message_text(text=text, entities=entities, reply_markup=keyboard)
+        except Exception:
+            try:
+                await query.message.reply_text(text=text, entities=entities, reply_markup=keyboard)
+            except Exception:
+                pass
+    elif update.message is not None:
+        await update.message.reply_text(text=text, entities=entities, reply_markup=keyboard)
+
+    return False
 
 
 _GW_CONDITION_SUB_CACHE = {}
@@ -2876,6 +2962,21 @@ def build_giveaway_condition_subscribe_alert() -> str:
     return "❌ يجب عليك الاشتراك في قناة الشرط اولاً"
 
 
+def build_giveaway_vortex_subscribe_alert(missing_channels: list) -> str:
+    """نص التنبيه الداخلي (show_alert) الذي يظهر عند الضغط على زر «اضغط لـ
+    المشاركة» أسفل منشور السحب حين يكون المستخدم غير مشترك في قناة/قنوات
+    VORTEX الإجبارية العامة — تنبيه فوري بالنص فقط دون تحويله إلى البوت،
+    بنفس أسلوب بقية تنبيهات شروط السحب (يسمّي القناة الناقصة إن كانت واحدة
+    فقط، أو يشير لعددها إن كانت أكثر)."""
+    if not missing_channels:
+        return "❌ يجب عليك الاشتراك في قناة البوت الإجبارية أولاً للمشاركة"
+    if len(missing_channels) == 1:
+        label = _required_channel_label(missing_channels[0])
+        return f"❌ يجب عليك الاشتراك في «{label}» أولاً للمشاركة في هذا السحب"
+    labels = "، ".join(_required_channel_label(ch) for ch in missing_channels)
+    return f"❌ يجب عليك الاشتراك في القنوات التالية أولاً للمشاركة: {labels}"
+
+
 def build_giveaway_host_channel_subscribe_alert(host_channel_title: str = "") -> str:
     """نص التنبيه الداخلي (show_alert) الذي يظهر عند الضغط المباشر على زر
     «اضغط لـ المشاركة» أسفل منشور السحب حين يكون المستخدم مشتركًا في VORTEX
@@ -3999,6 +4100,7 @@ def add_points_to_user(user_id: int, amount: int) -> int:
         return get_points(user_id)
     owner_ref = fs_db().collection("owner_points").document(str(user_id))
     _fs_bump_counter(owner_ref, "points", amount, extra={"owner_id": user_id})
+    invalidate_users_points_cache()
     return get_points(user_id)
 
 
@@ -4009,30 +4111,71 @@ def deduct_points_from_user(user_id: int, amount: int) -> int:
         return get_points(user_id)
     owner_ref = fs_db().collection("owner_points").document(str(user_id))
     _fs_bump_counter(owner_ref, "points", -amount, extra={"owner_id": user_id})
+    invalidate_users_points_cache()
     return get_points(user_id)
 
 
-def get_all_known_users_with_points(sort_by_points: bool = True) -> list:
+_USERS_POINTS_CACHE = {"rows": None, "ts": 0.0}
+USERS_POINTS_CACHE_TTL = 45  # ثانية — مدة صلاحية القائمة المخزّنة مؤقتًا
+
+
+def invalidate_users_points_cache() -> None:
+    """يُفرغ كاش قائمة تصفّح المستخدمين، لإجبار جلب البيانات من جديد في
+    أقرب طلب — يمكن استدعاؤها بعد أي عملية تعرف مسبقًا أنها تغيّر نقاط أو
+    إحالات مستخدم (مثلاً بعد إضافة/خصم نقاط يدويًا) لضمان ظهور القيمة
+    المحدَّثة فورًا بدل انتظار انتهاء الـ TTL."""
+    _USERS_POINTS_CACHE["rows"] = None
+    _USERS_POINTS_CACHE["ts"] = 0.0
+
+
+def get_all_known_users_with_points(sort_by_points: bool = True, force_refresh: bool = False) -> list:
     """يجمع كل مستخدمي البوت المعروفين (known_bot_users) مع رصيد نقاطهم
     الحالي (owner_points) وعدد إحالاتهم (referred_count إن كانوا من أصحاب
     روابط الدعوة، وإلا 0) في قائمة واحدة موحّدة.
 
     دالة عامة قابلة لإعادة الاستخدام في أي قسم يحتاج تصفّح المستخدمين مع
     نقاطهم وإحالاتهم (قسم ربح، إدارة المستخدمين، أو أي قسم مستقبلي) —
-    تُستهلك دائمًا عبر build_users_points_browse_message/keyboard أدناه."""
-    client = fs_db()
-    rows = []
-    for doc in client.collection("known_bot_users").stream():
-        data = doc.to_dict() or {}
-        uid = data.get("user_id") or int(doc.id)
-        referral = get_referral(uid)
-        rows.append(FSRow({
-            "user_id": uid,
-            "username": data.get("username") or "",
-            "first_name": data.get("first_name") or "",
-            "points": get_points(uid),
-            "referred_count": int(referral.get("referred_count") or 0) if referral else 0,
-        }))
+    تُستهلك دائمًا عبر build_users_points_browse_message/keyboard أدناه.
+
+    ملاحظة أداء: بدل جلب النقاط والإحالات بطلب Firestore منفصل لكل مستخدم
+    (نمط N+1 كان يعني آلاف الطلبات المتسلسلة مع آلاف المستخدمين، وهو ما كان
+    يسبب البطء حتى في أول ضغطة)، تُجلب المجموعات الثلاث (known_bot_users،
+    owner_points، bot_referrals) كل واحدة بطلب واحد شامل فقط، ثم تُربط
+    القيم في الذاكرة عبر قواميس — 3 طلبات ثابتة بغض النظر عن عدد المستخدمين
+    بدل 1+2×العدد. النتيجة الكاملة تُخزَّن مؤقتًا (Cache) أيضًا لمدة
+    USERS_POINTS_CACHE_TTL ثانية حتى لا تتكرر حتى هذه الطلبات الثلاثة مع كل
+    تنقّل بين الصفحات (أقصى تأخر ممكن لظهور تحديث: مدة الـ TTL، أو فورًا عبر
+    force_refresh)."""
+    now = time.time()
+    cached = _USERS_POINTS_CACHE["rows"]
+    if not force_refresh and cached is not None and (now - _USERS_POINTS_CACHE["ts"]) < USERS_POINTS_CACHE_TTL:
+        rows = cached
+    else:
+        client = fs_db()
+
+        points_by_id = {}
+        for doc in client.collection("owner_points").stream():
+            points_by_id[doc.id] = (doc.to_dict() or {}).get("points", 0) or 0
+
+        referred_by_id = {}
+        for doc in client.collection("bot_referrals").stream():
+            referred_by_id[doc.id] = int((doc.to_dict() or {}).get("referred_count") or 0)
+
+        rows = []
+        for doc in client.collection("known_bot_users").stream():
+            data = doc.to_dict() or {}
+            uid = data.get("user_id") or int(doc.id)
+            rows.append(FSRow({
+                "user_id": uid,
+                "username": data.get("username") or "",
+                "first_name": data.get("first_name") or "",
+                "points": points_by_id.get(str(uid), 0),
+                "referred_count": referred_by_id.get(str(uid), 0),
+            }))
+        _USERS_POINTS_CACHE["rows"] = rows
+        _USERS_POINTS_CACHE["ts"] = now
+
+    rows = list(rows)
     if sort_by_points:
         rows.sort(key=lambda r: (r.get("points") or 0), reverse=True)
     else:
@@ -7015,6 +7158,32 @@ async def _maintenance_gate_handler(update: Update, context: ContextTypes.DEFAUL
     raise ApplicationHandlerStop()
 
 
+async def _subscription_gate_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """بوابة عامة (نفس أولوية بوابتي الحظر والصيانة، group=-1) تُنفَّذ قبل أي
+    معالج آخر لكل تحديث نصّي أو زر يصل من محادثة خاصة (بين المستخدم والبوت).
+    تفحص اشتراك المستخدم الفعلي في كل قنوات الاشتراك الإجباري *في لحظة
+    تفاعله* (وليس نتيجة تحقق قديمة مخزّنة)، فتغطي كل ميزات البوت في المحادثة
+    الخاصة بمكان واحد (روليت، مسابقات، سحوبات، نقاط، لوحة الإدارة...) بدل
+    تكرار الفحص داخل كل معالج على حدة.
+
+    تُستثنى من هذه البوابة: تحديثات القنوات/المجموعات (لأن أزرار المشاركة
+    في السحوبات والمسابقات المنشورة هناك لها بوابات شرط خاصة بها مستقلة
+    تمامًا وتُفحص حيًّا بالفعل)، وأمر /start (له بوابته الخاصة الأكثر
+    تفصيلاً وتحفظ رابط المشاركة المعلّق)، وزر «تحقق من الاشتراك» نفسه (له
+    معالجه المستقل check_sub_status_callback)."""
+    chat = update.effective_chat
+    if not chat or chat.type != "private":
+        return
+    message = update.effective_message
+    if message is not None and message.text and message.text.startswith("/start"):
+        return
+    query = update.callback_query
+    if query is not None and query.data == "check_sub_status":
+        return
+    if not await enforce_mandatory_subscription_gate(update, context):
+        raise ApplicationHandlerStop()
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if args and args[0].startswith("gwjoin_"):
@@ -7028,7 +7197,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    missing_channels = await get_missing_required_channels(context, update.effective_user.id)
+    channels_status = await get_required_channels_status(context, update.effective_user.id)
+    missing_channels = [ch for ch, ok in channels_status if not ok]
     if missing_channels:
         # يُحفظ معامل الرابط العميق (إن وُجد) مؤقتًا لهذا المستخدم، حتى إن
         # اجتاز اشتراكه لاحقًا عبر زر «تحقق من الاشتراك» تُستكمل نفس عملية
@@ -7036,7 +7206,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # الترحيب العام فقط.
         if context.args:
             context.user_data["pending_start_arg"] = context.args[0]
-        text, entities = build_subscription_required_message(missing_channels)
+        text, entities = build_subscription_required_message(missing_channels, channels_status=channels_status)
         await update.message.reply_text(
             text, entities=entities, reply_markup=build_subscription_required_keyboard(missing_channels)
         )
@@ -7068,11 +7238,20 @@ async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAUL
     التحقق، بدل عرض الترحيب العام فقط."""
     query = update.callback_query
     _SUBSCRIPTION_CACHE.pop(query.from_user.id, None)
-    subscribed = await is_user_subscribed(
-        context, query.from_user.id, force_refresh=True
-    )
-    if not subscribed:
-        await query.answer("⚠️ لم يتم العثور على اشتراكك، يرجى الاشتراك أولاً ثم إعادة المحاولة.", show_alert=True)
+    channels_status = await get_required_channels_status(context, query.from_user.id, force_refresh=True)
+    missing_channels = [ch for ch, ok in channels_status if not ok]
+    if missing_channels:
+        await query.answer("⚠️ ما زلت غير مشترك في بعض القنوات، يرجى الاشتراك أولاً ثم إعادة المحاولة.", show_alert=True)
+        # يُحدَّث نص الرسالة ليعكس حالة كل قناة الآن (أيها تم الاشتراك فيه
+        # فعلاً وأيها ما زال ناقصًا)، بدل ترك المستخدم بلا أي مؤشر واضح.
+        text, entities = build_subscription_required_message(missing_channels, channels_status=channels_status)
+        try:
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_subscription_required_keyboard(missing_channels),
+            )
+        except Exception:
+            pass
         return
     await query.answer()
 
@@ -7755,15 +7934,14 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
         return
 
-    # فحص خلفي تلقائي: يجب أن يكون المستخدم مشتركًا في قناة البوت الإلزامية
-    # (VORTEX) قبل إكمال أي مشاركة في أي سحب. بما أن هذا الزر كولباك مباشر
-    # داخل منشور القناة (لا يمر عبر start())، يُحوَّل المستخدم غير المشترك في
-    # VORTEX لمحادثة البوت الخاصة عبر رابط ?start=gwjoin_، حيث تُعرض له
-    # البوابة الموحّدة (VORTEX + قناة استضافة السحب معًا في شاشة واحدة) قبل
-    # إكمال مشاركته — سواء كان ناقصًا الاشتراك في القناتين معًا أو في VORTEX
-    # فقط (handle_giveaway_join_entry تتحقق من الحالتين هناك).
-    if not await is_user_subscribed(context, user.id):
-        await query.answer(url=f"https://t.me/{BOT_USERNAME}?start=gwjoin_{gw_code}")
+    # فحص خلفي تلقائي: يجب أن يكون المستخدم مشتركًا في قناة/قنوات البوت
+    # الإلزامية (VORTEX) قبل إكمال أي مشاركة في أي سحب. لا يوجد أي تحويل
+    # لمحادثة البوت هنا — يظهر تنبيه فوري (show_alert) بالنص فقط يسمّي
+    # القناة/القنوات الناقصة، بنفس أسلوب بقية شروط السحب أدناه، لأن أزرار
+    # الاشتراك نفسها موجودة بشكل دائم أسفل منشور السحب.
+    need_vortex = await get_missing_required_channels(context, user.id)
+    if need_vortex:
+        await query.answer(build_giveaway_vortex_subscribe_alert(need_vortex), show_alert=True)
         return
 
     # هنا المستخدم مشترك في VORTEX بالفعل؛ إن كان غير مشترك في قناة استضافة
@@ -9180,6 +9358,8 @@ def build_under_development_message(emoji_key: str = None, emoji_char: str = "�
     ])
 
 async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ملاحظة: فحص الاشتراك الإجباري يتم مركزيًا عبر _subscription_gate_handler
+    # (group=-1) قبل الوصول إلى هذا المعالج أصلاً — لا حاجة لتكراره هنا.
     query = update.callback_query
     await query.answer()
 
@@ -10927,6 +11107,8 @@ async def handle_broadcast_media_input(update: Update, context: ContextTypes.DEF
 
 
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ملاحظة: فحص الاشتراك الإجباري يتم مركزيًا عبر _subscription_gate_handler
+    # (group=-1) قبل الوصول إلى هذا المعالج أصلاً — لا حاجة لتكراره هنا.
     awaiting = context.user_data.get("awaiting")
     awaiting_setting = context.user_data.get("awaiting_setting")
 
@@ -12525,6 +12707,12 @@ def main():
     # مباشرة وتوقف تمرير التحديث لأي مستخدم عادي إن كان وضع الصيانة مفعّلًا
     # من قسم «🛠️ صيانة البوت» لدى المالك.
     app.add_handler(TypeHandler(Update, _maintenance_gate_handler), group=-1)
+
+    # بوابة الاشتراك الإجباري العامة: بنفس أولوية بوابتي الحظر والصيانة
+    # (group=-1)، تُنفَّذ بعدهما مباشرة وتغطي كل أزرار/رسائل المحادثة الخاصة
+    # مع البوت بفحص واحد بدل تكراره داخل كل معالج على حدة (راجع توثيق
+    # _subscription_gate_handler لتفاصيل الاستثناءات).
+    app.add_handler(TypeHandler(Update, _subscription_gate_handler), group=-1)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("getid", get_id_prompt))
