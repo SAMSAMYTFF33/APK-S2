@@ -13,28 +13,6 @@ def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
 
 
-async def global_ban_gate(update: "Update", context) -> None:
-    """بوابة عامة تمنع أي مستخدم محظور (من قسم إدارة المستخدمين) من استخدام
-    البوت إطلاقًا — تعمل على كل الرسائل والأزرار قبل وصولها لأي معالج آخر."""
-    user = update.effective_user
-    if not user or is_owner(user.id):
-        return
-    try:
-        banned = is_user_banned(user.id)
-    except Exception:
-        return
-    if not banned:
-        return
-    try:
-        if update.callback_query:
-            await update.callback_query.answer("🚫 تم حظرك من استخدام هذا البوت.", show_alert=True)
-        elif update.message:
-            await update.message.reply_text("🚫 تم حظرك من استخدام هذا البوت.")
-    except Exception:
-        pass
-    raise ApplicationHandlerStop
-
-
 REQUIRED_CHANNEL_USERNAME = "w33lv"
 REQUIRED_CHANNEL_URL = "https://t.me/w33lv"
 REQUIRED_CHANNEL_BUTTON_TEXT = "VORTEX  𓏺"
@@ -153,7 +131,6 @@ from telegram.ext import (
     ChatMemberHandler,
     ContextTypes,
     PreCheckoutQueryHandler,
-    ApplicationHandlerStop,
     filters,
 )
 from telegram.request import HTTPXRequest
@@ -281,6 +258,16 @@ CAPTCHA_EMOJIS = [
 ]
 
 CAPTCHA_OPTIONS_COUNT = 3
+
+# تسلسل الإيموجيات المرقّمة (❶ ❷ ❸ ...) المستخدم لبناء قوائم شروط أنيقة داخل
+# اقتباس واحد بدل نقاط عادية — نفس الهوية البصرية المستخدمة في رسالة كود
+# المتسابق (build_contest_registered_message). أقصى عدد شروط ممكن ظهورها معًا
+# في أي بوابة شروط هو 6 (VORTEX + قناة الاستضافة + قناتا شرط + تعزيز + تصويت)
+# فلا يُستنفد التسلسل أبدًا.
+GATE_NUM_EMOJI_SEQUENCE = [
+    ("❶", "num_one"), ("❷", "num_two"), ("❸", "num_three"),
+    ("❹", "num_four"), ("❺", "num_five"), ("❻", "num_six"),
+]
 CAPTCHA_SESSION_TTL_SECONDS = 10 * 60
 
 CONTEST_TIME_OPTIONS = [
@@ -697,12 +684,33 @@ async def check_contest_channel_subscription(
 ) -> bool:
     """يتحقق تلقائيًا (في الخلفية) من عضوية المستخدم في القناة التي نُشرت فيها
     المسابقة تحديدًا (contest['chat_id']) — بصرف النظر عن كيفية وصوله لرسالة
-    المسابقة (حتى لو من خارج القناة). هذا شرط ضمني دائم لكل مسابقة، ولا يُعرض
-    للمستخدم أي شيء بخصوصه إلا إذا تبيّن أنه غير مشترك فعلاً."""
+    المسابقة (حتى لو من خارج القناة). هذا شرط ضمني دائم لكل مسابقة (انضمام
+    وتصويت على حد سواء)، ولا يُعرض للمستخدم أي شيء بخصوصه إلا إذا تبيّن أنه
+    غير مشترك فعلاً."""
     chat_id = contest.get("chat_id") if hasattr(contest, "get") else contest["chat_id"]
     if not chat_id:
         return True
     return await is_user_subscribed_to_chat(context, user_id, chat_id, force_refresh=force_refresh)
+
+
+async def build_contest_vote_gate_context(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, contest, force_refresh: bool = False,
+) -> dict:
+    """يجهّز حالة «بوابة التصويت الموحّدة»: هل يلزم عرض شرط الاشتراك في قناة
+    VORTEX الإجبارية، وهل يلزم عرض شرط الاشتراك في قناة المسابقة نفسها (مع
+    رابط وعنوان تلك القناة عند الحاجة) — بنفس فكرة البوابة الموحّدة للسحوبات،
+    حتى يُعرض للمصوّت زر لكل شرط ناقص فعليًا فقط في شاشة واحدة."""
+    need_vortex = not await is_user_subscribed(context, user_id, force_refresh=force_refresh)
+    channel_link = ""
+    channel_title = ""
+    if not await check_contest_channel_subscription(context, user_id, contest, force_refresh=force_refresh):
+        channel_link = await build_contest_channel_join_link(context, contest["chat_id"])
+        channel_title = await get_chat_title_cached(context, contest["chat_id"]) or "قناة المسابقة"
+    return {
+        "need_vortex": need_vortex,
+        "channel_link": channel_link,
+        "channel_title": channel_title,
+    }
 
 
 async def build_contest_channel_join_link(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str:
@@ -1883,27 +1891,64 @@ def build_contest_vote_premium_blocked_message() -> tuple:
     return build_text_with_emojis(parts)
 
 
-def build_contest_vote_gate_message() -> tuple:
-    """رسالة بوابة الشرط الإلزامي قبل احتساب أي تصويت: يجب الاشتراك في
-    القناة الإلزامية أولاً، ثم الضغط على زر «تحقق» لإكمال التصويت."""
+def build_contest_vote_gate_message(need_vortex: bool = True, channel_title: str = "") -> tuple:
+    """رسالة بوابة الشروط الاحترافية قبل احتساب أي تصويت — بنفس الهوية
+    البصرية لبوابة السحوبات (قائمة مرقّمة ❶ ❷ داخل اقتباس واحد بدل نقاط
+    عادية)، وتُدرِج فقط الشرط/الشروط الفعلية الناقصة: الاشتراك في القناة
+    الإلزامية (VORTEX) و/أو في قناة المسابقة نفسها. need_vortex الافتراضي
+    True يُبقي السلوك القديم كما هو عند عدم تمرير أي وسيط إضافي."""
+    items = []
+    if need_vortex:
+        items.append(f" {REQUIRED_CHANNEL_BUTTON_TEXT}")
+    if channel_title:
+        items.append(f" {channel_title}")
+
+    quote_children = []
+    for idx, label in enumerate(items):
+        num_char, num_key = GATE_NUM_EMOJI_SEQUENCE[idx % len(GATE_NUM_EMOJI_SEQUENCE)]
+        if quote_children:
+            quote_children.append("\n\n")
+        quote_children += [(num_char, EMOJI[num_key]), " ", ("📢", EMOJI["gw_condition_channel"]), label]
+
     parts = [
-        "للتصويت في هذه المسابقة عليك أولاً:",
+        ([("🗳", EMOJI["gw_vote_icon"]), " خطوة أخيرة قبل تسجيل تصويتك"], "bold", None),
+    ]
+    if quote_children:
+        parts += ["\n\n", (["الشروط المطلوبة  ”"], "blockquote", None),
+                  "\n\n", (quote_children, "blockquote", None)]
+    parts += [
         "\n\n",
         ([
-            (" 1️⃣ ", None), "الاشتراك في القناة الإلزامية أدناه", "\n",
-            (" 2️⃣ ", None), "ثم الضغط على زر «تحقق ✅» لإتمام تصويتك",
+            ("‼️", EMOJI["sub_alert"]),
+            " | أكمل الشروط أعلاه ثم اضغط تحقق",
+            ("✅", EMOJI["sub_check"]),
         ], "blockquote", None),
     ]
     return build_text_with_emojis(parts)
 
 
-def build_contest_vote_gate_keyboard(contest_code: str, participant_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(REQUIRED_CHANNEL_BUTTON_TEXT, url=get_required_channel_url())],
-        [InlineKeyboardButton(
-            "تحقق ✅", callback_data=f"compcond:{contest_code}:{participant_id}", style="success",
-        )],
-    ])
+def build_contest_vote_gate_keyboard(contest_code: str, participant_id: int,
+                                      need_vortex: bool = True, channel_link: str = "",
+                                      channel_title: str = "") -> InlineKeyboardMarkup:
+    """كيبورد بوابة الاشتراك قبل التصويت، بنفس الهوية البصرية لكيبورد بوابة
+    السحوبات: زر مستقل بأيقونة قناة لكل شرط ناقص فعليًا (VORTEX و/أو قناة
+    المسابقة)، وزر «تحقق ✅» بارز أسفلهما — لا يُعرض زر لشرط مكتمل بالفعل."""
+    rows = []
+    if need_vortex:
+        rows.append([InlineKeyboardButton(
+            REQUIRED_CHANNEL_BUTTON_TEXT, url=get_required_channel_url(),
+            style="primary", **emoji_kwargs("gw_condition_channel"),
+        )])
+    if channel_link:
+        rows.append([InlineKeyboardButton(
+            channel_title or "قناة المسابقة", url=channel_link,
+            style="primary", **emoji_kwargs("gw_condition_channel"),
+        )])
+    rows.append([InlineKeyboardButton(
+        "تحقق ✅", callback_data=f"compcond:{contest_code}:{participant_id}",
+        style="success", **emoji_kwargs("confirm_check"),
+    )])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_vote_captcha_message(target_emoji_id: str) -> tuple:
@@ -2703,39 +2748,49 @@ def build_giveaway_host_channel_subscribe_alert(host_channel_title: str = "") ->
 
 def build_giveaway_gate_message(giveaway, need_vortex: bool = False,
                                  host_channel_title: str = "") -> tuple:
-    """رسالة «بوابة الشروط» التي تظهر للمستخدم داخل البوت بعد الضغط على زر
-    المشاركة في سحب مفعّل عليه «منع الرشق» — تُعرض فقط عندما لا يكون قد
-    اجتاز بعد شرط/شروط السحب (اشتراك في القنوات و/أو تعزيز)، وقبل ظهور زر
-    التحقق (الكابتشا) الذي يظهر بعد إكمال هذه الشروط.
+    """رسالة «بوابة الشروط» الاحترافية التي تظهر للمستخدم داخل البوت بعد
+    الضغط على زر المشاركة في سحب مفعّل عليه «منع الرشق» — تُعرض فقط عندما لا
+    يكون قد اجتاز بعد شرط/شروط السحب (اشتراك في القنوات و/أو تعزيز)، وقبل
+    ظهور زر التحقق (الكابتشا) الذي يظهر بعد إكمال هذه الشروط.
 
-    عند need_vortex/host_channel_title تُدرَج أيضًا قناة VORTEX الإجبارية
-    و/أو قناة استضافة السحب نفسها ضمن قائمة الشروط، لعرضهما معًا مع بقية
-    الشروط في بوابة واحدة موحّدة بدل بوابتين متتاليتين."""
-    channels = (giveaway.get("condition_channels") or [])[:GW_CONDITION_CHANNELS_MAX]
-    lines = []
+    تُبنى الشروط كقائمة مرقّمة أنيقة (❶ ❷ ❸ ...) داخل اقتباس واحد بدل نقاط
+    عادية، بنفس هوية تصميم منشور السحب نفسه في القناة. عند need_vortex/
+    host_channel_title تُدرَج أيضًا قناة VORTEX الإجبارية و/أو قناة استضافة
+    السحب نفسها ضمن نفس القائمة، لعرضهما معًا مع بقية الشروط في بوابة واحدة
+    موحّدة بدل بوابتين متتاليتين."""
+    items = []
     if need_vortex:
-        lines.append(f"• {REQUIRED_CHANNEL_BUTTON_TEXT}")
+        items.append((("📢", EMOJI["gw_condition_channel"]), f" {REQUIRED_CHANNEL_BUTTON_TEXT}"))
     if host_channel_title:
-        lines.append(f"• {host_channel_title}")
-    lines += [f"• {ch.get('title') or ch.get('ref') or 'القناة'}" for ch in channels]
+        items.append((("📢", EMOJI["gw_condition_channel"]), f" {host_channel_title}"))
+    channels = (giveaway.get("condition_channels") or [])[:GW_CONDITION_CHANNELS_MAX]
+    for ch in channels:
+        items.append((("📢", EMOJI["gw_condition_channel"]), f" {ch.get('title') or ch.get('ref') or 'القناة'}"))
     if giveaway.get("boost_required"):
-        lines.append("• تعزيز القناة (Boost)")
+        items.append((("⚡️", EMOJI["gw_atime_lightning"]), " تعزيز القناة (Boost)"))
     vote_contest_code = giveaway.get("vote_contest_code")
     vote_participant_id = giveaway.get("vote_participant_id")
     if vote_contest_code and vote_participant_id:
-        lines.append("• التصويت للمتسابق المطلوب")
+        items.append((("🤍", EMOJI["gw_vote_icon"]), " التصويت للمتسابق المطلوب"))
+
+    quote_children = []
+    for idx, (icon, label) in enumerate(items):
+        num_char, num_key = GATE_NUM_EMOJI_SEQUENCE[idx % len(GATE_NUM_EMOJI_SEQUENCE)]
+        if quote_children:
+            quote_children.append("\n\n")
+        quote_children += [(num_char, EMOJI[num_key]), " ", icon, label]
 
     parts = [
-        "عليك إكمال الشروط التالية أولاً", "\n",
-        "- لتتمكن من المشاركة في السحب: ", ("🎁", EMOJI["target_pin"]),
+        ([("🎁", EMOJI["target_pin"]), " خطوة أخيرة قبل الدخول في السحب"], "bold", None),
     ]
-    if lines:
-        parts += ["\n", "\n".join(lines)]
+    if quote_children:
+        parts += ["\n\n", (["الشروط المطلوبة  ”"], "blockquote", None),
+                  "\n\n", (quote_children, "blockquote", None)]
     parts += [
         "\n\n",
         ([
             ("‼️", EMOJI["sub_alert"]),
-            " | أكمل الشروط ثم اضغط تحقق",
+            " | أكمل الشروط أعلاه ثم اضغط تحقق",
             ("✅", EMOJI["sub_check"]),
         ], "blockquote", None),
     ]
@@ -2746,7 +2801,8 @@ def build_giveaway_gate_keyboard(gw_code: str, giveaway, is_genuinely_new: bool,
                                   boost_link: str = "", vote_link: str = "",
                                   need_vortex: bool = False, host_channel_link: str = "",
                                   host_channel_title: str = "") -> InlineKeyboardMarkup:
-    """كيبورد بوابة الشروط: زر لكل قناة/تعزيز/تصويت مطلوب، وزر «تحقق ✅» أسفلها.
+    """كيبورد بوابة الشروط الاحترافي: زر مستقل بأيقونة مناسبة لكل شرط ناقص
+    فعليًا (قناة/تعزيز/تصويت)، وزر «تحقق ✅» بارز (style=success) أسفلها.
     عند الضغط على «تحقق» يُعاد فحص الشروط؛ فإن اجتازها المستخدم تتحوّل نفس
     الرسالة إلى كابتشا التحقق منع الرشق الموجودة مسبقًا.
 
@@ -2755,21 +2811,36 @@ def build_giveaway_gate_keyboard(gw_code: str, giveaway, is_genuinely_new: bool,
     عرض زر لشرط مكتمل بالفعل."""
     rows = []
     if need_vortex:
-        rows.append([InlineKeyboardButton(REQUIRED_CHANNEL_BUTTON_TEXT, url=get_required_channel_url())])
+        rows.append([InlineKeyboardButton(
+            REQUIRED_CHANNEL_BUTTON_TEXT, url=get_required_channel_url(),
+            style="primary", **emoji_kwargs("gw_condition_channel"),
+        )])
     if host_channel_link:
-        rows.append([InlineKeyboardButton(host_channel_title or "قناة السحب", url=host_channel_link)])
+        rows.append([InlineKeyboardButton(
+            host_channel_title or "قناة السحب", url=host_channel_link,
+            style="primary", **emoji_kwargs("gw_condition_channel"),
+        )])
     channels = (giveaway.get("condition_channels") or [])[:GW_CONDITION_CHANNELS_MAX]
     for ch in channels:
         title = ch.get("title") or "الإشتراك في القناة"
         link = ch.get("url") or f"https://t.me/{str(ch.get('ref', '')).lstrip('@')}"
-        rows.append([InlineKeyboardButton(title, url=link)])
+        rows.append([InlineKeyboardButton(
+            title, url=link, style="primary", **emoji_kwargs("gw_condition_channel"),
+        )])
     if boost_link:
-        rows.append([InlineKeyboardButton("تعزيز القناة (Boost)", url=boost_link)])
+        rows.append([InlineKeyboardButton(
+            "تعزيز القناة (Boost)", url=boost_link,
+            style="primary", **emoji_kwargs("gw_atime_lightning"),
+        )])
     if vote_link:
-        rows.append([InlineKeyboardButton("التصويت للمتسابق", url=vote_link)])
+        rows.append([InlineKeyboardButton(
+            "التصويت للمتسابق", url=vote_link,
+            style="primary", **emoji_kwargs("gw_vote_icon"),
+        )])
     rows.append([
         InlineKeyboardButton(
             "تحقق ✅", callback_data=f"gwcond:{gw_code}:{1 if is_genuinely_new else 0}",
+            style="success", **emoji_kwargs("confirm_check"),
         )
     ])
     return InlineKeyboardMarkup(rows)
@@ -3259,7 +3330,7 @@ def get_top_channel_points(limit: int = 5):
 
 
 
-def register_bot_user_and_check_new(user) -> bool:
+def register_bot_user_and_check_new(user_id: int) -> bool:
     """
     يسجّل أول تواصل لهذا المستخدم مع البوت مهما كان مصدر الدخول (رابط سحب/مسابقة،
     أو رابط عام، أو بحث عن اسم البوت... إلخ)، ويُستدعى مرة واحدة فقط في بداية
@@ -3268,95 +3339,17 @@ def register_bot_user_and_check_new(user) -> bool:
     (مستخدم جديد كليًا) — وFalse إن كان قد استخدم البوت من قبل بأي طريقة،
     حتى لو لم يشارك في أي سحب سابقًا. تُستخدم هذه القيمة لمنع احتساب نقطة
     لصاحب السحب عندما يشارك مستخدم "قديم" وليس مستخدمًا جديدًا حقيقيًا.
-
-    يقبل كائن المستخدم الكامل (telegram.User) بدل الـ ID فقط، حتى يحفظ/يحدّث
-    اليوزر والاسم في كل مرة — وهو ما يُستخدم لاحقًا في «إدارة المستخدمين»
-    من قسم المالك (البحث بالـ ID أو باليوزر، عرض البيانات، الحظر...).
     """
     from google.api_core.exceptions import AlreadyExists
-    user_id = user.id
-    now_iso = datetime.now(timezone.utc).isoformat()
     ref = fs_db().collection("known_bot_users").document(str(user_id))
-    username = (getattr(user, "username", None) or "").lstrip("@").lower() or None
-    seen_payload = {
-        "user_id": user_id,
-        "username": username,
-        "first_name": getattr(user, "first_name", None),
-        "last_name": getattr(user, "last_name", None),
-        "last_seen_at": now_iso,
-    }
     try:
         ref.create({
-            **seen_payload,
-            "first_seen_at": now_iso,
-            "banned": False,
-            "banned_at": None,
+            "user_id": user_id,
+            "first_seen_at": datetime.now(timezone.utc).isoformat(),
         })
         return True
     except AlreadyExists:
-        try:
-            ref.set(seen_payload, merge=True)
-        except Exception:
-            pass
         return False
-
-
-def is_user_banned(user_id: int) -> bool:
-    """يتحقق مما إذا كان المستخدم محظورًا من استخدام البوت (قسم إدارة المستخدمين)."""
-    doc = fs_db().collection("known_bot_users").document(str(user_id)).get()
-    if not doc.exists:
-        return False
-    return bool(doc.to_dict().get("banned"))
-
-
-def get_known_user(user_id: int):
-    doc = fs_db().collection("known_bot_users").document(str(user_id)).get()
-    return _fs_row_or_none(doc)
-
-
-def resolve_known_user(query_text: str):
-    """يبحث عن مستخدم مسجّل سابقًا في البوت عبر الـ ID الرقمي أو اليوزر (@username)."""
-    query_text = (query_text or "").strip()
-    if not query_text:
-        return None
-    if query_text.lstrip("@").isdigit():
-        return get_known_user(int(query_text.lstrip("@")))
-    username = query_text.lstrip("@").lower()
-    docs = list(
-        fs_db().collection("known_bot_users").where("username", "==", username).limit(1).stream()
-    )
-    if not docs:
-        return None
-    return FSRow(docs[0].to_dict())
-
-
-def set_user_banned(user_id: int, banned: bool) -> None:
-    ref = fs_db().collection("known_bot_users").document(str(user_id))
-    ref.set({
-        "banned": banned,
-        "banned_at": datetime.now(timezone.utc).isoformat() if banned else None,
-    }, merge=True)
-
-
-def count_known_users() -> tuple:
-    """يعيد (إجمالي المستخدمين، عدد المحظورين) عبر عدّ مستندات known_bot_users."""
-    docs = fs_db().collection("known_bot_users").stream()
-    total = 0
-    banned = 0
-    for d in docs:
-        total += 1
-        if (d.to_dict() or {}).get("banned"):
-            banned += 1
-    return total, banned
-
-
-def get_banned_users_list(limit: int = 50):
-    docs = list(
-        fs_db().collection("known_bot_users").where("banned", "==", True).limit(limit).stream()
-    )
-    rows = [FSRow(d.to_dict()) for d in docs]
-    rows.sort(key=lambda r: r.get("banned_at") or "", reverse=True)
-    return rows
 
 def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int) -> bool:
     """يمنح النقاط مرة واحدة عالميًا بعد نجاح مشاركة السحب والكابتشا."""
@@ -4242,132 +4235,7 @@ def build_owner_section_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💰 قسم ربح", callback_data="owner_points_section", style="primary")],
         [InlineKeyboardButton("📢 اشتراك اجباري", callback_data="owner_sub_section", style="primary")],
-        [InlineKeyboardButton("👥 إدارة المستخدمين", callback_data="user_mgmt_section", style="primary")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="back_main_menu", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
-    ])
-
-
-def build_user_mgmt_section_message() -> tuple:
-    return build_text_with_emojis([
-        ([
-            "👥 إدارة المستخدمين",
-            "\n\n",
-            (["من هنا يمكنك البحث عن أي مستخدم، عرض بياناته، حظره أو فك حظره ”"], "blockquote", None),
-        ], "bold", None),
-    ])
-
-
-def build_user_mgmt_section_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔎 البحث عن مستخدم", callback_data="user_mgmt_search", style="primary")],
-        [InlineKeyboardButton("👤 عرض بيانات مستخدم", callback_data="user_mgmt_view_prompt", style="primary")],
-        [InlineKeyboardButton("🚫 حظر مستخدم", callback_data="user_mgmt_ban_prompt", style="danger")],
-        [InlineKeyboardButton("✅ فك حظر مستخدم", callback_data="user_mgmt_unban_prompt", style="success")],
-        [InlineKeyboardButton("📋 قائمة المحظورين", callback_data="user_mgmt_banned_list", style="primary")],
-        [InlineKeyboardButton("📊 إحصائيات المستخدم", callback_data="user_mgmt_stats", style="primary")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
-    ])
-
-
-def _user_mgmt_display_name(row) -> str:
-    first = (row.get("first_name") or "").strip()
-    last = (row.get("last_name") or "").strip()
-    name = (first + " " + last).strip()
-    return name or str(row.get("user_id"))
-
-
-def build_user_mgmt_profile_message(row) -> tuple:
-    user_id = row.get("user_id")
-    username = row.get("username")
-    username_line = f"@{username}" if username else "لا يوجد"
-    banned = bool(row.get("banned"))
-    status_line = "🚫 محظور" if banned else "✅ غير محظور"
-    points = get_points(user_id)
-    first_seen = row.get("first_seen_at") or "غير معروف"
-    last_seen = row.get("last_seen_at") or "غير معروف"
-    return build_text_with_emojis([
-        ([
-            "👤 بيانات المستخدم",
-            "\n\n",
-            ([
-                f"🆔 المعرف: {user_id}\n",
-                f"📛 الاسم: {_user_mgmt_display_name(row)}\n",
-                f"🔗 اليوزر: {username_line}\n",
-                f"📌 الحالة: {status_line}\n",
-                f"💎 عدد النقاط: {points}\n",
-                f"🕐 أول تواصل: {first_seen}\n",
-                f"🕓 آخر تواصل: {last_seen}",
-            ], "blockquote", None),
-        ], "bold", None),
-    ])
-
-
-def build_user_mgmt_profile_keyboard(row) -> InlineKeyboardMarkup:
-    user_id = row.get("user_id")
-    banned = bool(row.get("banned"))
-    action_row = (
-        [InlineKeyboardButton("✅ فك الحظر", callback_data=f"user_mgmt_unban:{user_id}", style="success")]
-        if banned else
-        [InlineKeyboardButton("🚫 حظر", callback_data=f"user_mgmt_ban:{user_id}", style="danger")]
-    )
-    return InlineKeyboardMarkup([
-        action_row,
-        [InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
-    ])
-
-
-def build_user_mgmt_banned_list_message(rows) -> tuple:
-    if not rows:
-        body = ["لا يوجد أي مستخدم محظور حاليًا ”"]
-    else:
-        lines = []
-        for r in rows:
-            username = r.get("username")
-            uname_part = f"@{username}" if username else _user_mgmt_display_name(r)
-            lines.append(f"• {uname_part} (ID: {r.get('user_id')})")
-        body = ["\n".join(lines)]
-    return build_text_with_emojis([
-        (["📋 قائمة المحظورين", "\n\n"], "bold", None),
-        (body, "blockquote", None),
-    ])
-
-
-def build_user_mgmt_banned_list_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
-    ])
-
-
-def build_user_mgmt_stats_message() -> tuple:
-    total, banned = count_known_users()
-    active = max(total - banned, 0)
-    return build_text_with_emojis([
-        ([
-            "📊 إحصائيات المستخدمين",
-            "\n\n",
-            ([
-                f"👥 إجمالي المستخدمين: {total}\n",
-                f"🚫 عدد المحظورين: {banned}\n",
-                f"✅ عدد غير المحظورين: {active}",
-            ], "blockquote", None),
-        ], "bold", None),
-    ])
-
-
-def build_user_mgmt_stats_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
-    ])
-
-
-def build_user_mgmt_not_found_keyboard(back_to: str = "user_mgmt_section") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 رجوع", callback_data=back_to, style="danger",
                               **emoji_kwargs("back_section_btn"))],
     ])
 
@@ -4652,7 +4520,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # مباشرة (VORTEX + قناة استضافة السحب معًا في شاشة واحدة) بدل بوابة
         # VORTEX العامة أدناه، حتى لا يمر المستخدم بخطوتين متتاليتين لإتمام
         # نفس الشرط عند فتح البوت عبر زر «اضغط لـ المشاركة».
-        is_genuinely_new = register_bot_user_and_check_new(update.effective_user)
+        is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id)
         await handle_giveaway_join_entry(
             update, context, args[0][len("gwjoin_"):], is_genuinely_new=is_genuinely_new,
         )
@@ -4672,7 +4540,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    is_genuinely_new = register_bot_user_and_check_new(update.effective_user)
+    is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id)
 
     args = context.args
     if args and await _dispatch_start_arg(update, context, args[0], is_genuinely_new):
@@ -4703,7 +4571,7 @@ async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAUL
 
     pending_arg = context.user_data.pop("pending_start_arg", None)
     if pending_arg:
-        is_genuinely_new = register_bot_user_and_check_new(query.from_user)
+        is_genuinely_new = register_bot_user_and_check_new(query.from_user.id)
         shim_update = SimpleNamespace(
             effective_user=query.from_user,
             message=_ReplyOnlyMessageShim(context.bot, query.from_user.id),
@@ -4997,15 +4865,24 @@ async def handle_contest_vote_entry(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(text=text, entities=entities)
         return
 
-    # بوابة الاشتراك الإجباري: لا تُعرض الكابتشا مباشرة إن لم يكن المستخدم
-    # مشتركًا فعليًا في القناة الإلزامية؛ بل تُعرض له بوابة اشتراك + زر
-    # «تحقق» صريح، ولا يُحتسب أي تصويت قبل اجتياز هذا الفحص فعليًا.
-    if not await is_user_subscribed(context, user.id):
-        gate_text, gate_entities = build_contest_vote_gate_message()
+    # بوابة الاشتراك الموحّدة: تُفحص قناة VORTEX الإجبارية وقناة المسابقة نفسها
+    # معًا هنا دفعة واحدة، وتُعرض للمصوّت شاشة واحدة فيها زر لكل شرط ناقص
+    # فعليًا فقط + زر تحقق واحد، بدل الاكتفاء بفحص VORTEX فقط كما كان سابقًا
+    # (ما كان يسمح بالتصويت دون اشتراك فعلي في قناة المسابقة نفسها).
+    gate_ctx = await build_contest_vote_gate_context(context, user.id, contest)
+    if gate_ctx["need_vortex"] or gate_ctx["channel_link"]:
+        gate_text, gate_entities = build_contest_vote_gate_message(
+            need_vortex=gate_ctx["need_vortex"], channel_title=gate_ctx["channel_title"],
+        )
         await update.message.reply_text(
             text=gate_text,
             entities=gate_entities,
-            reply_markup=build_contest_vote_gate_keyboard(contest_code, participant_id),
+            reply_markup=build_contest_vote_gate_keyboard(
+                contest_code, participant_id,
+                need_vortex=gate_ctx["need_vortex"],
+                channel_link=gate_ctx["channel_link"],
+                channel_title=gate_ctx["channel_title"],
+            ),
         )
         return
 
@@ -5072,11 +4949,31 @@ async def contest_vote_gate_check_callback(update: Update, context: ContextTypes
         await query.answer("💎 هذه المسابقة للتصويت لمستخدمي بريميوم فقط.", show_alert=True)
         return
 
-    if not await is_user_subscribed(context, user.id, force_refresh=True):
+    # إعادة فحص قناة VORTEX وقناة المسابقة معًا (بكاش مُحدَّث)، فهذا الزر هو
+    # نفسه زر التأكيد في البوابة الموحّدة أعلاه — إن ظل أحدهما ناقصًا تُعاد
+    # نفس البوابة محدَّثة بدل رفض عام دون توضيح أي شرط بالتحديد ما زال ناقصًا.
+    gate_ctx = await build_contest_vote_gate_context(context, user.id, contest, force_refresh=True)
+    if gate_ctx["need_vortex"] or gate_ctx["channel_link"]:
         await query.answer(
-            "⚠️ لم يتم العثور على اشتراكك، اشترك في القناة ثم اضغط تحقق مجددًا.",
+            "⚠️ لم يتم العثور على اشتراكك بعد، اشترك في القنوات المطلوبة ثم اضغط تحقق مجددًا.",
             show_alert=True,
         )
+        gate_text, gate_entities = build_contest_vote_gate_message(
+            need_vortex=gate_ctx["need_vortex"], channel_title=gate_ctx["channel_title"],
+        )
+        try:
+            await query.edit_message_text(
+                text=gate_text,
+                entities=gate_entities,
+                reply_markup=build_contest_vote_gate_keyboard(
+                    contest_code, participant_id,
+                    need_vortex=gate_ctx["need_vortex"],
+                    channel_link=gate_ctx["channel_link"],
+                    channel_title=gate_ctx["channel_title"],
+                ),
+            )
+        except Exception:
+            pass
         return
 
     await query.answer("✅ تم التحقق من الاشتراك، أكمل التحقق أدناه.")
@@ -6349,12 +6246,25 @@ async def vote_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     # نظام الأمان: لا يُحتسب أي تصويت إلا بعد التأكد من أن المصوّت لا يزال
-    # مشتركًا فعليًا في القناة الإلزامية لحظة التحقق (وليس فقط لحظة فتح البوت).
+    # مشتركًا فعليًا في القناة الإلزامية (VORTEX) لحظة التحقق (وليس فقط لحظة
+    # فتح البوت).
     if not await is_user_subscribed(context, voter.id, force_refresh=True):
         await query.answer(
             "⚠️ يجب الاشتراك في القناة الإلزامية أولاً، اشترك ثم اضغط نفس الزر مجددًا للتحقق.",
             show_alert=True,
         )
+        return
+
+    # نفس نظام الأمان، ولكن لقناة المسابقة نفسها: قد يكون المصوّت قد غادر
+    # قناة المسابقة بين خطوة «تحقق» وضغط الرمز الصحيح في الكابتشا، فلا يُحتسب
+    # أي صوت من مستخدم غير مشترك فيها لحظة التحقق النهائي.
+    if not await check_contest_channel_subscription(context, voter.id, contest, force_refresh=True):
+        channel_title = await get_chat_title_cached(context, contest["chat_id"])
+        alert_text = (
+            f"❌ يجب عليك الاشتراك في «{channel_title}» أولاً للتصويت"
+            if channel_title else "❌ يجب عليك الاشتراك في قناة المسابقة أولاً للتصويت"
+        )
+        await query.answer(alert_text, show_alert=True)
         return
 
     registered = register_confirmed_contest_vote(contest_code, voter.id, participant_id, contest["owner_id"])
@@ -6623,69 +6533,8 @@ async def handle_setting_input(update: Update, context: ContextTypes.DEFAULT_TYP
     value = update.message.text.strip()
     if not is_owner(update.effective_user.id) and (
         field.startswith("points_") or field.startswith("required_channel_")
-        or field.startswith("user_mgmt_")
     ):
         context.user_data.pop("awaiting_setting", None)
-        return
-
-    if field == "user_mgmt_lookup":
-        context.user_data.pop("awaiting_setting", None)
-        row = resolve_known_user(value)
-        if not row:
-            await update.message.reply_text(
-                "⚠️ لم يتم العثور على أي مستخدم بهذا المعرف أو اليوزر.",
-                reply_markup=build_user_mgmt_not_found_keyboard(),
-            )
-            return
-        text, entities = build_user_mgmt_profile_message(row)
-        await update.message.reply_text(
-            text=text, entities=entities,
-            reply_markup=build_user_mgmt_profile_keyboard(row),
-        )
-        return
-
-    if field == "user_mgmt_ban_query":
-        context.user_data.pop("awaiting_setting", None)
-        row = resolve_known_user(value)
-        if not row:
-            await update.message.reply_text(
-                "⚠️ لم يتم العثور على أي مستخدم بهذا المعرف أو اليوزر.",
-                reply_markup=build_user_mgmt_not_found_keyboard(),
-            )
-            return
-        if row.get("user_id") in OWNER_IDS:
-            await update.message.reply_text(
-                "⛔ لا يمكن حظر مالك البوت.",
-                reply_markup=build_user_mgmt_not_found_keyboard(),
-            )
-            return
-        set_user_banned(row.get("user_id"), True)
-        row["banned"] = True
-        await update.message.reply_text("✅ تم حظر المستخدم بنجاح.")
-        text, entities = build_user_mgmt_profile_message(row)
-        await update.message.reply_text(
-            text=text, entities=entities,
-            reply_markup=build_user_mgmt_profile_keyboard(row),
-        )
-        return
-
-    if field == "user_mgmt_unban_query":
-        context.user_data.pop("awaiting_setting", None)
-        row = resolve_known_user(value)
-        if not row:
-            await update.message.reply_text(
-                "⚠️ لم يتم العثور على أي مستخدم بهذا المعرف أو اليوزر.",
-                reply_markup=build_user_mgmt_not_found_keyboard(),
-            )
-            return
-        set_user_banned(row.get("user_id"), False)
-        row["banned"] = False
-        await update.message.reply_text("✅ تم فك حظر المستخدم بنجاح.")
-        text, entities = build_user_mgmt_profile_message(row)
-        await update.message.reply_text(
-            text=text, entities=entities,
-            reply_markup=build_user_mgmt_profile_keyboard(row),
-        )
         return
 
     if field in ("points_per_user", "points_required", "reward_value"):
@@ -6800,115 +6649,6 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             text=text, entities=entities,
             reply_markup=build_owner_section_keyboard(),
         )
-        return
-
-    if query.data == "user_mgmt_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data.pop("awaiting_setting", None)
-        text, entities = build_user_mgmt_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_user_mgmt_section_keyboard(),
-        )
-        return
-
-    if query.data in ("user_mgmt_search", "user_mgmt_view_prompt"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting_setting"] = "user_mgmt_lookup"
-        await query.edit_message_text(
-            "✍️ أرسل الآن معرّف المستخدم (ID) أو اليوزر (@username) للبحث عنه ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "user_mgmt_ban_prompt":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting_setting"] = "user_mgmt_ban_query"
-        await query.edit_message_text(
-            "✍️ أرسل الآن معرّف المستخدم (ID) أو اليوزر (@username) لحظره ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "user_mgmt_unban_prompt":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting_setting"] = "user_mgmt_unban_query"
-        await query.edit_message_text(
-            "✍️ أرسل الآن معرّف المستخدم (ID) أو اليوزر (@username) لفك حظره ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "user_mgmt_banned_list":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        rows = get_banned_users_list()
-        text, entities = build_user_mgmt_banned_list_message(rows)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_user_mgmt_banned_list_keyboard(),
-        )
-        return
-
-    if query.data == "user_mgmt_stats":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_user_mgmt_stats_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_user_mgmt_stats_keyboard(),
-        )
-        return
-
-    if query.data.startswith("user_mgmt_ban:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
-            return
-        target_id = int(query.data.split(":", 1)[1])
-        if target_id in OWNER_IDS:
-            await query.answer("⛔ لا يمكن حظر مالك البوت.", show_alert=True)
-            return
-        set_user_banned(target_id, True)
-        await query.answer("✅ تم حظر المستخدم بنجاح.")
-        row = get_known_user(target_id)
-        if row:
-            text, entities = build_user_mgmt_profile_message(row)
-            await query.edit_message_text(
-                text=text, entities=entities,
-                reply_markup=build_user_mgmt_profile_keyboard(row),
-            )
-        return
-
-    if query.data.startswith("user_mgmt_unban:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
-            return
-        target_id = int(query.data.split(":", 1)[1])
-        set_user_banned(target_id, False)
-        await query.answer("✅ تم فك حظر المستخدم بنجاح.")
-        row = get_known_user(target_id)
-        if row:
-            text, entities = build_user_mgmt_profile_message(row)
-            await query.edit_message_text(
-                text=text, entities=entities,
-                reply_markup=build_user_mgmt_profile_keyboard(row),
-            )
         return
 
     if query.data == "owner_points_section":
@@ -8521,11 +8261,6 @@ def main():
         )
 
     app.add_error_handler(_global_error_handler)
-
-    # بوابة الحظر العامة: تعمل في مجموعة سابقة (group=-1) على كل الرسائل
-    # والأزرار، فتوقف أي مستخدم محظور قبل وصوله لأي معالج آخر في البوت.
-    app.add_handler(MessageHandler(filters.ALL, global_ban_gate), group=-1)
-    app.add_handler(CallbackQueryHandler(global_ban_gate), group=-1)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("getid", get_id_prompt))
