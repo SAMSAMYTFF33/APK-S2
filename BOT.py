@@ -13,28 +13,6 @@ def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
 
 
-async def global_ban_gate(update: "Update", context) -> None:
-    """بوابة عامة تمنع أي مستخدم محظور (من قسم إدارة المستخدمين) من استخدام
-    البوت إطلاقًا — تعمل على كل الرسائل والأزرار قبل وصولها لأي معالج آخر."""
-    user = update.effective_user
-    if not user or is_owner(user.id):
-        return
-    try:
-        banned = is_user_banned(user.id)
-    except Exception:
-        return
-    if not banned:
-        return
-    try:
-        if update.callback_query:
-            await update.callback_query.answer("🚫 تم حظرك من استخدام هذا البوت.", show_alert=True)
-        elif update.message:
-            await update.message.reply_text("🚫 تم حظرك من استخدام هذا البوت.")
-    except Exception:
-        pass
-    raise ApplicationHandlerStop
-
-
 REQUIRED_CHANNEL_USERNAME = "w33lv"
 REQUIRED_CHANNEL_URL = "https://t.me/w33lv"
 REQUIRED_CHANNEL_BUTTON_TEXT = "VORTEX  𓏺"
@@ -153,6 +131,7 @@ from telegram.ext import (
     ChatMemberHandler,
     ContextTypes,
     PreCheckoutQueryHandler,
+    TypeHandler,
     ApplicationHandlerStop,
     filters,
 )
@@ -566,13 +545,158 @@ def _normalize_channel_username(raw: str) -> str:
     return value
 
 
-def build_subscription_required_message() -> tuple:
-    """رسالة تطلب من المستخدم الاشتراك في القناة قبل استخدام البوت."""
+def _next_required_channel_id() -> int:
+    """عدّاد ذري لمعرّفات قنوات الاشتراك الإجباري، بنفس منطق _next_roulette_id."""
+    client = fs_db()
+    counter_ref = client.collection("counters").document("required_channels")
+    transaction = client.transaction()
+
+    @firestore.transactional
+    def _txn(transaction):
+        snap = counter_ref.get(transaction=transaction)
+        current = (snap.to_dict().get("next_id", 0) if snap.exists else 0) or 0
+        next_id = current + 1
+        transaction.set(counter_ref, {"next_id": next_id})
+        return next_id
+
+    return _txn(transaction)
+
+
+def create_required_channel(
+    username: str, url: str = "", button_text: str = "",
+    target_count=None, auto_delete_on_target: bool = False,
+    added_by=None,
+) -> int:
+    """يضيف قناة جديدة لقائمة قنوات الاشتراك الإجباري، ويعيد معرّفها."""
+    username = username.lstrip("@")
+    channels = get_required_channels()
+    max_order = max([c.get("order", 0) for c in channels], default=-1)
+    channel_id = _next_required_channel_id()
+    fs_db().collection("required_channels").document(str(channel_id)).set({
+        "channel_id": channel_id,
+        "username": username,
+        "url": url or f"https://t.me/{username}",
+        "title": "",
+        "button_text": button_text or "",
+        "enabled": True,
+        "order": max_order + 1,
+        "target_count": target_count,
+        "auto_delete_on_target": bool(auto_delete_on_target),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "added_by": added_by,
+    })
+    return channel_id
+
+
+def get_required_channels(enabled_only: bool = False) -> list:
+    """يعيد كل قنوات الاشتراك الإجباري مرتّبة بحسب الترتيب المحفوظ."""
+    docs = fs_db().collection("required_channels").stream()
+    rows = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        data.setdefault("channel_id", int(doc.id))
+        if enabled_only and not data.get("enabled", True):
+            continue
+        rows.append(FSRow(data))
+    rows.sort(key=lambda r: (r.get("order", 0), r.get("channel_id", 0)))
+    return rows
+
+
+def get_required_channel(channel_id: int):
+    """يعيد بيانات قناة اشتراك إجباري واحدة أو None إن لم توجد."""
+    doc = fs_db().collection("required_channels").document(str(channel_id)).get()
+    if not doc.exists:
+        return None
+    data = doc.to_dict() or {}
+    data.setdefault("channel_id", channel_id)
+    return FSRow(data)
+
+
+def update_required_channel(channel_id: int, **fields) -> None:
+    """يحدّث حقولاً محددة في قناة اشتراك إجباري (دمج، لا يمس بقية الحقول)."""
+    if not fields:
+        return
+    fs_db().collection("required_channels").document(str(channel_id)).set(fields, merge=True)
+
+
+def delete_required_channel(channel_id: int) -> None:
+    """يحذف قناة اشتراك إجباري نهائيًا من القائمة."""
+    fs_db().collection("required_channels").document(str(channel_id)).delete()
+
+
+def move_required_channel(channel_id: int, direction: int) -> bool:
+    """يبدّل ترتيب قناة مع جارتها في القائمة (direction=-1 لأعلى، +1 لأسفل).
+    يعيد True إن نجح التبديل، أو False إن كانت القناة في أول/آخر القائمة فعلاً."""
+    channels = get_required_channels()
+    idx = next((i for i, c in enumerate(channels) if c.get("channel_id") == channel_id), None)
+    if idx is None:
+        return False
+    swap_idx = idx + direction
+    if swap_idx < 0 or swap_idx >= len(channels):
+        return False
+    a, b = channels[idx], channels[swap_idx]
+    order_a, order_b = a.get("order", 0), b.get("order", 0)
+    update_required_channel(a["channel_id"], order=order_b)
+    update_required_channel(b["channel_id"], order=order_a)
+    return True
+
+
+def _migrate_legacy_required_channel() -> None:
+    """ترحيل تلقائي لمرة واحدة عند أول تشغيل بعد التحديث: تُنقَل قناة الاشتراك
+    الإجباري القديمة (وقناة «التالية» إن كانت محددة) من نظام القناة الواحدة
+    القديم لتصبح قنوات في قائمة required_channels الجديدة، حتى لا يفقد
+    المالك إعداده الحالي أثناء الترقية لنظام القنوات المتعددة."""
+    existing = list(fs_db().collection("required_channels").limit(1).stream())
+    if existing:
+        return
+    legacy_username = (get_setting("required_channel_username") or "").lstrip("@")
+    if legacy_username:
+        create_required_channel(
+            username=legacy_username,
+            url=get_setting("required_channel_url") or f"https://t.me/{legacy_username}",
+            button_text=REQUIRED_CHANNEL_BUTTON_TEXT,
+            target_count=None,
+            auto_delete_on_target=False,
+        )
+    legacy_next = (get_setting("required_channel_next_username") or "").lstrip("@")
+    if legacy_next:
+        create_required_channel(
+            username=legacy_next,
+            url=f"https://t.me/{legacy_next}",
+            target_count=None,
+            auto_delete_on_target=False,
+        )
+
+
+def build_required_channels_rows(channels: list) -> list:
+    """يبني صفًا واحدًا (زر انضمام) لكل قناة من القنوات الممرَّرة — يُستخدم في
+    كل بوابات الاشتراك الإجباري (البوابة العامة، بوابة تصويت المسابقة،
+    وبوابة شروط السحب) بنفس المنطق بدل تكراره في كل واحدة."""
+    rows = []
+    for ch in channels:
+        title = ch.get("button_text") or ch.get("title") or f"📢 @{ch.get('username', '')}"
+        url = ch.get("url") or f"https://t.me/{ch.get('username', '')}"
+        rows.append([InlineKeyboardButton(title, url=url)])
+    return rows
+
+
+def build_subscription_required_message(missing_channels: list = None) -> tuple:
+    """رسالة تطلب من المستخدم الاشتراك في القناة/القنوات قبل استخدام البوت."""
+    missing_channels = missing_channels or []
+    label = "القنوات التالية" if len(missing_channels) > 1 else "القناة"
     parts = [
-        "عليك الأشتراك في القناة اولاً",
+        f"عليك الأشتراك في {label} اولاً",
         "\n",
         "- لتتمكن من أستخدام البوت : ",
         ("💻", EMOJI["sub_laptop"]),
+    ]
+    if len(missing_channels) > 1:
+        lines = [
+            f"• {ch.get('button_text') or ch.get('title') or ('@' + ch.get('username', ''))}"
+            for ch in missing_channels
+        ]
+        parts += ["\n", "\n".join(lines)]
+    parts += [
         "\n",
         ([
             ("‼️", EMOJI["sub_alert"]),
@@ -583,11 +707,14 @@ def build_subscription_required_message() -> tuple:
     return build_text_with_emojis(parts)
 
 
-def build_subscription_required_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(REQUIRED_CHANNEL_BUTTON_TEXT, url=get_required_channel_url())],
-        [InlineKeyboardButton("تحقق من الاشتراك", callback_data="check_sub_status")],
-    ])
+def build_subscription_required_keyboard(missing_channels: list = None) -> InlineKeyboardMarkup:
+    missing_channels = missing_channels or []
+    if missing_channels:
+        rows = build_required_channels_rows(missing_channels)
+    else:
+        rows = [[InlineKeyboardButton(REQUIRED_CHANNEL_BUTTON_TEXT, url=get_required_channel_url())]]
+    rows.append([InlineKeyboardButton("تحقق من الاشتراك", callback_data="check_sub_status")])
+    return InlineKeyboardMarkup(rows)
 
 
 _SUBSCRIPTION_CACHE = {}
@@ -595,55 +722,35 @@ SUBSCRIPTION_CACHE_TTL = 60
 SUBSCRIPTION_NEGATIVE_CACHE_TTL = 3
 
 
+async def get_missing_required_channels(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, force_refresh: bool = False
+) -> list:
+    """يعيد قائمة قنوات الاشتراك الإجباري المفعّلة التي لم ينضم إليها المستخدم
+    بعد (قائمة فارغة إن كان مشتركًا في الجميع، أو لا توجد أي قناة إجبارية
+    حاليًا). يعتمد داخليًا على is_user_subscribed_to_chat لكل قناة، فيستفيد
+    من نفس الكاش ومنطق إعادة المحاولة عند تحديد تيليجرام لعدد الطلبات."""
+    channels = get_required_channels(enabled_only=True)
+    missing = []
+    for channel in channels:
+        username = channel.get("username")
+        if not username:
+            continue
+        subscribed = await is_user_subscribed_to_chat(
+            context, user_id, f"@{username}", force_refresh=force_refresh,
+        )
+        if not subscribed:
+            missing.append(channel)
+    return missing
+
+
 async def is_user_subscribed(
     context: ContextTypes.DEFAULT_TYPE, user_id: int, force_refresh: bool = False
 ) -> bool:
-    """يتحقق مما إذا كان المستخدم عضوًا في قناة الاشتراك الإجباري، مع كاش مؤقت
-    لكل مستخدم لتجنب نداء تليجرام (get_chat_member) في كل ضغطة/فتح رابط —
-    وهو السبب الرئيسي لبطء رد الأزرار وتأخر ظهور الكابتشا بعد إعادة التوجيه."""
-    cached = _SUBSCRIPTION_CACHE.get(user_id)
-    if not force_refresh and cached is not None:
-        age = time.time() - cached["ts"]
-        ttl = SUBSCRIPTION_CACHE_TTL if cached["value"] else SUBSCRIPTION_NEGATIVE_CACHE_TTL
-        if age < ttl:
-            return cached["value"]
-    channel_username = get_required_channel_username()
-    result = False
-    for attempt in range(2):
-        try:
-            member = await context.bot.get_chat_member(
-                chat_id=f"@{channel_username}", user_id=user_id
-            )
-            result = (
-                member.status in ("member", "administrator", "creator")
-                or (member.status == "restricted" and bool(getattr(member, "is_member", False)))
-            )
-            break
-        except RetryAfter as exc:
-            if attempt == 0 and exc.retry_after <= 5:
-                logger.warning(
-                    "تيليجرام حدّد عدد الطلبات أثناء التحقق من اشتراك %s في @%s — "
-                    "إعادة محاولة واحدة بعد %s ثانية بدل رفض المستخدم فورًا",
-                    user_id, channel_username, exc.retry_after,
-                )
-                await asyncio.sleep(exc.retry_after)
-                continue
-            logger.warning(
-                "تيليجرام حدّد عدد الطلبات أثناء التحقق من اشتراك %s في @%s "
-                "(retry_after=%s) — تعذّر إعادة المحاولة الآن، سيُعامَل كغير مشترك مؤقتًا",
-                user_id, channel_username, exc.retry_after,
-            )
-            result = False
-            break
-        except Exception:
-            logger.exception(
-                "تعذّر التحقق من اشتراك المستخدم %s في القناة @%s",
-                user_id, channel_username,
-            )
-            result = False
-            break
-    _SUBSCRIPTION_CACHE[user_id] = {"value": result, "ts": time.time()}
-    return result
+    """يتحقق مما إذا كان المستخدم مشتركًا في جميع قنوات الاشتراك الإجباري
+    المفعّلة حاليًا. يعيد True إن لم توجد أي قناة إجبارية أصلاً، أو كان
+    المستخدم مشتركًا في جميعها."""
+    missing = await get_missing_required_channels(context, user_id, force_refresh=force_refresh)
+    return not missing
 
 
 _GW_CONDITION_SUB_CACHE = {}
@@ -767,7 +874,7 @@ async def build_giveaway_gate_context(
     قناة VORTEX، وهل يلزم عرض شرط الاشتراك في قناة استضافة السحب نفسها (مع
     رابط وعنوان تلك القناة عند الحاجة) — بحيث يُبنى الزرّان معًا في شاشة واحدة
     بدل بوابتين متتاليتين منفصلتين."""
-    need_vortex = not await is_user_subscribed(context, user_id)
+    need_vortex = await get_missing_required_channels(context, user_id)
     host_channel_link = ""
     host_channel_title = ""
     if not await check_giveaway_host_channel_subscription(context, user_id, giveaway):
@@ -885,54 +992,49 @@ async def _check_bot_can_verify_channel(context: ContextTypes.DEFAULT_TYPE, user
     return ""
 
 
-async def check_required_channel_auto_switch(context: ContextTypes.DEFAULT_TYPE):
+async def check_required_channels_targets(context: ContextTypes.DEFAULT_TYPE):
     """
-    مهمة دورية: تتحقق من عدد مشتركي قناة الاشتراك الإجباري الحالية، وإن وصلت
-    (أو تجاوزت) العدد المطلوب وكانت هناك قناة تالية محددة من المالك، يتم تبديل
-    قناة الاشتراك الإجباري تلقائيًا إليها. إن لم تُحدَّد قناة تالية فلا يحدث أي
-    تغيير أبدًا مهما بلغ عدد المشتركين.
+    مهمة دورية: تفحص كل قنوات الاشتراك الإجباري المفعّلة التي حدّد لها المالك
+    عدد أعضاء مستهدف مع تفعيل «حذف تلقائي عند الوصول للهدف» (🔄). إن وصلت
+    (أو تجاوزت) القناة عدد أعضائها المستهدف تُحذف تلقائيًا من قائمة قنوات
+    الاشتراك الإجباري، ويُرسَل إشعار بذلك لكل مالك. القنوات المضبوطة على
+    «إبقاء دائم» (♾️ auto_delete_on_target=False) أو بلا هدف محدد لا تُفحص
+    أصلاً.
     """
-    next_username = get_required_channel_next_username()
-    if not next_username:
-        return
-
-    target = get_required_channel_auto_target()
-    current_username = get_required_channel_username()
-    try:
-        count = await context.bot.get_chat_member_count(chat_id=f"@{current_username}")
-    except Exception:
-        logger.exception(
-            "تعذّر جلب عدد مشتركي قناة الاشتراك الإجباري @%s للتحقق من التغيير التلقائي",
-            current_username,
-        )
-        return
-
-    if count < target:
-        return
-
-    set_setting("required_channel_username", next_username)
-    set_setting("required_channel_url", f"https://t.me/{next_username}")
-    set_setting("required_channel_next_username", "")
-    _SUBSCRIPTION_CACHE.clear()
-    logger.info(
-        "تم تغيير قناة الاشتراك الإجباري تلقائيًا من @%s إلى @%s بعد وصول عدد المشتركين إلى %s",
-        current_username, next_username, count,
-    )
-    warning = await _check_bot_can_verify_channel(context, next_username)
-    for owner_id in OWNER_IDS:
+    channels = get_required_channels(enabled_only=True)
+    for channel in channels:
+        target = channel.get("target_count")
+        if not target or not channel.get("auto_delete_on_target"):
+            continue
+        username = channel.get("username")
+        if not username:
+            continue
         try:
-            await context.bot.send_message(
-                chat_id=owner_id,
-                text=(
-                    f"✅ تم تغيير قناة الاشتراك الإجباري تلقائيًا\n"
-                    f"من: @{current_username}\n"
-                    f"إلى: @{next_username}\n"
-                    f"(بعد وصولها إلى {count} مشترك)"
-                    + (f"\n\n{warning}" if warning else "")
-                ),
-            )
+            count = await context.bot.get_chat_member_count(chat_id=f"@{username}")
         except Exception:
-            pass
+            logger.exception(
+                "تعذّر جلب عدد مشتركي قناة الاشتراك الإجباري @%s للتحقق من الحذف التلقائي",
+                username,
+            )
+            continue
+        if count < target:
+            continue
+        delete_required_channel(channel["channel_id"])
+        logger.info(
+            "تم حذف قناة الاشتراك الإجباري @%s تلقائيًا بعد وصولها إلى %s مشترك (الهدف: %s)",
+            username, count, target,
+        )
+        for owner_id in OWNER_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=owner_id,
+                    text=(
+                        f"🔄 تم حذف قناة الاشتراك الإجباري @{username} تلقائيًا من القائمة\n"
+                        f"(وصلت إلى {count} مشترك، وكان الهدف {target})"
+                    ),
+                )
+            except Exception:
+                pass
 
 
 def build_contest_section_message() -> tuple:
@@ -1897,13 +1999,18 @@ def build_contest_vote_gate_message() -> tuple:
     return build_text_with_emojis(parts)
 
 
-def build_contest_vote_gate_keyboard(contest_code: str, participant_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(REQUIRED_CHANNEL_BUTTON_TEXT, url=get_required_channel_url())],
-        [InlineKeyboardButton(
-            "تحقق ✅", callback_data=f"compcond:{contest_code}:{participant_id}", style="success",
-        )],
-    ])
+def build_contest_vote_gate_keyboard(
+    contest_code: str, participant_id: int, missing_channels: list = None,
+) -> InlineKeyboardMarkup:
+    missing_channels = missing_channels or []
+    if missing_channels:
+        rows = build_required_channels_rows(missing_channels)
+    else:
+        rows = [[InlineKeyboardButton(REQUIRED_CHANNEL_BUTTON_TEXT, url=get_required_channel_url())]]
+    rows.append([InlineKeyboardButton(
+        "تحقق ✅", callback_data=f"compcond:{contest_code}:{participant_id}", style="success",
+    )])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_vote_captcha_message(target_emoji_id: str) -> tuple:
@@ -2713,8 +2820,8 @@ def build_giveaway_gate_message(giveaway, need_vortex: bool = False,
     الشروط في بوابة واحدة موحّدة بدل بوابتين متتاليتين."""
     channels = (giveaway.get("condition_channels") or [])[:GW_CONDITION_CHANNELS_MAX]
     lines = []
-    if need_vortex:
-        lines.append(f"• {REQUIRED_CHANNEL_BUTTON_TEXT}")
+    for req_ch in (need_vortex or []):
+        lines.append(f"• {req_ch.get('button_text') or req_ch.get('title') or ('@' + req_ch.get('username', ''))}")
     if host_channel_title:
         lines.append(f"• {host_channel_title}")
     lines += [f"• {ch.get('title') or ch.get('ref') or 'القناة'}" for ch in channels]
@@ -2755,7 +2862,7 @@ def build_giveaway_gate_keyboard(gw_code: str, giveaway, is_genuinely_new: bool,
     عرض زر لشرط مكتمل بالفعل."""
     rows = []
     if need_vortex:
-        rows.append([InlineKeyboardButton(REQUIRED_CHANNEL_BUTTON_TEXT, url=get_required_channel_url())])
+        rows += build_required_channels_rows(need_vortex)
     if host_channel_link:
         rows.append([InlineKeyboardButton(host_channel_title or "قناة السحب", url=host_channel_link)])
     channels = (giveaway.get("condition_channels") or [])[:GW_CONDITION_CHANNELS_MAX]
@@ -3116,6 +3223,7 @@ def init_db():
         ref = client.collection("settings").document(k)
         if not ref.get().exists:
             ref.set({"value": v})
+    _migrate_legacy_required_channel()
 
 _SETTINGS_CACHE = {}
 
@@ -3259,7 +3367,7 @@ def get_top_channel_points(limit: int = 5):
 
 
 
-def register_bot_user_and_check_new(user) -> bool:
+def register_bot_user_and_check_new(user_id: int, user=None) -> bool:
     """
     يسجّل أول تواصل لهذا المستخدم مع البوت مهما كان مصدر الدخول (رابط سحب/مسابقة،
     أو رابط عام، أو بحث عن اسم البوت... إلخ)، ويُستدعى مرة واحدة فقط في بداية
@@ -3269,94 +3377,152 @@ def register_bot_user_and_check_new(user) -> bool:
     حتى لو لم يشارك في أي سحب سابقًا. تُستخدم هذه القيمة لمنع احتساب نقطة
     لصاحب السحب عندما يشارك مستخدم "قديم" وليس مستخدمًا جديدًا حقيقيًا.
 
-    يقبل كائن المستخدم الكامل (telegram.User) بدل الـ ID فقط، حتى يحفظ/يحدّث
-    اليوزر والاسم في كل مرة — وهو ما يُستخدم لاحقًا في «إدارة المستخدمين»
-    من قسم المالك (البحث بالـ ID أو باليوزر، عرض البيانات، الحظر...).
+    عند تمرير user (كائن telegram.User) يُحدَّث اليوزر/الاسم في سجل المستخدم في
+    كل استدعاء عبر merge، دون المساس بحالة الحظر، ليبقى قسم «إدارة المستخدمين»
+    يعرض دائمًا أحدث بيانات معروفة عن كل مستخدم.
     """
     from google.api_core.exceptions import AlreadyExists
-    user_id = user.id
-    now_iso = datetime.now(timezone.utc).isoformat()
     ref = fs_db().collection("known_bot_users").document(str(user_id))
-    username = (getattr(user, "username", None) or "").lstrip("@").lower() or None
-    seen_payload = {
-        "user_id": user_id,
-        "username": username,
-        "first_name": getattr(user, "first_name", None),
-        "last_name": getattr(user, "last_name", None),
-        "last_seen_at": now_iso,
-    }
+    is_new = False
     try:
         ref.create({
-            **seen_payload,
-            "first_seen_at": now_iso,
-            "banned": False,
-            "banned_at": None,
+            "user_id": user_id,
+            "first_seen_at": datetime.now(timezone.utc).isoformat(),
         })
-        return True
+        is_new = True
     except AlreadyExists:
+        is_new = False
+    if user is not None:
         try:
-            ref.set(seen_payload, merge=True)
+            ref.set({
+                "user_id": user_id,
+                "username": user.username or "",
+                "username_lower": (user.username or "").lower(),
+                "first_name": user.first_name or "",
+                "last_name": user.last_name or "",
+                "last_seen_at": datetime.now(timezone.utc).isoformat(),
+            }, merge=True)
         except Exception:
-            pass
-        return False
+            logger.exception("تعذّر تحديث بيانات المستخدم %s", user_id)
+    return is_new
 
 
-def is_user_banned(user_id: int) -> bool:
-    """يتحقق مما إذا كان المستخدم محظورًا من استخدام البوت (قسم إدارة المستخدمين)."""
-    doc = fs_db().collection("known_bot_users").document(str(user_id)).get()
+_BAN_CACHE = {}
+BAN_CACHE_TTL = 60
+
+
+def _bot_user_doc_ref(user_id: int):
+    return fs_db().collection("known_bot_users").document(str(user_id))
+
+
+def get_bot_user(user_id: int):
+    """يعيد بيانات مستخدم البوت (FSRow) أو None إن لم يكن معروفًا لدى البوت."""
+    doc = _bot_user_doc_ref(user_id).get()
     if not doc.exists:
-        return False
-    return bool(doc.to_dict().get("banned"))
-
-
-def get_known_user(user_id: int):
-    doc = fs_db().collection("known_bot_users").document(str(user_id)).get()
-    return _fs_row_or_none(doc)
-
-
-def resolve_known_user(query_text: str):
-    """يبحث عن مستخدم مسجّل سابقًا في البوت عبر الـ ID الرقمي أو اليوزر (@username)."""
-    query_text = (query_text or "").strip()
-    if not query_text:
         return None
-    if query_text.lstrip("@").isdigit():
-        return get_known_user(int(query_text.lstrip("@")))
-    username = query_text.lstrip("@").lower()
+    data = doc.to_dict() or {}
+    data.setdefault("user_id", user_id)
+    return FSRow(data)
+
+
+def find_bot_user_by_username(username: str):
+    """يبحث عن مستخدم بوت مسجَّل مسبقًا عبر اليوزر (بلا حساسية لحالة الأحرف
+    ودون الحاجة لعلامة @). يعيد أول نتيجة مطابقة أو None."""
+    normalized = username.strip().lstrip("@").lower()
+    if not normalized:
+        return None
     docs = list(
-        fs_db().collection("known_bot_users").where("username", "==", username).limit(1).stream()
+        fs_db().collection("known_bot_users")
+        .where("username_lower", "==", normalized)
+        .limit(1)
+        .stream()
     )
     if not docs:
         return None
-    return FSRow(docs[0].to_dict())
+    data = docs[0].to_dict() or {}
+    data.setdefault("user_id", int(docs[0].id))
+    return FSRow(data)
 
 
-def set_user_banned(user_id: int, banned: bool) -> None:
-    ref = fs_db().collection("known_bot_users").document(str(user_id))
-    ref.set({
-        "banned": banned,
-        "banned_at": datetime.now(timezone.utc).isoformat() if banned else None,
+def is_bot_user_banned(user_id: int, force_refresh: bool = False) -> bool:
+    """يتحقق مما إذا كان المستخدم محظورًا من استخدام البوت، مع كاش قصير المدة
+    لتفادي قراءة Firestore عند كل تحديث/ضغطة زر يرسلها أي مستخدم."""
+    now = time.time()
+    cached = _BAN_CACHE.get(user_id)
+    if not force_refresh and cached is not None and now - cached["ts"] < BAN_CACHE_TTL:
+        return cached["banned"]
+    row = get_bot_user(user_id)
+    banned = bool(row and row.get("banned"))
+    _BAN_CACHE[user_id] = {"banned": banned, "ts": now}
+    return banned
+
+
+def ban_bot_user(user_id: int, reason: str, banned_by: int) -> None:
+    """يحظر مستخدمًا من استخدام البوت. يعمل حتى مع مستخدم لم يبدأ محادثة مع
+    البوت من قبل إطلاقًا (حظر استباقي بالمعرف الرقمي فقط)."""
+    _bot_user_doc_ref(user_id).set({
+        "user_id": user_id,
+        "banned": True,
+        "ban_reason": reason or "",
+        "banned_at": datetime.now(timezone.utc).isoformat(),
+        "banned_by": banned_by,
     }, merge=True)
+    _BAN_CACHE[user_id] = {"banned": True, "ts": time.time()}
 
 
-def count_known_users() -> tuple:
-    """يعيد (إجمالي المستخدمين، عدد المحظورين) عبر عدّ مستندات known_bot_users."""
-    docs = fs_db().collection("known_bot_users").stream()
-    total = 0
-    banned = 0
-    for d in docs:
-        total += 1
-        if (d.to_dict() or {}).get("banned"):
-            banned += 1
-    return total, banned
+def unban_bot_user(user_id: int) -> None:
+    """يفكّ حظر مستخدم."""
+    _bot_user_doc_ref(user_id).set({
+        "banned": False,
+        "ban_reason": "",
+    }, merge=True)
+    _BAN_CACHE[user_id] = {"banned": False, "ts": time.time()}
 
 
-def get_banned_users_list(limit: int = 50):
-    docs = list(
-        fs_db().collection("known_bot_users").where("banned", "==", True).limit(limit).stream()
-    )
-    rows = [FSRow(d.to_dict()) for d in docs]
+def get_banned_bot_users() -> list:
+    """يعيد كل المستخدمين المحظورين، مرتّبين من الأحدث حظرًا للأقدم."""
+    docs = fs_db().collection("known_bot_users").where("banned", "==", True).stream()
+    rows = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        data.setdefault("user_id", int(doc.id))
+        rows.append(FSRow(data))
     rows.sort(key=lambda r: r.get("banned_at") or "", reverse=True)
     return rows
+
+
+def get_bot_users_stats() -> dict:
+    """إحصائيات عامة عن مستخدمي البوت: الإجمالي، عدد المحظورين، الجدد اليوم
+    والجدد خلال آخر 7 أيام (بالاعتماد على first_seen_at)."""
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=7)
+    total = 0
+    banned = 0
+    new_today = 0
+    new_week = 0
+    for doc in fs_db().collection("known_bot_users").stream():
+        data = doc.to_dict() or {}
+        total += 1
+        if data.get("banned"):
+            banned += 1
+        first_seen_raw = data.get("first_seen_at")
+        if first_seen_raw:
+            try:
+                first_seen = datetime.fromisoformat(first_seen_raw)
+                if first_seen >= today_start:
+                    new_today += 1
+                if first_seen >= week_start:
+                    new_week += 1
+            except (ValueError, TypeError):
+                pass
+    return {
+        "total": total,
+        "banned": banned,
+        "new_today": new_today,
+        "new_week": new_week,
+    }
+
 
 def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int) -> bool:
     """يمنح النقاط مرة واحدة عالميًا بعد نجاح مشاركة السحب والكابتشا."""
@@ -4241,133 +4407,9 @@ def build_owner_section_message() -> tuple:
 def build_owner_section_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💰 قسم ربح", callback_data="owner_points_section", style="primary")],
-        [InlineKeyboardButton("📢 اشتراك اجباري", callback_data="owner_sub_section", style="primary")],
-        [InlineKeyboardButton("👥 إدارة المستخدمين", callback_data="user_mgmt_section", style="primary")],
+        [InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="owner_sub_section", style="primary")],
+        [InlineKeyboardButton("👥 إدارة المستخدمين", callback_data="owner_users_section", style="primary")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="back_main_menu", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
-    ])
-
-
-def build_user_mgmt_section_message() -> tuple:
-    return build_text_with_emojis([
-        ([
-            "👥 إدارة المستخدمين",
-            "\n\n",
-            (["من هنا يمكنك البحث عن أي مستخدم، عرض بياناته، حظره أو فك حظره ”"], "blockquote", None),
-        ], "bold", None),
-    ])
-
-
-def build_user_mgmt_section_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔎 البحث عن مستخدم", callback_data="user_mgmt_search", style="primary")],
-        [InlineKeyboardButton("👤 عرض بيانات مستخدم", callback_data="user_mgmt_view_prompt", style="primary")],
-        [InlineKeyboardButton("🚫 حظر مستخدم", callback_data="user_mgmt_ban_prompt", style="danger")],
-        [InlineKeyboardButton("✅ فك حظر مستخدم", callback_data="user_mgmt_unban_prompt", style="success")],
-        [InlineKeyboardButton("📋 قائمة المحظورين", callback_data="user_mgmt_banned_list", style="primary")],
-        [InlineKeyboardButton("📊 إحصائيات المستخدم", callback_data="user_mgmt_stats", style="primary")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
-    ])
-
-
-def _user_mgmt_display_name(row) -> str:
-    first = (row.get("first_name") or "").strip()
-    last = (row.get("last_name") or "").strip()
-    name = (first + " " + last).strip()
-    return name or str(row.get("user_id"))
-
-
-def build_user_mgmt_profile_message(row) -> tuple:
-    user_id = row.get("user_id")
-    username = row.get("username")
-    username_line = f"@{username}" if username else "لا يوجد"
-    banned = bool(row.get("banned"))
-    status_line = "🚫 محظور" if banned else "✅ غير محظور"
-    points = get_points(user_id)
-    first_seen = row.get("first_seen_at") or "غير معروف"
-    last_seen = row.get("last_seen_at") or "غير معروف"
-    return build_text_with_emojis([
-        ([
-            "👤 بيانات المستخدم",
-            "\n\n",
-            ([
-                f"🆔 المعرف: {user_id}\n",
-                f"📛 الاسم: {_user_mgmt_display_name(row)}\n",
-                f"🔗 اليوزر: {username_line}\n",
-                f"📌 الحالة: {status_line}\n",
-                f"💎 عدد النقاط: {points}\n",
-                f"🕐 أول تواصل: {first_seen}\n",
-                f"🕓 آخر تواصل: {last_seen}",
-            ], "blockquote", None),
-        ], "bold", None),
-    ])
-
-
-def build_user_mgmt_profile_keyboard(row) -> InlineKeyboardMarkup:
-    user_id = row.get("user_id")
-    banned = bool(row.get("banned"))
-    action_row = (
-        [InlineKeyboardButton("✅ فك الحظر", callback_data=f"user_mgmt_unban:{user_id}", style="success")]
-        if banned else
-        [InlineKeyboardButton("🚫 حظر", callback_data=f"user_mgmt_ban:{user_id}", style="danger")]
-    )
-    return InlineKeyboardMarkup([
-        action_row,
-        [InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
-    ])
-
-
-def build_user_mgmt_banned_list_message(rows) -> tuple:
-    if not rows:
-        body = ["لا يوجد أي مستخدم محظور حاليًا ”"]
-    else:
-        lines = []
-        for r in rows:
-            username = r.get("username")
-            uname_part = f"@{username}" if username else _user_mgmt_display_name(r)
-            lines.append(f"• {uname_part} (ID: {r.get('user_id')})")
-        body = ["\n".join(lines)]
-    return build_text_with_emojis([
-        (["📋 قائمة المحظورين", "\n\n"], "bold", None),
-        (body, "blockquote", None),
-    ])
-
-
-def build_user_mgmt_banned_list_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
-    ])
-
-
-def build_user_mgmt_stats_message() -> tuple:
-    total, banned = count_known_users()
-    active = max(total - banned, 0)
-    return build_text_with_emojis([
-        ([
-            "📊 إحصائيات المستخدمين",
-            "\n\n",
-            ([
-                f"👥 إجمالي المستخدمين: {total}\n",
-                f"🚫 عدد المحظورين: {banned}\n",
-                f"✅ عدد غير المحظورين: {active}",
-            ], "blockquote", None),
-        ], "bold", None),
-    ])
-
-
-def build_user_mgmt_stats_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
-    ])
-
-
-def build_user_mgmt_not_found_keyboard(back_to: str = "user_mgmt_section") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 رجوع", callback_data=back_to, style="danger",
                               **emoji_kwargs("back_section_btn"))],
     ])
 
@@ -4397,63 +4439,400 @@ def build_owner_points_section_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+REQUIRED_CHANNELS_PAGE_SIZE = 8
+BANNED_USERS_PAGE_SIZE = 8
+
+
+def _format_ts(iso_str: str) -> str:
+    """ينسّق نص تاريخ/وقت ISO المخزَّن في Firestore لعرض بشري مبسّط."""
+    if not iso_str:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
+    except (ValueError, TypeError):
+        return str(iso_str)
+
+
 def build_owner_sub_section_message() -> tuple:
-    current = get_required_channel_username()
-    next_username = get_required_channel_next_username()
-    target = get_required_channel_auto_target()
-    next_line = f"@{next_username} (عند {target} مشترك)" if next_username else "غير محددة (لا يوجد تغيير تلقائي)"
+    channels = get_required_channels()
+    enabled_count = len([c for c in channels if c.get("enabled", True)])
     return build_text_with_emojis([
         ([
             "📢 الاشتراك الإجباري — إدارة المالك",
             "\n\n",
             ([
-                f"📡 القناة الحالية: @{current}\n",
-                f"🔄 القناة التالية (تلقائي): {next_line}",
+                f"📡 عدد القنوات: {len(channels)}\n",
+                f"🟢 المفعّلة حاليًا: {enabled_count}",
             ], "blockquote", None),
             "\n\n",
-            (["اختر ما تريد تعديله من الأزرار أدناه ”"], "blockquote", None),
+            (["اختر ما تريد فعله من الأزرار أدناه ”"], "blockquote", None),
         ], "bold", None),
     ])
 
 
 def build_owner_sub_section_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✏️ تغيير القناة الحالية", callback_data="owner_sub_change_current", style="primary")],
-        [InlineKeyboardButton("🔄 التغيير التلقائي", callback_data="owner_sub_auto", style="primary")],
+        [InlineKeyboardButton("➕ إضافة قناة", callback_data="owner_sub_add", style="success")],
+        [InlineKeyboardButton("📋 عرض جميع القنوات", callback_data="owner_sub_list:1", style="primary")],
+        [InlineKeyboardButton("🔢 ترتيب القنوات", callback_data="owner_sub_reorder", style="primary")],
+        [InlineKeyboardButton(
+            "📊 إحصائيات جميع قنوات الاشتراك", callback_data="owner_sub_stats_all", style="primary",
+        )],
         [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
                               **emoji_kwargs("back_section_btn"))],
     ])
 
 
-def build_owner_sub_auto_message() -> tuple:
-    next_username = get_required_channel_next_username()
-    target = get_required_channel_auto_target()
-    next_line = f"@{next_username}" if next_username else "غير محددة"
-    status_line = (
-        f"سيتم التحويل تلقائيًا إلى @{next_username} عند وصول القناة الحالية إلى {target} مشترك."
-        if next_username else
-        "لن يحدث أي تغيير تلقائي حتى تحدد القناة التالية."
+def build_owner_sub_list_message(channels: list) -> tuple:
+    if not channels:
+        content = [
+            "📋 عرض جميع القنوات",
+            "\n\n",
+            (["لا توجد أي قناة اشتراك إجباري حاليًا، أضف قناة أولاً ”"], "blockquote", None),
+        ]
+    else:
+        content = [
+            f"📋 عرض جميع القنوات ({len(channels)})",
+            "\n\n",
+            (["اضغط على أي قناة لإدارتها ”"], "blockquote", None),
+        ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_sub_list_keyboard(channels: list, page: int) -> InlineKeyboardMarkup:
+    total_pages = max(1, (len(channels) + REQUIRED_CHANNELS_PAGE_SIZE - 1) // REQUIRED_CHANNELS_PAGE_SIZE)
+    start = (page - 1) * REQUIRED_CHANNELS_PAGE_SIZE
+    page_items = channels[start:start + REQUIRED_CHANNELS_PAGE_SIZE]
+
+    rows = []
+    for ch in page_items:
+        dot = "🟢" if ch.get("enabled", True) else "🔴"
+        label = f"{dot} @{ch.get('username', '')}"
+        if ch.get("target_count"):
+            label += f" 🎯{ch.get('target_count')}"
+        rows.append([InlineKeyboardButton(
+            label, callback_data=f"owner_sub_channel:{ch['channel_id']}", style="primary",
+        )])
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"owner_sub_list:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="owner_sub_noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"owner_sub_list:{page + 1}"))
+        rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("➕ إضافة قناة", callback_data="owner_sub_add", style="success")])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+async def build_owner_sub_channel_message(context: ContextTypes.DEFAULT_TYPE, channel: dict) -> tuple:
+    username = channel.get("username", "")
+    url = channel.get("url") or f"https://t.me/{username}"
+    target = channel.get("target_count")
+    target_line = f"{target} عضو" if target else "غير محدد"
+    autodel_line = (
+        "🔄 حذف تلقائي عند الوصول للهدف" if channel.get("auto_delete_on_target")
+        else "♾️ إبقاء دائم بدون حذف"
     )
+    status_line = "🟢 مفعّلة" if channel.get("enabled", True) else "🔴 معطّلة"
+    try:
+        count_line = str(await context.bot.get_chat_member_count(chat_id=f"@{username}"))
+    except Exception:
+        count_line = "تعذّر الجلب"
+
+    content = [
+        f"📢 إدارة القناة @{username}",
+        "\n\n",
+        ([
+            f"🔗 الرابط: {url}\n",
+            f"👥 عدد الأعضاء الحالي: {count_line}\n",
+            f"🎯 الهدف: {target_line}\n",
+            f"⚙️ عند الوصول للهدف: {autodel_line}\n",
+            f"📌 الحالة: {status_line}\n",
+            f"🔢 الترتيب: {channel.get('order', 0) + 1}",
+        ], "blockquote", None),
+        "\n\n",
+        (["اختر ما تريد تعديله من الأزرار أدناه ”"], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_sub_channel_keyboard(channel: dict) -> InlineKeyboardMarkup:
+    cid = channel["channel_id"]
+    enabled = channel.get("enabled", True)
+    autodel = bool(channel.get("auto_delete_on_target"))
+    autodel_label = (
+        "⚙️ عند الهدف: 🔄 حذف تلقائي" if autodel else "⚙️ عند الهدف: ♾️ إبقاء دائم"
+    )
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ تعديل يوزر القناة", callback_data=f"owner_sub_edit_username:{cid}", style="primary")],
+        [InlineKeyboardButton("🔗 تعديل رابط القناة", callback_data=f"owner_sub_edit_link:{cid}", style="primary")],
+        [InlineKeyboardButton("🎯 تحديد عدد الأعضاء المستهدف", callback_data=f"owner_sub_edit_target:{cid}", style="primary")],
+        [InlineKeyboardButton(autodel_label, callback_data=f"owner_sub_toggle_autodel:{cid}", style="primary")],
+        [InlineKeyboardButton(
+            "🔘 الحالة: مفعّلة 🟢" if enabled else "🔘 الحالة: معطّلة 🔴",
+            callback_data=f"owner_sub_toggle_enabled:{cid}", style="success" if enabled else "danger",
+        )],
+        [InlineKeyboardButton("📊 إحصائيات هذه القناة", callback_data=f"owner_sub_channel_stats:{cid}", style="primary")],
+        [InlineKeyboardButton("🗑️ حذف القناة", callback_data=f"owner_sub_delete:{cid}", style="danger")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_list:1", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_owner_sub_delete_confirm_message(channel: dict) -> tuple:
+    content = [
+        "🗑️ تأكيد حذف القناة",
+        "\n\n",
+        ([f"هل أنت متأكد من حذف القناة @{channel.get('username', '')} من قائمة الاشتراك الإجباري؟ ”"],
+         "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_sub_delete_confirm_keyboard(channel_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("❌ إلغاء", callback_data=f"owner_sub_channel:{channel_id}", style="primary"),
+            InlineKeyboardButton("🗑️ تأكيد الحذف", callback_data=f"owner_sub_delete_confirm:{channel_id}", style="danger"),
+        ],
+    ])
+
+
+def build_owner_sub_reorder_message(channels: list) -> tuple:
+    if not channels:
+        content = ["🔢 ترتيب القنوات", "\n\n", (["لا توجد أي قناة لترتيبها ”"], "blockquote", None)]
+    else:
+        lines = [f"{i + 1}. @{ch.get('username', '')}" for i, ch in enumerate(channels)]
+        content = [
+            "🔢 ترتيب القنوات",
+            "\n\n",
+            (["\n".join(lines)], "blockquote", None),
+            "\n\n",
+            (["استخدم ⬆️/⬇️ لتغيير ترتيب أي قناة ”"], "blockquote", None),
+        ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_sub_reorder_keyboard(channels: list) -> InlineKeyboardMarkup:
+    rows = []
+    for i, ch in enumerate(channels):
+        cid = ch["channel_id"]
+        rows.append([InlineKeyboardButton(f"{i + 1}. @{ch.get('username', '')}", callback_data="owner_sub_noop")])
+        nav = []
+        if i > 0:
+            nav.append(InlineKeyboardButton("⬆️", callback_data=f"owner_sub_move_up:{cid}"))
+        if i < len(channels) - 1:
+            nav.append(InlineKeyboardButton("⬇️", callback_data=f"owner_sub_move_down:{cid}"))
+        if nav:
+            rows.append(nav)
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+async def build_owner_sub_stats_all_message(context: ContextTypes.DEFAULT_TYPE) -> tuple:
+    channels = get_required_channels()
+    lines = []
+    total_members = 0
+    for ch in channels:
+        username = ch.get("username", "")
+        try:
+            count = await context.bot.get_chat_member_count(chat_id=f"@{username}")
+            total_members += count
+            count_str = str(count)
+        except Exception:
+            count_str = "—"
+        dot = "🟢" if ch.get("enabled", True) else "🔴"
+        target = ch.get("target_count")
+        target_part = f" / هدف {target}" if target else ""
+        lines.append(f"{dot} @{username}: {count_str} عضو{target_part}")
+
+    content = [
+        "📊 إحصائيات جميع قنوات الاشتراك",
+        "\n\n",
+        ([
+            f"📡 إجمالي القنوات: {len(channels)}\n",
+            f"👥 إجمالي الأعضاء (تقريبي، بدون احتساب التكرار بين القنوات): {total_members}",
+        ], "blockquote", None),
+    ]
+    if lines:
+        content += ["\n\n", (["\n".join(lines)], "blockquote", None)]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_sub_stats_all_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+async def build_owner_sub_channel_stats_message(context: ContextTypes.DEFAULT_TYPE, channel: dict) -> tuple:
+    username = channel.get("username", "")
+    count = None
+    try:
+        count = await context.bot.get_chat_member_count(chat_id=f"@{username}")
+    except Exception:
+        pass
+    target = channel.get("target_count")
+    lines = [f"👥 عدد الأعضاء الحالي: {count if count is not None else 'تعذّر الجلب'}"]
+    if target:
+        lines.append(f"🎯 الهدف: {target} عضو")
+        if count is not None:
+            pct = min(100, round((count / target) * 100))
+            lines.append(f"📈 نسبة الإنجاز: {pct}٪")
+    lines.append(f"📅 أُضيفت في: {_format_ts(channel.get('created_at'))}")
+
+    content = [
+        f"📊 إحصائيات القناة @{username}",
+        "\n\n",
+        (["\n".join(lines)], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_sub_channel_stats_keyboard(channel_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_sub_channel:{channel_id}", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+# ---------------------------------------------------------------------------
+# 👥 إدارة المستخدمين
+# ---------------------------------------------------------------------------
+
+def build_owner_users_section_message() -> tuple:
     return build_text_with_emojis([
         ([
-            "🔄 التغيير التلقائي لقناة الاشتراك",
+            "👥 إدارة المستخدمين",
             "\n\n",
-            ([
-                f"🎯 عدد الاشتراكات المطلوب: {target}\n",
-                f"📢 القناة التالية: {next_line}",
-            ], "blockquote", None),
-            "\n\n",
-            ([status_line, " ”"], "blockquote", None),
+            (["اختر ما تريد فعله من الأزرار أدناه ”"], "blockquote", None),
         ], "bold", None),
     ])
 
 
-def build_owner_sub_auto_keyboard() -> InlineKeyboardMarkup:
+def build_owner_users_section_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎯 تخصيص عدد الاشتراكات المطلوبة", callback_data="owner_sub_edit_target", style="primary")],
-        [InlineKeyboardButton("📢 تحديد القناة التالية", callback_data="owner_sub_edit_next", style="primary")],
-        [InlineKeyboardButton("❌ إلغاء القناة التالية", callback_data="owner_sub_clear_next", style="danger")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_section", style="danger",
+        [InlineKeyboardButton("🔎 البحث عن مستخدم", callback_data="owner_users_search", style="primary")],
+        [InlineKeyboardButton("👤 عرض بيانات مستخدم", callback_data="owner_users_view", style="primary")],
+        [InlineKeyboardButton("🚫 حظر مستخدم", callback_data="owner_users_ban", style="danger")],
+        [InlineKeyboardButton("✅ فك حظر مستخدم", callback_data="owner_users_unban", style="success")],
+        [InlineKeyboardButton("📋 قائمة المحظورين", callback_data="owner_users_banned:1", style="primary")],
+        [InlineKeyboardButton("📊 إحصائيات المستخدمين", callback_data="owner_users_stats", style="primary")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_user_profile_message(row: dict) -> tuple:
+    user_id = row.get("user_id")
+    username = row.get("username")
+    full_name = f"{row.get('first_name') or ''} {row.get('last_name') or ''}".strip() or "—"
+    username_line = f"@{username}" if username else "لا يوجد"
+    banned = bool(row.get("banned"))
+    status_line = "🚫 محظور" if banned else "✅ غير محظور"
+
+    content = [
+        "👤 بيانات المستخدم",
+        "\n\n",
+        ([
+            f"🆔 المعرف: {user_id}\n",
+            f"📛 الاسم: {full_name}\n",
+            f"🔗 اليوزر: {username_line}\n",
+            f"📌 الحالة: {status_line}\n",
+            f"🕐 أول ظهور: {_format_ts(row.get('first_seen_at'))}\n",
+            f"🕓 آخر ظهور: {_format_ts(row.get('last_seen_at'))}",
+        ], "blockquote", None),
+    ]
+    if banned:
+        content += ["\n\n", ([f"📝 سبب الحظر: {row.get('ban_reason') or 'بدون سبب محدد'}"], "blockquote", None)]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_user_profile_keyboard(row: dict) -> InlineKeyboardMarkup:
+    user_id = row.get("user_id")
+    banned = bool(row.get("banned"))
+    rows = []
+    if banned:
+        rows.append([InlineKeyboardButton(
+            "✅ فك الحظر", callback_data=f"owner_users_profile_unban:{user_id}", style="success",
+        )])
+    else:
+        rows.append([InlineKeyboardButton(
+            "🚫 حظر هذا المستخدم", callback_data=f"owner_users_profile_ban:{user_id}", style="danger",
+        )])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_owner_users_banned_list_message(banned_users: list) -> tuple:
+    if not banned_users:
+        content = [
+            "📋 قائمة المحظورين",
+            "\n\n",
+            (["لا يوجد أي مستخدم محظور حاليًا ”"], "blockquote", None),
+        ]
+    else:
+        content = [
+            f"📋 قائمة المحظورين ({len(banned_users)})",
+            "\n\n",
+            (["اضغط على أي مستخدم لعرض بياناته أو فك حظره ”"], "blockquote", None),
+        ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_users_banned_list_keyboard(banned_users: list, page: int) -> InlineKeyboardMarkup:
+    total_pages = max(1, (len(banned_users) + BANNED_USERS_PAGE_SIZE - 1) // BANNED_USERS_PAGE_SIZE)
+    start = (page - 1) * BANNED_USERS_PAGE_SIZE
+    page_items = banned_users[start:start + BANNED_USERS_PAGE_SIZE]
+
+    rows = []
+    for row in page_items:
+        uid = row.get("user_id")
+        name = row.get("first_name") or (f"@{row['username']}" if row.get("username") else str(uid))
+        rows.append([InlineKeyboardButton(
+            f"🚫 {name}", callback_data=f"owner_users_profile:{uid}", style="primary",
+        )])
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"owner_users_banned:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="owner_users_noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"owner_users_banned:{page + 1}"))
+        rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_owner_users_stats_message(stats: dict) -> tuple:
+    content = [
+        "📊 إحصائيات المستخدمين",
+        "\n\n",
+        ([
+            f"👥 إجمالي المستخدمين: {stats['total']}\n",
+            f"🚫 عدد المحظورين: {stats['banned']}\n",
+            f"🆕 جدد اليوم: {stats['new_today']}\n",
+            f"📈 جدد آخر 7 أيام: {stats['new_week']}",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_users_stats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger",
                               **emoji_kwargs("back_section_btn"))],
     ])
 
@@ -4645,6 +5024,32 @@ async def _dispatch_start_arg(update: Update, context: ContextTypes.DEFAULT_TYPE
     return False
 
 
+async def _ban_gate_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """بوابة عامة تُسجَّل بمعزل عن بقية المعالِجات (بأولوية أعلى — group=-1)
+    وتُنفَّذ قبل أي معالج آخر لأي تحديث. إن كان مُرسِل التحديث محظورًا من
+    قسم «إدارة المستخدمين»، تُرسَل له رسالة توضيحية ويُوقَف تمرير التحديث
+    لبقية المعالِجات (ApplicationHandlerStop) بدل تكرار هذا الفحص يدويًا
+    داخل كل أمر/زر على حدة."""
+    user = update.effective_user
+    if not user or user.id in OWNER_IDS:
+        return
+    if not is_bot_user_banned(user.id):
+        return
+    row = get_bot_user(user.id)
+    reason = (row.get("ban_reason") if row else "") or ""
+    text = "🚫 أنت محظور من استخدام هذا البوت."
+    if reason:
+        text += f"\n📝 السبب: {reason}"
+    try:
+        if update.callback_query:
+            await update.callback_query.answer(text, show_alert=True)
+        elif update.effective_message:
+            await update.effective_message.reply_text(text)
+    except Exception:
+        logger.exception("تعذّر إرسال إشعار الحظر للمستخدم %s", user.id)
+    raise ApplicationHandlerStop()
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if args and args[0].startswith("gwjoin_"):
@@ -4652,27 +5057,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # مباشرة (VORTEX + قناة استضافة السحب معًا في شاشة واحدة) بدل بوابة
         # VORTEX العامة أدناه، حتى لا يمر المستخدم بخطوتين متتاليتين لإتمام
         # نفس الشرط عند فتح البوت عبر زر «اضغط لـ المشاركة».
-        is_genuinely_new = register_bot_user_and_check_new(update.effective_user)
+        is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id, update.effective_user)
         await handle_giveaway_join_entry(
             update, context, args[0][len("gwjoin_"):], is_genuinely_new=is_genuinely_new,
         )
         return
 
-    subscribed = await is_user_subscribed(context, update.effective_user.id)
-    if not subscribed:
+    missing_channels = await get_missing_required_channels(context, update.effective_user.id)
+    if missing_channels:
         # يُحفظ معامل الرابط العميق (إن وُجد) مؤقتًا لهذا المستخدم، حتى إن
         # اجتاز اشتراكه لاحقًا عبر زر «تحقق من الاشتراك» تُستكمل نفس عملية
         # المشاركة الأصلية (مسابقة/سحب) تلقائيًا بدل فقدان السياق وعرض
         # الترحيب العام فقط.
         if context.args:
             context.user_data["pending_start_arg"] = context.args[0]
-        text, entities = build_subscription_required_message()
+        text, entities = build_subscription_required_message(missing_channels)
         await update.message.reply_text(
-            text, entities=entities, reply_markup=build_subscription_required_keyboard()
+            text, entities=entities, reply_markup=build_subscription_required_keyboard(missing_channels)
         )
         return
 
-    is_genuinely_new = register_bot_user_and_check_new(update.effective_user)
+    is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id, update.effective_user)
 
     args = context.args
     if args and await _dispatch_start_arg(update, context, args[0], is_genuinely_new):
@@ -4703,7 +5108,7 @@ async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAUL
 
     pending_arg = context.user_data.pop("pending_start_arg", None)
     if pending_arg:
-        is_genuinely_new = register_bot_user_and_check_new(query.from_user)
+        is_genuinely_new = register_bot_user_and_check_new(query.from_user.id, query.from_user)
         shim_update = SimpleNamespace(
             effective_user=query.from_user,
             message=_ReplyOnlyMessageShim(context.bot, query.from_user.id),
@@ -5000,12 +5405,13 @@ async def handle_contest_vote_entry(update: Update, context: ContextTypes.DEFAUL
     # بوابة الاشتراك الإجباري: لا تُعرض الكابتشا مباشرة إن لم يكن المستخدم
     # مشتركًا فعليًا في القناة الإلزامية؛ بل تُعرض له بوابة اشتراك + زر
     # «تحقق» صريح، ولا يُحتسب أي تصويت قبل اجتياز هذا الفحص فعليًا.
-    if not await is_user_subscribed(context, user.id):
+    missing_channels = await get_missing_required_channels(context, user.id)
+    if missing_channels:
         gate_text, gate_entities = build_contest_vote_gate_message()
         await update.message.reply_text(
             text=gate_text,
             entities=gate_entities,
-            reply_markup=build_contest_vote_gate_keyboard(contest_code, participant_id),
+            reply_markup=build_contest_vote_gate_keyboard(contest_code, participant_id, missing_channels),
         )
         return
 
@@ -6623,124 +7029,14 @@ async def handle_setting_input(update: Update, context: ContextTypes.DEFAULT_TYP
     value = update.message.text.strip()
     if not is_owner(update.effective_user.id) and (
         field.startswith("points_") or field.startswith("required_channel_")
-        or field.startswith("user_mgmt_")
     ):
         context.user_data.pop("awaiting_setting", None)
-        return
-
-    if field == "user_mgmt_lookup":
-        context.user_data.pop("awaiting_setting", None)
-        row = resolve_known_user(value)
-        if not row:
-            await update.message.reply_text(
-                "⚠️ لم يتم العثور على أي مستخدم بهذا المعرف أو اليوزر.",
-                reply_markup=build_user_mgmt_not_found_keyboard(),
-            )
-            return
-        text, entities = build_user_mgmt_profile_message(row)
-        await update.message.reply_text(
-            text=text, entities=entities,
-            reply_markup=build_user_mgmt_profile_keyboard(row),
-        )
-        return
-
-    if field == "user_mgmt_ban_query":
-        context.user_data.pop("awaiting_setting", None)
-        row = resolve_known_user(value)
-        if not row:
-            await update.message.reply_text(
-                "⚠️ لم يتم العثور على أي مستخدم بهذا المعرف أو اليوزر.",
-                reply_markup=build_user_mgmt_not_found_keyboard(),
-            )
-            return
-        if row.get("user_id") in OWNER_IDS:
-            await update.message.reply_text(
-                "⛔ لا يمكن حظر مالك البوت.",
-                reply_markup=build_user_mgmt_not_found_keyboard(),
-            )
-            return
-        set_user_banned(row.get("user_id"), True)
-        row["banned"] = True
-        await update.message.reply_text("✅ تم حظر المستخدم بنجاح.")
-        text, entities = build_user_mgmt_profile_message(row)
-        await update.message.reply_text(
-            text=text, entities=entities,
-            reply_markup=build_user_mgmt_profile_keyboard(row),
-        )
-        return
-
-    if field == "user_mgmt_unban_query":
-        context.user_data.pop("awaiting_setting", None)
-        row = resolve_known_user(value)
-        if not row:
-            await update.message.reply_text(
-                "⚠️ لم يتم العثور على أي مستخدم بهذا المعرف أو اليوزر.",
-                reply_markup=build_user_mgmt_not_found_keyboard(),
-            )
-            return
-        set_user_banned(row.get("user_id"), False)
-        row["banned"] = False
-        await update.message.reply_text("✅ تم فك حظر المستخدم بنجاح.")
-        text, entities = build_user_mgmt_profile_message(row)
-        await update.message.reply_text(
-            text=text, entities=entities,
-            reply_markup=build_user_mgmt_profile_keyboard(row),
-        )
         return
 
     if field in ("points_per_user", "points_required", "reward_value"):
         if not value.isdigit() or int(value) < 0:
             await update.message.reply_text("⚠️ أرسل رقمًا صحيحًا أكبر من أو يساوي صفر ”")
             return
-
-    if field == "required_channel_username":
-        username = _normalize_channel_username(value)
-        if not username:
-            await update.message.reply_text("⚠️ أرسل اسم يوزر صحيح للقناة (مثال: @channel أو رابط t.me/channel) ”")
-            return
-        set_setting("required_channel_username", username)
-        set_setting("required_channel_url", f"https://t.me/{username}")
-        _SUBSCRIPTION_CACHE.clear()
-        context.user_data.pop("awaiting_setting", None)
-        warning = await _check_bot_can_verify_channel(context, username)
-        await update.message.reply_text(
-            f"✅ تم تغيير قناة الاشتراك الإجباري إلى @{username} بنجاح."
-            + (f"\n\n{warning}" if warning else ""),
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_section", style="danger")
-            ]]),
-        )
-        return
-
-    if field == "required_channel_next_username":
-        username = _normalize_channel_username(value)
-        if not username:
-            await update.message.reply_text("⚠️ أرسل اسم يوزر صحيح للقناة (مثال: @channel أو رابط t.me/channel) ”")
-            return
-        set_setting("required_channel_next_username", username)
-        context.user_data.pop("awaiting_setting", None)
-        await update.message.reply_text(
-            f"✅ تم تحديد القناة التالية: @{username}\n"
-            f"سيتم التحويل إليها تلقائيًا عند وصول القناة الحالية إلى {get_required_channel_auto_target()} مشترك.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_auto", style="danger")
-            ]]),
-        )
-        return
-
-    if field == "required_channel_auto_target":
-        if not value.isdigit() or int(value) <= 0:
-            await update.message.reply_text("⚠️ أرسل رقمًا صحيحًا أكبر من صفر ”")
-            return
-        set_setting("required_channel_auto_target", value)
-        context.user_data.pop("awaiting_setting", None)
-        await update.message.reply_text(
-            f"✅ تم تحديد العدد المطلوب: {value} مشترك.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_auto", style="danger")
-            ]]),
-        )
-        return
 
     set_setting(field, value)
     context.user_data.pop("awaiting_setting", None)
@@ -6800,115 +7096,6 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             text=text, entities=entities,
             reply_markup=build_owner_section_keyboard(),
         )
-        return
-
-    if query.data == "user_mgmt_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data.pop("awaiting_setting", None)
-        text, entities = build_user_mgmt_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_user_mgmt_section_keyboard(),
-        )
-        return
-
-    if query.data in ("user_mgmt_search", "user_mgmt_view_prompt"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting_setting"] = "user_mgmt_lookup"
-        await query.edit_message_text(
-            "✍️ أرسل الآن معرّف المستخدم (ID) أو اليوزر (@username) للبحث عنه ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "user_mgmt_ban_prompt":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting_setting"] = "user_mgmt_ban_query"
-        await query.edit_message_text(
-            "✍️ أرسل الآن معرّف المستخدم (ID) أو اليوزر (@username) لحظره ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "user_mgmt_unban_prompt":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting_setting"] = "user_mgmt_unban_query"
-        await query.edit_message_text(
-            "✍️ أرسل الآن معرّف المستخدم (ID) أو اليوزر (@username) لفك حظره ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="user_mgmt_section", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "user_mgmt_banned_list":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        rows = get_banned_users_list()
-        text, entities = build_user_mgmt_banned_list_message(rows)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_user_mgmt_banned_list_keyboard(),
-        )
-        return
-
-    if query.data == "user_mgmt_stats":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_user_mgmt_stats_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_user_mgmt_stats_keyboard(),
-        )
-        return
-
-    if query.data.startswith("user_mgmt_ban:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
-            return
-        target_id = int(query.data.split(":", 1)[1])
-        if target_id in OWNER_IDS:
-            await query.answer("⛔ لا يمكن حظر مالك البوت.", show_alert=True)
-            return
-        set_user_banned(target_id, True)
-        await query.answer("✅ تم حظر المستخدم بنجاح.")
-        row = get_known_user(target_id)
-        if row:
-            text, entities = build_user_mgmt_profile_message(row)
-            await query.edit_message_text(
-                text=text, entities=entities,
-                reply_markup=build_user_mgmt_profile_keyboard(row),
-            )
-        return
-
-    if query.data.startswith("user_mgmt_unban:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
-            return
-        target_id = int(query.data.split(":", 1)[1])
-        set_user_banned(target_id, False)
-        await query.answer("✅ تم فك حظر المستخدم بنجاح.")
-        row = get_known_user(target_id)
-        if row:
-            text, entities = build_user_mgmt_profile_message(row)
-            await query.edit_message_text(
-                text=text, entities=entities,
-                reply_markup=build_user_mgmt_profile_keyboard(row),
-            )
         return
 
     if query.data == "owner_points_section":
@@ -7058,68 +7245,377 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    if query.data == "owner_sub_change_current":
+    if query.data == "owner_sub_add":
         if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
-        context.user_data["awaiting_setting"] = "required_channel_username"
+        context.user_data["awaiting"] = "admin_channel_add_username"
         await query.edit_message_text(
-            "✍️ أرسل الآن يوزر القناة الجديدة للاشتراك الإجباري (مثال: @channel أو رابط t.me/channel) ”",
+            "✍️ أرسل الآن يوزر القناة الجديدة (مثال: @channel أو رابط t.me/channel) ”",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_section", style="danger")
             ]]),
         )
         return
 
-    if query.data == "owner_sub_auto":
+    if query.data in ("owner_sub_add_autodel_yes", "owner_sub_add_autodel_no"):
         if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
-        text, entities = build_owner_sub_auto_message()
+        username = context.user_data.pop("admin_new_channel_username", None)
+        target = context.user_data.pop("admin_new_channel_target", None)
+        if not username:
+            await query.answer("⚠️ انتهت صلاحية هذه العملية، ابدأ من جديد.", show_alert=True)
+            return
+        auto_delete = query.data == "owner_sub_add_autodel_yes"
+        channel_id = create_required_channel(
+            username=username, target_count=target, auto_delete_on_target=auto_delete,
+            added_by=query.from_user.id,
+        )
+        warning = await _check_bot_can_verify_channel(context, username)
+        channel = get_required_channel(channel_id)
+        await query.answer("✅ تمت إضافة القناة بنجاح")
+        text, entities = await build_owner_sub_channel_message(context, channel)
         await query.edit_message_text(
             text=text, entities=entities,
-            reply_markup=build_owner_sub_auto_keyboard(),
+            reply_markup=build_owner_sub_channel_keyboard(channel),
+        )
+        if warning:
+            try:
+                await context.bot.send_message(chat_id=query.from_user.id, text=warning)
+            except Exception:
+                pass
+        return
+
+    if query.data.startswith("owner_sub_list:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        page = int(query.data.split(":", 1)[1])
+        channels = get_required_channels()
+        text, entities = build_owner_sub_list_message(channels)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_list_keyboard(channels, page),
         )
         return
 
-    if query.data == "owner_sub_edit_target":
+    if query.data.startswith("owner_sub_edit_username:"):
         if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
-        context.user_data["awaiting_setting"] = "required_channel_auto_target"
+        channel_id = int(query.data.split(":", 1)[1])
+        context.user_data["awaiting"] = "admin_channel_edit_username"
+        context.user_data["admin_channel_id"] = channel_id
         await query.edit_message_text(
-            "✍️ أرسل الآن عدد المشتركين المطلوب للتحويل التلقائي (مثال: 1000) ”",
+            "✍️ أرسل الآن اليوزر الجديد لهذه القناة (مثال: @channel أو رابط t.me/channel) ”",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_auto", style="danger")
+                InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_sub_channel:{channel_id}", style="danger")
             ]]),
         )
         return
 
-    if query.data == "owner_sub_edit_next":
+    if query.data.startswith("owner_sub_edit_link:"):
         if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
-        context.user_data["awaiting_setting"] = "required_channel_next_username"
+        channel_id = int(query.data.split(":", 1)[1])
+        context.user_data["awaiting"] = "admin_channel_edit_link"
+        context.user_data["admin_channel_id"] = channel_id
         await query.edit_message_text(
-            "✍️ أرسل الآن يوزر القناة التالية (مثال: @channel أو رابط t.me/channel) ”",
+            "✍️ أرسل الآن رابط الانضمام الجديد لهذه القناة (مثال: https://t.me/channel أو رابط دعوة خاص) ”",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_auto", style="danger")
+                InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_sub_channel:{channel_id}", style="danger")
             ]]),
         )
         return
 
-    if query.data == "owner_sub_clear_next":
+    if query.data.startswith("owner_sub_edit_target:"):
         if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
-        set_setting("required_channel_next_username", "")
-        await query.answer("✅ تم إلغاء القناة التالية — لن يحدث تغيير تلقائي.")
-        text, entities = build_owner_sub_auto_message()
+        channel_id = int(query.data.split(":", 1)[1])
+        context.user_data["awaiting"] = "admin_channel_edit_target"
+        context.user_data["admin_channel_id"] = channel_id
         await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_auto_keyboard(),
+            "✍️ أرسل الآن عدد الأعضاء المستهدف لهذه القناة (رقم)، أو أرسل 0 لإلغاء الهدف ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_sub_channel:{channel_id}", style="danger")
+            ]]),
         )
         return
+
+    if query.data.startswith("owner_sub_toggle_autodel:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        channel_id = int(query.data.split(":", 1)[1])
+        channel = get_required_channel(channel_id)
+        if not channel:
+            await query.answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
+            return
+        new_value = not bool(channel.get("auto_delete_on_target"))
+        update_required_channel(channel_id, auto_delete_on_target=new_value)
+        channel["auto_delete_on_target"] = new_value
+        await query.answer("🔄 سيتم حذفها تلقائيًا عند الهدف" if new_value else "♾️ ستبقى دائمًا بدون حذف")
+        text, entities = await build_owner_sub_channel_message(context, channel)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_channel_keyboard(channel),
+        )
+        return
+
+    if query.data.startswith("owner_sub_toggle_enabled:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        channel_id = int(query.data.split(":", 1)[1])
+        channel = get_required_channel(channel_id)
+        if not channel:
+            await query.answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
+            return
+        new_value = not channel.get("enabled", True)
+        update_required_channel(channel_id, enabled=new_value)
+        channel["enabled"] = new_value
+        await query.answer("🟢 تم تفعيل القناة" if new_value else "🔴 تم تعطيل القناة")
+        text, entities = await build_owner_sub_channel_message(context, channel)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_channel_keyboard(channel),
+        )
+        return
+
+    if query.data.startswith("owner_sub_channel_stats:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        channel_id = int(query.data.split(":", 1)[1])
+        channel = get_required_channel(channel_id)
+        if not channel:
+            await query.answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
+            return
+        text, entities = await build_owner_sub_channel_stats_message(context, channel)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_channel_stats_keyboard(channel_id),
+        )
+        return
+
+    if query.data.startswith("owner_sub_delete_confirm:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        channel_id = int(query.data.split(":", 1)[1])
+        delete_required_channel(channel_id)
+        await query.answer("🗑️ تم حذف القناة بنجاح")
+        channels = get_required_channels()
+        text, entities = build_owner_sub_list_message(channels)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_list_keyboard(channels, 1),
+        )
+        return
+
+    if query.data.startswith("owner_sub_delete:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        channel_id = int(query.data.split(":", 1)[1])
+        channel = get_required_channel(channel_id)
+        if not channel:
+            await query.answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
+            return
+        text, entities = build_owner_sub_delete_confirm_message(channel)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_delete_confirm_keyboard(channel_id),
+        )
+        return
+
+    if query.data.startswith("owner_sub_channel:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        channel_id = int(query.data.split(":", 1)[1])
+        channel = get_required_channel(channel_id)
+        if not channel:
+            await query.answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
+            return
+        text, entities = await build_owner_sub_channel_message(context, channel)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_channel_keyboard(channel),
+        )
+        return
+
+    if query.data == "owner_sub_reorder":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        channels = get_required_channels()
+        text, entities = build_owner_sub_reorder_message(channels)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_reorder_keyboard(channels),
+        )
+        return
+
+    if query.data.startswith("owner_sub_move_up:") or query.data.startswith("owner_sub_move_down:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        channel_id = int(query.data.split(":", 1)[1])
+        direction = -1 if query.data.startswith("owner_sub_move_up:") else 1
+        move_required_channel(channel_id, direction)
+        await query.answer("✅ تم تحديث الترتيب")
+        channels = get_required_channels()
+        text, entities = build_owner_sub_reorder_message(channels)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_reorder_keyboard(channels),
+        )
+        return
+
+    if query.data == "owner_sub_stats_all":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = await build_owner_sub_stats_all_message(context)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_stats_all_keyboard(),
+        )
+        return
+
+    if query.data == "owner_sub_noop":
+        await query.answer()
+        return
+
+    if query.data == "owner_users_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_owner_users_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_users_section_keyboard(),
+        )
+        return
+
+    if query.data in ("owner_users_search", "owner_users_view"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "admin_user_lookup"
+        await query.edit_message_text(
+            "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data == "owner_users_ban":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "admin_user_ban_lookup"
+        await query.edit_message_text(
+            "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) المراد حظره ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data == "owner_users_unban":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "admin_user_unban_lookup"
+        await query.edit_message_text(
+            "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) المراد فك حظره ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data.startswith("owner_users_banned:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        page = int(query.data.split(":", 1)[1])
+        banned_users = get_banned_bot_users()
+        text, entities = build_owner_users_banned_list_message(banned_users)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_users_banned_list_keyboard(banned_users, page),
+        )
+        return
+
+    if query.data == "owner_users_stats":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        stats = get_bot_users_stats()
+        text, entities = build_owner_users_stats_message(stats)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_users_stats_keyboard(),
+        )
+        return
+
+    if query.data.startswith("owner_users_profile_ban:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        target_id = int(query.data.split(":", 1)[1])
+        if target_id in OWNER_IDS:
+            await query.answer("⚠️ لا يمكن حظر مالك البوت.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "admin_user_ban_reason"
+        context.user_data["admin_ban_target_id"] = target_id
+        await query.edit_message_text(
+            "✍️ أرسل الآن سبب الحظر، أو أرسل - لتركه بدون سبب ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_users_profile:{target_id}", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data.startswith("owner_users_profile_unban:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        target_id = int(query.data.split(":", 1)[1])
+        unban_bot_user(target_id)
+        await query.answer("✅ تم فك الحظر بنجاح")
+        row = get_bot_user(target_id) or FSRow({"user_id": target_id})
+        text, entities = build_user_profile_message(row)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_user_profile_keyboard(row),
+        )
+        return
+
+    if query.data.startswith("owner_users_profile:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        target_id = int(query.data.split(":", 1)[1])
+        row = get_bot_user(target_id) or FSRow({"user_id": target_id})
+        text, entities = build_user_profile_message(row)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_user_profile_keyboard(row),
+        )
+        return
+
+    if query.data == "owner_users_noop":
+        await query.answer()
+        return
+
 
     if query.data == "points_settings":
         if not is_owner(query.from_user.id):
@@ -7428,12 +7924,239 @@ async def group_activation_handler(update: Update, context: ContextTypes.DEFAULT
     await message.reply_text(text=_bt, entities=_be)
 
 
+def _resolve_admin_user_query(raw: str):
+    """يحاول تحويل نص أرسله المالك (معرف رقمي أو يوزر) إلى بيانات مستخدم بوت
+    معروفة. يعيد (row, user_id):
+    - (FSRow, user_id) إن وُجد المستخدم في قاعدة بيانات البوت.
+    - (None, user_id) إن كان المدخل معرفًا رقميًا صحيحًا لكن المستخدم لم يبدأ
+      محادثة مع البوت بعد (يسمح هذا بحظر استباقي بالمعرف فقط).
+    - (None, None) إن تعذّر التعرف على المدخل إطلاقًا (يوزر غير معروف مثلاً).
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None, None
+    if raw.lstrip("-").isdigit():
+        user_id = int(raw)
+        return get_bot_user(user_id), user_id
+    row = find_bot_user_by_username(raw)
+    if row:
+        return row, row.get("user_id")
+    return None, None
+
+
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     awaiting = context.user_data.get("awaiting")
     awaiting_setting = context.user_data.get("awaiting_setting")
 
     if awaiting_setting:
         await handle_setting_input(update, context)
+        return
+
+    if awaiting == "admin_channel_add_username":
+        username = _normalize_channel_username(update.message.text)
+        if not username:
+            await update.message.reply_text("⚠️ أرسل يوزر صحيح للقناة (مثال: @channel أو رابط t.me/channel) ”")
+            return
+        context.user_data["admin_new_channel_username"] = username
+        context.user_data["awaiting"] = "admin_channel_add_target"
+        await update.message.reply_text(
+            "🎯 أرسل الآن عدد الأعضاء المستهدف لهذه القناة (رقم)، أو أرسل 0 إن كنت لا تريد تحديد هدف ”",
+        )
+        return
+
+    if awaiting == "admin_channel_add_target":
+        raw = (update.message.text or "").strip()
+        if not raw.isdigit():
+            await update.message.reply_text("⚠️ أرسل رقمًا صحيحًا (أو 0 لعدم تحديد هدف) ”")
+            return
+        target = int(raw)
+        username = context.user_data.get("admin_new_channel_username")
+        context.user_data.pop("awaiting", None)
+        if not username:
+            return
+        if target <= 0:
+            channel_id = create_required_channel(
+                username=username, target_count=None, auto_delete_on_target=False,
+                added_by=update.effective_user.id,
+            )
+            context.user_data.pop("admin_new_channel_username", None)
+            warning = await _check_bot_can_verify_channel(context, username)
+            channel = get_required_channel(channel_id)
+            text, entities = await build_owner_sub_channel_message(context, channel)
+            await update.message.reply_text(
+                f"✅ تمت إضافة القناة @{username} بنجاح." + (f"\n\n{warning}" if warning else ""),
+            )
+            await update.message.reply_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_channel_keyboard(channel),
+            )
+            return
+        context.user_data["admin_new_channel_target"] = target
+        await update.message.reply_text(
+            f"⚙️ عند وصول القناة إلى {target} عضو، ماذا تريد أن يحدث؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🔄 حذفها تلقائيًا من القائمة", callback_data="owner_sub_add_autodel_yes", style="primary",
+                )],
+                [InlineKeyboardButton(
+                    "♾️ إبقاؤها دائمًا بدون حذف", callback_data="owner_sub_add_autodel_no", style="primary",
+                )],
+            ]),
+        )
+        return
+
+    if awaiting == "admin_channel_edit_username":
+        channel_id = context.user_data.get("admin_channel_id")
+        channel = get_required_channel(channel_id) if channel_id else None
+        username = _normalize_channel_username(update.message.text)
+        if not username:
+            await update.message.reply_text("⚠️ أرسل يوزر صحيح للقناة (مثال: @channel أو رابط t.me/channel) ”")
+            return
+        context.user_data.pop("awaiting", None)
+        context.user_data.pop("admin_channel_id", None)
+        if not channel:
+            return
+        old_username = channel.get("username", "")
+        updates = {"username": username}
+        if channel.get("url") in (f"https://t.me/{old_username}", "", None):
+            updates["url"] = f"https://t.me/{username}"
+        update_required_channel(channel_id, **updates)
+        warning = await _check_bot_can_verify_channel(context, username)
+        channel = get_required_channel(channel_id)
+        text, entities = await build_owner_sub_channel_message(context, channel)
+        await update.message.reply_text(
+            f"✅ تم تعديل يوزر القناة إلى @{username} بنجاح." + (f"\n\n{warning}" if warning else ""),
+        )
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_channel_keyboard(channel),
+        )
+        return
+
+    if awaiting == "admin_channel_edit_link":
+        channel_id = context.user_data.get("admin_channel_id")
+        channel = get_required_channel(channel_id) if channel_id else None
+        url = (update.message.text or "").strip()
+        if not url:
+            await update.message.reply_text("⚠️ أرسل رابطًا صحيحًا ”")
+            return
+        if not url.startswith("http"):
+            url = f"https://{url}"
+        context.user_data.pop("awaiting", None)
+        context.user_data.pop("admin_channel_id", None)
+        if not channel:
+            return
+        update_required_channel(channel_id, url=url)
+        channel = get_required_channel(channel_id)
+        text, entities = await build_owner_sub_channel_message(context, channel)
+        await update.message.reply_text("✅ تم تعديل رابط القناة بنجاح.")
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_channel_keyboard(channel),
+        )
+        return
+
+    if awaiting == "admin_channel_edit_target":
+        channel_id = context.user_data.get("admin_channel_id")
+        channel = get_required_channel(channel_id) if channel_id else None
+        raw = (update.message.text or "").strip()
+        if not raw.isdigit():
+            await update.message.reply_text("⚠️ أرسل رقمًا صحيحًا (أو 0 لإلغاء الهدف) ”")
+            return
+        target = int(raw)
+        context.user_data.pop("awaiting", None)
+        context.user_data.pop("admin_channel_id", None)
+        if not channel:
+            return
+        update_required_channel(channel_id, target_count=(target if target > 0 else None))
+        channel = get_required_channel(channel_id)
+        text, entities = await build_owner_sub_channel_message(context, channel)
+        await update.message.reply_text(
+            "✅ تم إلغاء الهدف." if target <= 0 else f"✅ تم تحديد الهدف: {target} عضو.",
+        )
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_channel_keyboard(channel),
+        )
+        return
+
+    if awaiting == "admin_user_lookup":
+        row, target_id = _resolve_admin_user_query(update.message.text)
+        context.user_data.pop("awaiting", None)
+        if target_id is None:
+            await update.message.reply_text(
+                "⚠️ لم يتم التعرف على هذا المدخل. أرسل معرفًا رقميًا، أو يوزر مستخدم استخدم البوت من قبل ”",
+            )
+            return
+        if row is None:
+            await update.message.reply_text(
+                "⚠️ لا توجد بيانات لهذا المعرف — لم يبدأ هذا المستخدم محادثة مع البوت بعد.",
+            )
+            return
+        text, entities = build_user_profile_message(row)
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_user_profile_keyboard(row),
+        )
+        return
+
+    if awaiting == "admin_user_ban_lookup":
+        row, target_id = _resolve_admin_user_query(update.message.text)
+        context.user_data.pop("awaiting", None)
+        if target_id is None:
+            await update.message.reply_text(
+                "⚠️ لم يتم التعرف على هذا المدخل. أرسل معرفًا رقميًا، أو يوزر مستخدم استخدم البوت من قبل ”",
+            )
+            return
+        if target_id in OWNER_IDS:
+            await update.message.reply_text("⚠️ لا يمكن حظر مالك البوت.")
+            return
+        if row and row.get("banned"):
+            await update.message.reply_text("ℹ️ هذا المستخدم محظور بالفعل.")
+            return
+        context.user_data["awaiting"] = "admin_user_ban_reason"
+        context.user_data["admin_ban_target_id"] = target_id
+        await update.message.reply_text("✍️ أرسل الآن سبب الحظر، أو أرسل - لتركه بدون سبب ”")
+        return
+
+    if awaiting == "admin_user_ban_reason":
+        target_id = context.user_data.get("admin_ban_target_id")
+        context.user_data.pop("awaiting", None)
+        context.user_data.pop("admin_ban_target_id", None)
+        if not target_id:
+            return
+        reason = (update.message.text or "").strip()
+        if reason == "-":
+            reason = ""
+        ban_bot_user(target_id, reason, update.effective_user.id)
+        row = get_bot_user(target_id) or FSRow({"user_id": target_id, "banned": True, "ban_reason": reason})
+        text, entities = build_user_profile_message(row)
+        await update.message.reply_text("🚫 تم حظر المستخدم بنجاح.")
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_user_profile_keyboard(row),
+        )
+        return
+
+    if awaiting == "admin_user_unban_lookup":
+        row, target_id = _resolve_admin_user_query(update.message.text)
+        context.user_data.pop("awaiting", None)
+        if target_id is None:
+            await update.message.reply_text(
+                "⚠️ لم يتم التعرف على هذا المدخل. أرسل معرفًا رقميًا، أو يوزر مستخدم استخدم البوت من قبل ”",
+            )
+            return
+        if not row or not row.get("banned"):
+            await update.message.reply_text("ℹ️ هذا المستخدم غير محظور أصلاً.")
+            return
+        unban_bot_user(target_id)
+        row = get_bot_user(target_id)
+        text, entities = build_user_profile_message(row)
+        await update.message.reply_text("✅ تم فك حظر المستخدم بنجاح.")
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_user_profile_keyboard(row),
+        )
         return
 
     if awaiting == "contest_cliche":
@@ -8508,8 +9231,8 @@ def main():
     else:
         logger.info("JobQueue مفعّلة بنجاح.")
         app.job_queue.run_repeating(
-            check_required_channel_auto_switch, interval=600, first=30,
-            name="required_channel_auto_switch",
+            check_required_channels_targets, interval=600, first=30,
+            name="required_channels_targets",
         )
         app.job_queue.run_repeating(
             giveaway_autospin_countdown_tick, interval=600, first=60,
@@ -8522,10 +9245,10 @@ def main():
 
     app.add_error_handler(_global_error_handler)
 
-    # بوابة الحظر العامة: تعمل في مجموعة سابقة (group=-1) على كل الرسائل
-    # والأزرار، فتوقف أي مستخدم محظور قبل وصوله لأي معالج آخر في البوت.
-    app.add_handler(MessageHandler(filters.ALL, global_ban_gate), group=-1)
-    app.add_handler(CallbackQueryHandler(global_ban_gate), group=-1)
+    # بوابة الحظر العامة: تُسجَّل في مجموعة أولوية أعلى (group=-1) فتُنفَّذ
+    # قبل أي معالج آخر لأي تحديث، وتوقف تمريره تمامًا (ApplicationHandlerStop)
+    # إن كان مُرسِله محظورًا من قسم «إدارة المستخدمين».
+    app.add_handler(TypeHandler(Update, _ban_gate_handler), group=-1)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("getid", get_id_prompt))
