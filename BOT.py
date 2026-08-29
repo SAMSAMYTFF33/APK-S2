@@ -13,6 +13,89 @@ def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
 
 
+# ---------------------------------------------------------------------------
+# 👨‍💻 نظام إدارة المشرفين (Moderators) — مستقل عن OWNER_IDS الثابتة في الكود.
+# يسمح لمالك البوت بإضافة/حذف مشرفين ديناميكيًا من داخل البوت نفسه، وتحديد
+# صلاحيات دقيقة لكل مشرف على حدة (تُخزَّن في Firestore ضمن bot_moderators).
+# ---------------------------------------------------------------------------
+
+MODERATOR_PERMISSIONS = {
+    "add_admins": "➕ إضافة مشرفين جدد",
+    "delete_giveaways": "🎁 حذف السحوبات",
+    "delete_quick_roulette": "⚡ حذف السحب السريع",
+    "manage_users": "👥 إدارة المستخدمين (حظر/فك حظر)",
+    "manage_subscription": "📢 إدارة الاشتراك الإجباري",
+    "manage_points": "💰 إدارة قسم الربح",
+    "broadcast": "📣 الإذاعة",
+}
+
+
+def _moderator_doc_ref(user_id: int):
+    return fs_db().collection("bot_moderators").document(str(user_id))
+
+
+def get_moderator(user_id: int):
+    """يعيد بيانات المشرف (FSRow) أو None إن لم يكن مشرفًا مسجّلًا."""
+    doc = _moderator_doc_ref(user_id).get()
+    if not doc.exists:
+        return None
+    data = doc.to_dict() or {}
+    data.setdefault("user_id", user_id)
+    data.setdefault("permissions", {})
+    return FSRow(data)
+
+
+def is_moderator(user_id: int) -> bool:
+    """يتحقق مما إذا كان المستخدم مشرفًا مسجّلًا (بغض النظر عن صلاحياته)."""
+    return get_moderator(user_id) is not None
+
+
+def list_moderators() -> list:
+    """يعيد كل المشرفين المسجَّلين، الأحدث إضافةً أولًا."""
+    docs = fs_db().collection("bot_moderators").stream()
+    rows = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        data.setdefault("user_id", int(doc.id))
+        data.setdefault("permissions", {})
+        rows.append(FSRow(data))
+    rows.sort(key=lambda r: r.get("added_at") or "", reverse=True)
+    return rows
+
+
+def add_moderator(user_id: int, added_by: int, username: str = None, first_name: str = None) -> None:
+    """يضيف مشرفًا جديدًا بصلاحيات فارغة (كلها معطّلة افتراضيًا)."""
+    _moderator_doc_ref(user_id).set({
+        "user_id": user_id,
+        "username": username or "",
+        "first_name": first_name or "",
+        "added_by": added_by,
+        "added_at": datetime.now(timezone.utc).isoformat(),
+        "permissions": {key: False for key in MODERATOR_PERMISSIONS},
+    })
+
+
+def remove_moderator(user_id: int) -> None:
+    """يحذف مشرفًا نهائيًا مع كل صلاحياته."""
+    _moderator_doc_ref(user_id).delete()
+
+
+def set_moderator_permission(user_id: int, perm_key: str, value: bool) -> None:
+    """يفعّل/يعطّل صلاحية واحدة لدى مشرف معيّن."""
+    _moderator_doc_ref(user_id).set({"permissions": {perm_key: value}}, merge=True)
+
+
+def moderator_can(user_id: int, perm_key: str) -> bool:
+    """يتحقق مما إذا كان المستخدم يملك صلاحية معيّنة — مالك البوت يملك كل
+    الصلاحيات دائمًا، وأي مستخدم آخر يُفحص عبر سجل المشرفين في Firestore."""
+    if is_owner(user_id):
+        return True
+    row = get_moderator(user_id)
+    if not row:
+        return False
+    return bool(row.get("permissions", {}).get(perm_key))
+
+
 REQUIRED_CHANNEL_USERNAME = "w33lv"
 REQUIRED_CHANNEL_URL = "https://t.me/w33lv"
 REQUIRED_CHANNEL_BUTTON_TEXT = "VORTEX  𓏺"
@@ -56,6 +139,7 @@ import threading
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 from datetime import datetime, timezone, timedelta
 from types import SimpleNamespace
@@ -3151,6 +3235,197 @@ def _fs_row_or_none(doc) -> "FSRow | None":
     return FSRow(doc.to_dict())
 
 
+# ---------------------------------------------------------------------------
+# 📜 سجل العمليات الإدارية (Admin Operations Log) — يسجّل تلقائيًا كل عملية
+# إدارية حساسة تُنفَّذ من قسم المالك: حذف مسابقة/سحب/سحب سريع، إضافة/حذف
+# قناة، حظر/فك حظر مستخدم، إضافة/حذف مشرف، تغيير إعدادات، إرسال إذاعة.
+# ---------------------------------------------------------------------------
+
+ADMIN_LOG_LABELS = {
+    "delete_contest": "🗑️ حذف مسابقة",
+    "delete_giveaway": "🗑️ حذف سحب",
+    "delete_quick_roulette": "🗑️ حذف سحب سريع",
+    "add_channel": "➕ إضافة قناة",
+    "delete_channel": "🗑️ حذف قناة",
+    "ban_user": "🚫 حظر مستخدم",
+    "unban_user": "✅ فك حظر مستخدم",
+    "add_admin": "👨‍💻 إضافة مشرف",
+    "remove_admin": "🗑️ حذف مشرف",
+    "add_referrer": "🔗 إضافة صاحب رابط دعوة",
+    "remove_referrer": "🗑️ إزالة صاحب رابط دعوة",
+    "toggle_referrer": "🔁 تغيير حالة رابط دعوة",
+    "edit_referrer_percentage": "📊 تعديل نسبة إحالة",
+    "add_points_manual": "➕ إضافة نقاط لمستخدم",
+    "deduct_points_manual": "➖ خصم نقاط من مستخدم",
+    "change_settings": "⚙️ تغيير إعدادات",
+    "broadcast": "📣 إرسال إذاعة",
+}
+
+ADMIN_LOG_MAX_ENTRIES = 300
+ADMIN_LOG_PAGE_SIZE = 8
+
+
+def _admin_log_actor_label(actor_id: int, actor_name: str = None, actor_username: str = None) -> str:
+    if actor_username:
+        return f"@{actor_username}"
+    if actor_name:
+        return actor_name
+    return str(actor_id)
+
+
+def log_admin_action(action: str, actor_id: int, details: str = "",
+                      actor_name: str = None, actor_username: str = None) -> None:
+    """يسجّل عملية إدارية واحدة في Firestore (admin_logs)، ولا يوقف تنفيذ أي
+    عملية إن فشل التسجيل لأي سبب (شبكة/صلاحيات) — مجرد سجل مساعد وليس جوهريًا."""
+    try:
+        fs_db().collection("admin_logs").add({
+            "action": action,
+            "actor_id": actor_id,
+            "actor_label": _admin_log_actor_label(actor_id, actor_name, actor_username),
+            "details": details or "",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        logger.exception("تعذّر تسجيل العملية الإدارية: %s", action)
+
+
+def get_admin_logs(limit: int = ADMIN_LOG_MAX_ENTRIES) -> list:
+    """يعيد آخر العمليات الإدارية المسجَّلة، الأحدث أولًا."""
+    try:
+        docs = (
+            fs_db().collection("admin_logs")
+            .order_by("created_at", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        return [FSRow(d.to_dict()) for d in docs]
+    except Exception:
+        logger.exception("تعذّر جلب سجل العمليات الإدارية")
+        return []
+
+
+# ---------------------------------------------------------------------------
+# 🛠️ صيانة البوت (قسم المالك) — تفعيل/إيقاف وضع الصيانة، قياس سرعة استجابة
+# البوت وتصنيفها، تسجيل/عرض الأخطاء غير المتوقعة، وعرض حالة البوت العامة.
+# ---------------------------------------------------------------------------
+
+BOT_START_TIME = datetime.now(timezone.utc)
+
+BOT_ERRORS_MAX_ENTRIES = 200
+BOT_ERRORS_PAGE_SIZE = 5
+
+SPEED_THRESHOLDS_MS = [
+    (300, "🚀 سريع جدًا"),
+    (700, "⚡ سريع"),
+    (1500, "🙂 متوسط"),
+    (3000, "🐢 بطيء نسبيًا"),
+    (6000, "🐌 بطيء"),
+]
+SPEED_VERY_SLOW_LABEL = "🔴 بطيء جدًا"
+
+
+def is_maintenance_mode() -> bool:
+    """يتحقق مما إذا كان وضع الصيانة مفعّلًا حاليًا."""
+    return get_setting("maintenance_mode") == "1"
+
+
+def set_maintenance_mode(enabled: bool) -> None:
+    """يفعّل/يوقف وضع الصيانة."""
+    set_setting("maintenance_mode", "1" if enabled else "0")
+
+
+def classify_response_speed(elapsed_ms: float) -> str:
+    """يحوّل زمن استجابة بالمللي ثانية إلى وصف نصي مصنَّف (سريع جدًا ... بطيء جدًا)."""
+    for threshold, label in SPEED_THRESHOLDS_MS:
+        if elapsed_ms <= threshold:
+            return label
+    return SPEED_VERY_SLOW_LABEL
+
+
+def measure_bot_response_time() -> tuple:
+    """يقيس زمن استجابة قاعدة البيانات (Firestore) بعملية كتابة ثم قراءة فعليتين
+    (أفضل مؤشر متاح لسرعة استجابة البوت ككل)، ويحفظ آخر نتيجة لعرضها لاحقًا
+    ضمن «عرض حالة البوت» دون الحاجة لإعادة القياس في كل مرة."""
+    start = time.perf_counter()
+    ref = fs_db().collection("diagnostics").document("speed_probe")
+    ref.set({"ts": datetime.now(timezone.utc).isoformat()})
+    ref.get()
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    label = classify_response_speed(elapsed_ms)
+    set_setting("last_speed_ms", str(int(elapsed_ms)))
+    set_setting("last_speed_label", label)
+    set_setting("last_speed_checked_at", datetime.now(timezone.utc).isoformat())
+    return elapsed_ms, label
+
+
+def get_last_speed_check() -> dict:
+    """يعيد آخر نتيجة قياس سرعة محفوظة (إن وُجدت) دون إجراء قياس جديد."""
+    ms = get_setting("last_speed_ms")
+    label = get_setting("last_speed_label")
+    checked_at = get_setting("last_speed_checked_at")
+    if not ms:
+        return {}
+    return {"elapsed_ms": int(ms), "label": label, "checked_at": checked_at}
+
+
+def log_bot_error(error_text: str) -> None:
+    """يسجّل خطأ غير متوقع في Firestore (bot_errors) ليظهر لاحقًا ضمن «عرض
+    الأخطاء» في قسم صيانة البوت — لا يرفع أي استثناء إن فشل التسجيل نفسه."""
+    try:
+        fs_db().collection("bot_errors").add({
+            "error": (error_text or "")[:2000],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        logger.exception("تعذّر تسجيل الخطأ في Firestore")
+
+
+def get_bot_errors(limit: int = BOT_ERRORS_MAX_ENTRIES) -> list:
+    """يعيد آخر الأخطاء المسجَّلة، الأحدث أولًا."""
+    try:
+        docs = (
+            fs_db().collection("bot_errors")
+            .order_by("created_at", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        return [FSRow(d.to_dict()) for d in docs]
+    except Exception:
+        logger.exception("تعذّر جلب سجل الأخطاء")
+        return []
+
+
+def count_bot_errors_today() -> int:
+    """يعدّ عدد الأخطاء المسجَّلة خلال آخر 24 ساعة — يُستخدم في «عرض حالة البوت»."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    count = 0
+    for err in get_bot_errors():
+        created_raw = err.get("created_at")
+        try:
+            created = datetime.fromisoformat(created_raw)
+        except (ValueError, TypeError):
+            continue
+        if created >= cutoff:
+            count += 1
+    return count
+
+
+def format_bot_uptime() -> str:
+    """يُنسّق المدة منذ آخر إقلاع للبوت بصيغة بشرية مبسّطة (أيام/ساعات/دقائق)."""
+    delta = datetime.now(timezone.utc) - BOT_START_TIME
+    total_seconds = int(delta.total_seconds())
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} يوم")
+    if hours:
+        parts.append(f"{hours} ساعة")
+    parts.append(f"{minutes} دقيقة")
+    return " و".join(parts)
+
+
 def _fs_create_or_integrity_error(doc_ref, data: dict) -> None:
     """يحاكي سلوك INSERT الذي يفشل عند تكرار المفتاح الأساسي (sqlite3.IntegrityError)."""
     from google.api_core.exceptions import AlreadyExists
@@ -3355,6 +3630,8 @@ def get_top_channel_points(limit: int = 5):
         rc = rc_doc.to_dict()
         if rc.get("chat_type") != "channel":
             continue
+        if not rc.get("active", True):
+            continue
         candidates.append(FSRow({
             "chat_id": chat_id,
             "owner_id": data.get("owner_id"),
@@ -3524,6 +3801,139 @@ def get_bot_users_stats() -> dict:
     }
 
 
+def get_full_bot_statistics() -> dict:
+    """إحصائيات شاملة عن البوت: المستخدمون، القنوات، المجموعات — تُستخدم في
+    قسم «📊 إحصائيات البوت» لدى المالك. تعتمد على last_seen_at لتحديد النشاط
+    الفعلي (أي استخدام حقيقي للبوت: /start، مشاركة في سحب/مسابقة/روليت سريع)
+    وليس مجرد الضغط على شرط التحقق من الاشتراك."""
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=7)
+    month_start = now - timedelta(days=30)
+
+    total_users = 0
+    banned_users = 0
+    active_today = 0
+    active_week = 0
+    active_month = 0
+    active_ever = 0
+    new_today = 0
+    new_week = 0
+    new_month = 0
+
+    for doc in fs_db().collection("known_bot_users").stream():
+        data = doc.to_dict() or {}
+        total_users += 1
+        if data.get("banned"):
+            banned_users += 1
+
+        last_seen_raw = data.get("last_seen_at")
+        if last_seen_raw:
+            active_ever += 1
+            try:
+                last_seen = datetime.fromisoformat(last_seen_raw)
+                if last_seen >= today_start:
+                    active_today += 1
+                if last_seen >= week_start:
+                    active_week += 1
+                if last_seen >= month_start:
+                    active_month += 1
+            except (ValueError, TypeError):
+                pass
+
+        first_seen_raw = data.get("first_seen_at")
+        if first_seen_raw:
+            try:
+                first_seen = datetime.fromisoformat(first_seen_raw)
+                if first_seen >= today_start:
+                    new_today += 1
+                if first_seen >= week_start:
+                    new_week += 1
+                if first_seen >= month_start:
+                    new_month += 1
+            except (ValueError, TypeError):
+                pass
+
+    total_channels = 0
+    active_channels = 0
+    total_groups = 0
+    active_groups = 0
+    new_groups_today = 0
+    new_groups_week = 0
+    new_groups_month = 0
+
+    for chat in get_all_registered_chats():
+        chat_type = chat.get("chat_type")
+        is_active = chat.get("active", True)
+        if chat_type == "channel":
+            total_channels += 1
+            if is_active:
+                active_channels += 1
+        elif chat_type in ("group", "supergroup"):
+            total_groups += 1
+            if is_active:
+                active_groups += 1
+            registered_raw = chat.get("registered_at")
+            if registered_raw:
+                try:
+                    registered_at = datetime.fromisoformat(registered_raw)
+                    if registered_at >= today_start:
+                        new_groups_today += 1
+                    if registered_at >= week_start:
+                        new_groups_week += 1
+                    if registered_at >= month_start:
+                        new_groups_month += 1
+                except (ValueError, TypeError):
+                    pass
+
+    required_channels = get_required_channels()
+
+    return {
+        "users": {
+            "total": total_users,
+            "active_today": active_today,
+            "active_week": active_week,
+            "active_month": active_month,
+            "active_ever": active_ever,
+            "new_today": new_today,
+            "new_week": new_week,
+            "new_month": new_month,
+            "banned": banned_users,
+        },
+        "channels": {
+            "total": total_channels,
+            "active": active_channels,
+            "inactive": total_channels - active_channels,
+            "required_count": len(required_channels),
+            "required_members": None,
+        },
+        "groups": {
+            "total": total_groups,
+            "active": active_groups,
+            "inactive": total_groups - active_groups,
+            "new_today": new_groups_today,
+            "new_week": new_groups_week,
+            "new_month": new_groups_month,
+        },
+    }
+
+
+async def get_required_channels_total_members(context: ContextTypes.DEFAULT_TYPE) -> int:
+    """يجمع عدد الأعضاء الفعلي لكل قنوات الاشتراك الإجباري عبر Telegram API
+    (يُستدعى مباشرة عند فتح شاشة الإحصائيات، دون تخزينه لأنه قد يتغيّر باستمرار)."""
+    total = 0
+    for channel in get_required_channels():
+        username = channel.get("username")
+        if not username:
+            continue
+        try:
+            count = await context.bot.get_chat_member_count(f"@{username}")
+            total += count
+        except Exception:
+            continue
+    return total
+
+
 def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int) -> bool:
     """يمنح النقاط مرة واحدة عالميًا بعد نجاح مشاركة السحب والكابتشا."""
     client = fs_db()
@@ -3580,6 +3990,231 @@ def reverse_contest_owner_points(owner_id: int, amount: int) -> None:
         return
     owner_ref = fs_db().collection("owner_points").document(str(owner_id))
     _fs_bump_counter(owner_ref, "points", -amount, extra={"owner_id": owner_id})
+
+
+# ---------------------------------------------------------------------------
+# 💎 التحكم اليدوي بنقاط المستخدمين (قسم ربح — قسم المالك) — يمنح مالك البوت
+# صلاحية كاملة لإضافة أو خصم نقاط من رصيد أي مستخدم مباشرة، بمعزل عن أي آلية
+# احتساب تلقائية (سحوبات/مسابقات/إحالات)، مع تسجيل كل عملية في سجل العمليات
+# الإدارية للتتبّع والمراجعة.
+# ---------------------------------------------------------------------------
+
+def add_points_to_user(user_id: int, amount: int) -> int:
+    """يضيف نقاطًا يدويًا لرصيد مستخدم معيّن، ويعيد الرصيد الجديد."""
+    if amount <= 0:
+        return get_points(user_id)
+    owner_ref = fs_db().collection("owner_points").document(str(user_id))
+    _fs_bump_counter(owner_ref, "points", amount, extra={"owner_id": user_id})
+    return get_points(user_id)
+
+
+def deduct_points_from_user(user_id: int, amount: int) -> int:
+    """يخصم نقاطًا يدويًا من رصيد مستخدم معيّن (لا ينزل الرصيد تحت الصفر أبدًا
+    بفضل _fs_bump_counter)، ويعيد الرصيد الجديد."""
+    if amount <= 0:
+        return get_points(user_id)
+    owner_ref = fs_db().collection("owner_points").document(str(user_id))
+    _fs_bump_counter(owner_ref, "points", -amount, extra={"owner_id": user_id})
+    return get_points(user_id)
+
+
+def get_all_known_users_with_points(sort_by_points: bool = True) -> list:
+    """يجمع كل مستخدمي البوت المعروفين (known_bot_users) مع رصيد نقاطهم
+    الحالي (owner_points) وعدد إحالاتهم (referred_count إن كانوا من أصحاب
+    روابط الدعوة، وإلا 0) في قائمة واحدة موحّدة.
+
+    دالة عامة قابلة لإعادة الاستخدام في أي قسم يحتاج تصفّح المستخدمين مع
+    نقاطهم وإحالاتهم (قسم ربح، إدارة المستخدمين، أو أي قسم مستقبلي) —
+    تُستهلك دائمًا عبر build_users_points_browse_message/keyboard أدناه."""
+    client = fs_db()
+    rows = []
+    for doc in client.collection("known_bot_users").stream():
+        data = doc.to_dict() or {}
+        uid = data.get("user_id") or int(doc.id)
+        referral = get_referral(uid)
+        rows.append(FSRow({
+            "user_id": uid,
+            "username": data.get("username") or "",
+            "first_name": data.get("first_name") or "",
+            "points": get_points(uid),
+            "referred_count": int(referral.get("referred_count") or 0) if referral else 0,
+        }))
+    if sort_by_points:
+        rows.sort(key=lambda r: (r.get("points") or 0), reverse=True)
+    else:
+        rows.sort(key=lambda r: (r.get("first_name") or str(r.get("user_id"))))
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# 🔗 نظام روابط الإحالة (Referral Links) — يسمح لمالك البوت بمنح مستخدمين
+# محددين (وليس الجميع تلقائيًا) رابط دعوة خاص بهم، مع نسبة ربح مخصّصة لكل
+# مستخدم أو الاعتماد على نسبة افتراضية عامة. يُخزَّن كل ذلك في Firestore ضمن
+# bot_referrals (بيانات صاحب الرابط ونسبته وإحصائياته)، وreferral_signups
+# (سجل من دخل عبر كل رابط، لمنع احتساب نفس الشخص أكثر من مرة). نقاط الإحالة
+# تُضاف مباشرة إلى رصيد صاحب الرابط ضمن نفس نظام owner_points/قسم السحب
+# الحالي، فتخضع لنفس آلية طلب السحب الموجودة أصلًا.
+# ---------------------------------------------------------------------------
+
+REFERRAL_DEFAULT_PERCENTAGE = 50
+REFERRAL_DEFAULT_SIGNUP_POINTS = 5
+
+
+def _referral_doc_ref(user_id: int):
+    return fs_db().collection("bot_referrals").document(str(user_id))
+
+
+def get_referral_default_percentage() -> int:
+    raw = get_setting("referral_default_percentage")
+    try:
+        return max(0, min(100, int(raw)))
+    except (TypeError, ValueError):
+        return REFERRAL_DEFAULT_PERCENTAGE
+
+
+def set_referral_default_percentage(value: int) -> None:
+    set_setting("referral_default_percentage", str(max(0, min(100, int(value)))))
+
+
+def get_referral_signup_points() -> int:
+    raw = get_setting("referral_signup_points")
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return REFERRAL_DEFAULT_SIGNUP_POINTS
+
+
+def set_referral_signup_points(value: int) -> None:
+    set_setting("referral_signup_points", str(max(0, int(value))))
+
+
+def get_referral(user_id: int):
+    """يعيد بيانات صاحب رابط دعوة (FSRow) أو None إن لم يكن مصرّحًا له بالإحالة."""
+    doc = _referral_doc_ref(user_id).get()
+    if not doc.exists:
+        return None
+    data = doc.to_dict() or {}
+    data.setdefault("user_id", user_id)
+    data.setdefault("percentage", get_referral_default_percentage())
+    data.setdefault("active", True)
+    data.setdefault("referred_count", 0)
+    data.setdefault("points_earned", 0)
+    return FSRow(data)
+
+
+def is_referrer_active(user_id: int) -> bool:
+    row = get_referral(user_id)
+    return bool(row and row.get("active"))
+
+
+def list_referrers() -> list:
+    """يعيد كل أصحاب روابط الدعوة المسجَّلين، الأحدث إضافةً أولًا."""
+    docs = fs_db().collection("bot_referrals").stream()
+    rows = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        data.setdefault("user_id", int(doc.id))
+        data.setdefault("percentage", get_referral_default_percentage())
+        data.setdefault("active", True)
+        data.setdefault("referred_count", 0)
+        data.setdefault("points_earned", 0)
+        rows.append(FSRow(data))
+    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return rows
+
+
+def add_referrer(user_id: int, added_by: int, percentage: int = None,
+                  username: str = None, first_name: str = None) -> None:
+    """يمنح مستخدمًا صلاحية نشر رابط دعوة خاص به، بنسبة ربح مخصّصة أو الافتراضية."""
+    pct = get_referral_default_percentage() if percentage is None else max(0, min(100, int(percentage)))
+    _referral_doc_ref(user_id).set({
+        "user_id": user_id,
+        "username": username or "",
+        "first_name": first_name or "",
+        "percentage": pct,
+        "active": True,
+        "added_by": added_by,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "referred_count": 0,
+        "points_earned": 0,
+    }, merge=True)
+
+
+def remove_referrer(user_id: int) -> None:
+    """يحذف صلاحية الإحالة نهائيًا من مستخدم (الإحصائيات السابقة تبقى محفوظة
+    ضمن referral_signups، لكنه يفقد إمكانية نشر رابط جديد فورًا)."""
+    _referral_doc_ref(user_id).delete()
+
+
+def set_referrer_percentage(user_id: int, percentage: int) -> None:
+    _referral_doc_ref(user_id).set({"percentage": max(0, min(100, int(percentage)))}, merge=True)
+
+
+def set_referrer_active(user_id: int, active: bool) -> None:
+    _referral_doc_ref(user_id).set({"active": bool(active)}, merge=True)
+
+
+def _referral_signup_doc_ref(referred_user_id: int):
+    return fs_db().collection("referral_signups").document(str(referred_user_id))
+
+
+def process_referral_signup(referrer_id_raw: str, referred_user_id: int, referred_user=None) -> None:
+    """يُستدعى مرة واحدة فقط عند دخول مستخدم جديد حقيقي عبر رابط دعوة
+    (t.me/Bot?start=ref_<ID>) بعد اجتيازه فعليًا شرط الاشتراك الإجباري بالقنوات
+    (بوابة الحماية ضد الرشق/الوهمي مطبَّقة بالفعل قبل استدعاء هذه الدالة في
+    start() وcheck_sub_status_callback). يمنح صاحب الرابط نقاط الإحالة حسب
+    نسبته الخاصة، ويحدّث عدّاد إحالاته. لا يُحتسب نفس المدعو مرتين أبدًا."""
+    if not referrer_id_raw or not referrer_id_raw.isdigit():
+        return
+    referrer_id = int(referrer_id_raw)
+    if referrer_id == referred_user_id:
+        return
+    row = get_referral(referrer_id)
+    if not row or not row.get("active"):
+        return
+
+    from google.api_core.exceptions import AlreadyExists
+    signup_ref = _referral_signup_doc_ref(referred_user_id)
+    try:
+        signup_ref.create({
+            "referred_user_id": referred_user_id,
+            "referrer_id": referrer_id,
+            "joined_at": datetime.now(timezone.utc).isoformat(),
+        })
+    except AlreadyExists:
+        return  # هذا المستخدم مُحتسَب مسبقًا كإحالة — لا يُحتسب مرتين مهما أعاد فتح الرابط
+
+    base_points = get_referral_signup_points()
+    percentage = row.get("percentage", get_referral_default_percentage())
+    earned = int(round(base_points * percentage / 100)) if base_points > 0 else 0
+
+    referrer_ref = _referral_doc_ref(referrer_id)
+    _fs_bump_counter(referrer_ref, "referred_count", 1, extra={"user_id": referrer_id})
+    if earned > 0:
+        _fs_bump_counter(referrer_ref, "points_earned", earned, extra={"user_id": referrer_id})
+        owner_ref = fs_db().collection("owner_points").document(str(referrer_id))
+        _fs_bump_counter(owner_ref, "points", earned, extra={"owner_id": referrer_id})
+
+
+def get_referral_link(user_id: int) -> str:
+    return f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
+
+
+def get_referrals_overview_stats() -> dict:
+    """إحصائيات عامة لقسم المالك: عدد أصحاب الروابط، النشطين، إجمالي القادمين
+    عبر الإحالات، إجمالي النقاط الموزَّعة، وأفضل 5 بعدد الإحالات."""
+    rows = list_referrers()
+    active_count = sum(1 for r in rows if r.get("active"))
+    total_referred = sum(int(r.get("referred_count") or 0) for r in rows)
+    total_points = sum(int(r.get("points_earned") or 0) for r in rows)
+    top = sorted(rows, key=lambda r: int(r.get("referred_count") or 0), reverse=True)[:5]
+    return {
+        "total_referrers": len(rows),
+        "active_referrers": active_count,
+        "total_referred": total_referred,
+        "total_points": total_points,
+        "top": top,
+    }
 
 
 def create_withdraw_request(user_id: int, display_name: str, username: str,
@@ -3685,22 +4320,41 @@ def get_remind_win_state(user_id: int):
     return bool(doc.to_dict().get("enabled"))
 
 def save_registered_chat(chat_id: int, owner_id: int, chat_title: str, chat_type: str):
-    fs_db().collection("registered_chats").document(str(chat_id)).set({
+    ref = fs_db().collection("registered_chats").document(str(chat_id))
+    existing = ref.get()
+    registered_at = None
+    if existing.exists:
+        registered_at = (existing.to_dict() or {}).get("registered_at")
+    ref.set({
         "chat_id": chat_id,
         "owner_id": owner_id,
         "chat_title": chat_title,
         "chat_type": chat_type,
-        "registered_at": datetime.now(timezone.utc).isoformat(),
+        "registered_at": registered_at or datetime.now(timezone.utc).isoformat(),
+        "active": True,
+        "removed_at": None,
     })
 
 def remove_registered_chat(chat_id: int):
-    fs_db().collection("registered_chats").document(str(chat_id)).delete()
+    """حذف ناعم: يُبقي القناة/الجروب في السجل موسومًا كغير نشط (active=False)
+    بدل حذفه نهائيًا، حتى تبقى إحصائيات «القنوات/المجموعات غير النشطة» دقيقة."""
+    fs_db().collection("registered_chats").document(str(chat_id)).set({
+        "active": False,
+        "removed_at": datetime.now(timezone.utc).isoformat(),
+    }, merge=True)
 
 def get_registered_chats(owner_id: int):
     docs = fs_db().collection("registered_chats").where("owner_id", "==", owner_id).stream()
     rows = [FSRow(d.to_dict()) for d in docs]
+    rows = [r for r in rows if r.get("active", True)]
     rows.sort(key=lambda r: r.get("registered_at") or "", reverse=True)
     return rows
+
+def get_all_registered_chats() -> list:
+    """يعيد كل القنوات والمجموعات المسجَّلة عبر كل الملاك (نشطة وغير نشطة)،
+    تُستخدم لإحصائيات البوت العامة في قسم المالك."""
+    docs = fs_db().collection("registered_chats").stream()
+    return [FSRow(d.to_dict()) for d in docs]
 
 def entities_to_json(entities) -> str:
     if not entities:
@@ -4177,6 +4831,151 @@ def count_giveaway_new_rewarded(gw_code: str) -> int:
     return sum(1 for _ in docs)
 
 
+# ---------------------------------------------------------------------------
+# 🎁 إدارة السحوبات (قسم المالك) — عرض/حذف كل سحوبات البوت وإحصائياتها.
+# المالك هنا لا يختار الفائز ولا يعيد السحب، فقط يستعرض ويحذف.
+# ---------------------------------------------------------------------------
+
+def get_all_giveaways() -> list:
+    """يعيد كل سحوبات البوت (لكل المستخدمين، بجميع الحالات)، الأحدث أولًا."""
+    docs = fs_db().collection("giveaways").stream()
+    rows = [FSRow(d.to_dict()) for d in docs]
+    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return rows
+
+
+def delete_giveaway_admin(gw_code: str) -> None:
+    """يحذف سحبًا نهائيًا مع كل مشاركيه — يُستخدم من قسم إدارة السحوبات لدى المالك."""
+    for doc in fs_db().collection("giveaway_participants").where("gw_code", "==", gw_code).stream():
+        doc.reference.delete()
+    fs_db().collection("giveaways").document(gw_code).delete()
+
+
+def get_giveaways_statistics() -> dict:
+    """إحصائيات شاملة عن كل سحوبات البوت — تُستخدم في «📊 إحصائيات السحوبات»
+    ضمن قسم إدارة السحوبات لدى المالك. تعتمد على count_giveaway_participants
+    الموجودة مسبقًا لحساب عدد المشاركين لكل سحب."""
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=7)
+    month_start = now - timedelta(days=30)
+
+    giveaways = get_all_giveaways()
+    total = len(giveaways)
+    active = sum(1 for g in giveaways if g.get("status") in ("open", "paused"))
+    finished = sum(1 for g in giveaways if g.get("status") == "closed")
+
+    today_count = week_count = month_count = 0
+    for g in giveaways:
+        created_raw = g.get("created_at")
+        if not created_raw:
+            continue
+        try:
+            created = datetime.fromisoformat(created_raw)
+        except (ValueError, TypeError):
+            continue
+        if created >= today_start:
+            today_count += 1
+        if created >= week_start:
+            week_count += 1
+        if created >= month_start:
+            month_count += 1
+
+    participant_counts = [count_giveaway_participants(g["gw_code"]) for g in giveaways]
+    total_participants = sum(participant_counts)
+    avg_participants = (total_participants / total) if total else 0
+
+    top_gw_code = None
+    top_count = 0
+    for g, cnt in zip(giveaways, participant_counts):
+        if cnt > top_count:
+            top_count = cnt
+            top_gw_code = g["gw_code"]
+
+    return {
+        "total": total,
+        "active": active,
+        "finished": finished,
+        "total_participants": total_participants,
+        "avg_participants": avg_participants,
+        "today_count": today_count,
+        "week_count": week_count,
+        "month_count": month_count,
+        "top_gw_code": top_gw_code,
+        "top_count": top_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ⚡ السحب السريع (قسم المالك) — عرض/حذف كل عمليات الروليت السريع وإحصائياتها.
+# الخيارات التي أنشأها البحث المضمّن (Inline) ولم يتم اختيارها أبدًا لها
+# inline_message_id فارغ ولا تُعتبر سحوبات فعلية، فتُستبعد من كل ما يلي.
+# ---------------------------------------------------------------------------
+
+def get_all_quick_roulettes() -> list:
+    """يعيد كل عمليات السحب السريع المنشورة فعليًا (لها inline_message_id)، الأحدث أولًا."""
+    docs = fs_db().collection("roulettes").stream()
+    rows = []
+    for d in docs:
+        data = d.to_dict()
+        if data.get("inline_message_id"):
+            rows.append(FSRow(data))
+    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return rows
+
+
+def delete_quick_roulette_admin(roulette_id: int) -> None:
+    """يحذف عملية سحب سريع نهائيًا مع كل مشاركيها."""
+    for doc in fs_db().collection("counted_users").where("roulette_id", "==", roulette_id).stream():
+        doc.reference.delete()
+    fs_db().collection("roulettes").document(str(roulette_id)).delete()
+
+
+def get_quick_roulette_statistics() -> dict:
+    """إحصائيات شاملة عن كل عمليات السحب السريع — تعتمد على count_participants
+    الموجودة مسبقًا لحساب عدد المشاركين لكل عملية سحب."""
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=7)
+    month_start = now - timedelta(days=30)
+
+    roulettes = get_all_quick_roulettes()
+    total = len(roulettes)
+    active = sum(1 for r in roulettes if r.get("status") in ("open", "waiting_spin"))
+    finished = sum(1 for r in roulettes if r.get("status") == "closed")
+
+    today_count = week_count = month_count = 0
+    for r in roulettes:
+        created_raw = r.get("created_at")
+        if not created_raw:
+            continue
+        try:
+            created = datetime.fromisoformat(created_raw)
+        except (ValueError, TypeError):
+            continue
+        if created >= today_start:
+            today_count += 1
+        if created >= week_start:
+            week_count += 1
+        if created >= month_start:
+            month_count += 1
+
+    participant_counts = [count_participants(r["roulette_id"]) for r in roulettes]
+    total_participants = sum(participant_counts)
+    avg_participants = (total_participants / total) if total else 0
+
+    return {
+        "total": total,
+        "active": active,
+        "finished": finished,
+        "total_participants": total_participants,
+        "avg_participants": avg_participants,
+        "today_count": today_count,
+        "week_count": week_count,
+        "month_count": month_count,
+    }
+
+
 async def bot_chat_status_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     يلتقط لحظة إضافة/ترقية البوت كمشرف (أو إزالته) في قناة أو جروب،
@@ -4240,6 +5039,7 @@ def build_points_message(user_id: int) -> tuple:
             f"💎 عدد النقاط: {latest.get('points_amount', 0)}\n",
             f"📌 الحالة: {status_label} ”",
         ], "blockquote", None))
+    content.extend(build_referral_info_block(user_id))
     return build_text_with_emojis([(content, "bold", None)])
 
 
@@ -4409,9 +5209,178 @@ def build_owner_section_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💰 قسم ربح", callback_data="owner_points_section", style="primary")],
         [InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="owner_sub_section", style="primary")],
         [InlineKeyboardButton("👥 إدارة المستخدمين", callback_data="owner_users_section", style="primary")],
+        [InlineKeyboardButton("🎁 السحوبات", callback_data="owner_draws_section", style="primary")],
+        [InlineKeyboardButton("⚡ السحب السريع", callback_data="owner_quick_roulette_section", style="primary")],
+        [InlineKeyboardButton("📣 الإذاعة", callback_data="owner_broadcast_section", style="primary")],
+        [InlineKeyboardButton("👨‍💻 إدارة المشرفين", callback_data="owner_admins_section", style="primary")],
+        [InlineKeyboardButton("🔗 إدارة روابط الدعوة", callback_data="owner_referrals_section", style="primary")],
+        [InlineKeyboardButton("📊 إحصائيات البوت", callback_data="owner_stats_section", style="primary")],
+        [InlineKeyboardButton("📜 سجل العمليات", callback_data="owner_logs:1", style="primary")],
+        [InlineKeyboardButton("🛠️ صيانة البوت", callback_data="owner_maintenance_section", style="primary")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="back_main_menu", style="danger",
                               **emoji_kwargs("back_section_btn"))],
     ])
+
+
+def build_owner_logs_section_message(logs: list, page: int) -> tuple:
+    if not logs:
+        content = [
+            "📜 سجل العمليات",
+            "\n\n",
+            (["لا توجد أي عمليات إدارية مسجَّلة حتى الآن ”"], "blockquote", None),
+        ]
+        return build_text_with_emojis([(content, "bold", None)])
+
+    total_pages = max(1, (len(logs) + ADMIN_LOG_PAGE_SIZE - 1) // ADMIN_LOG_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * ADMIN_LOG_PAGE_SIZE
+    page_items = logs[start:start + ADMIN_LOG_PAGE_SIZE]
+
+    content = [f"📜 سجل العمليات ({len(logs)})", "\n\n"]
+    for entry in page_items:
+        label = ADMIN_LOG_LABELS.get(entry.get("action"), entry.get("action") or "—")
+        actor = entry.get("actor_label") or entry.get("actor_id")
+        when = _format_ts(entry.get("created_at"))
+        lines = [f"{label}\n", f"👤 بواسطة: {actor}\n", f"🕒 {when}"]
+        details = entry.get("details")
+        if details:
+            lines.append(f"\n📝 {details}")
+        content.append((lines, "blockquote", None))
+        content.append("\n\n")
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_logs_section_keyboard(logs: list, page: int) -> InlineKeyboardMarkup:
+    total_pages = max(1, (len(logs) + ADMIN_LOG_PAGE_SIZE - 1) // ADMIN_LOG_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+
+    rows = []
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"owner_logs:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="owner_logs_noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"owner_logs:{page + 1}"))
+        rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_owner_maintenance_section_message() -> tuple:
+    maintenance_on = is_maintenance_mode()
+    status_line = "🔴 مفعّل — البوت متوقف عن أي مستخدم عادي حاليًا" if maintenance_on else "🟢 غير مفعّل — البوت يعمل بشكل طبيعي"
+    speed = get_last_speed_check()
+    if speed:
+        speed_line = f"{speed['label']} ({speed['elapsed_ms']} مللي ثانية) — آخر فحص: {_format_ts(speed.get('checked_at'))}"
+    else:
+        speed_line = "لم يتم فحص السرعة بعد"
+    return build_text_with_emojis([
+        ([
+            "🛠️ صيانة البوت",
+            "\n\n",
+            ([
+                f"⚙️ وضع الصيانة: {status_line}\n",
+                f"📶 آخر قياس سرعة: {speed_line}",
+            ], "blockquote", None),
+            "\n\n",
+            (["اختر ما تريد فعله من الأزرار أدناه ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_maintenance_section_keyboard() -> InlineKeyboardMarkup:
+    maintenance_on = is_maintenance_mode()
+    toggle_text = "🟢 إيقاف وضع الصيانة" if maintenance_on else "🔴 تفعيل وضع الصيانة"
+    toggle_style = "success" if maintenance_on else "danger"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle_text, callback_data="owner_maintenance_toggle", style=toggle_style)],
+        [InlineKeyboardButton("📶 فحص سرعة الاستجابة", callback_data="owner_maintenance_speedtest", style="primary")],
+        [InlineKeyboardButton("⚠️ عرض الأخطاء", callback_data="owner_maintenance_errors:1", style="primary")],
+        [InlineKeyboardButton("📊 عرض حالة البوت", callback_data="owner_maintenance_status", style="primary")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_owner_maintenance_speedtest_message(elapsed_ms: float, label: str) -> tuple:
+    return build_text_with_emojis([
+        ([
+            "📶 نتيجة فحص سرعة الاستجابة",
+            "\n\n",
+            ([
+                f"⏱️ الزمن: {int(elapsed_ms)} مللي ثانية\n",
+                f"📊 التصنيف: {label}",
+            ], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_maintenance_status_message() -> tuple:
+    maintenance_on = is_maintenance_mode()
+    status_line = "🔴 مفعّل" if maintenance_on else "🟢 غير مفعّل"
+    speed = get_last_speed_check()
+    speed_line = f"{speed['label']} ({speed['elapsed_ms']} مللي ثانية)" if speed else "لم يُفحص بعد"
+    errors_24h = count_bot_errors_today()
+    uptime = format_bot_uptime()
+    return build_text_with_emojis([
+        ([
+            "📊 حالة البوت",
+            "\n\n",
+            ([
+                f"🛠️ وضع الصيانة: {status_line}\n",
+                f"📶 سرعة الاستجابة: {speed_line}\n",
+                f"⚠️ أخطاء آخر 24 ساعة: {errors_24h}\n",
+                f"⏳ مدة التشغيل منذ آخر إقلاع: {uptime}",
+            ], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_maintenance_errors_message(errors: list, page: int) -> tuple:
+    if not errors:
+        content = [
+            "⚠️ عرض الأخطاء",
+            "\n\n",
+            (["لا توجد أي أخطاء مسجَّلة حتى الآن ”"], "blockquote", None),
+        ]
+        return build_text_with_emojis([(content, "bold", None)])
+
+    total_pages = max(1, (len(errors) + BOT_ERRORS_PAGE_SIZE - 1) // BOT_ERRORS_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * BOT_ERRORS_PAGE_SIZE
+    page_items = errors[start:start + BOT_ERRORS_PAGE_SIZE]
+
+    content = [f"⚠️ عرض الأخطاء ({len(errors)})", "\n\n"]
+    for err in page_items:
+        when = _format_ts(err.get("created_at"))
+        text = err.get("error") or "—"
+        if len(text) > 300:
+            text = text[:300] + "…"
+        content.append((f"🕒 {when}\n{text}", "blockquote", None))
+        content.append("\n\n")
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_maintenance_errors_keyboard(errors: list, page: int) -> InlineKeyboardMarkup:
+    total_pages = max(1, (len(errors) + BOT_ERRORS_PAGE_SIZE - 1) // BOT_ERRORS_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+
+    rows = []
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"owner_maintenance_errors:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="owner_maintenance_noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"owner_maintenance_errors:{page + 1}"))
+        rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_maintenance_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_owner_points_section_message() -> tuple:
@@ -4431,11 +5400,145 @@ def build_owner_points_section_keyboard() -> InlineKeyboardMarkup:
             style="primary", **emoji_kwargs("gear"),
         )],
         [InlineKeyboardButton(
+            "💎 إدارة نقاط المستخدمين", callback_data="points_manage_section",
+            style="primary",
+        )],
+        [InlineKeyboardButton(
             "💳 سجلات طلبات السحب", callback_data="owner_withdraw_section",
             style="primary",
         )],
         [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
                               **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+# ---------------------------------------------------------------------------
+# 💎 واجهات التحكم اليدوي بنقاط المستخدمين (قسم ربح — قسم المالك)
+# ---------------------------------------------------------------------------
+
+def build_points_manage_section_message() -> tuple:
+    return build_text_with_emojis([
+        ([
+            "💎 إدارة نقاط المستخدمين",
+            "\n\n",
+            (["تحكّم كامل في رصيد أي مستخدم: إضافة نقاط، خصم نقاط، أو تصفّح "
+              "جميع المستخدمين مع أرصدتهم الحالية ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_points_manage_section_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ إضافة نقاط لمستخدم", callback_data="points_manage_add_lookup", style="success")],
+        [InlineKeyboardButton("➖ خصم نقاط من مستخدم", callback_data="points_manage_deduct_lookup", style="danger")],
+        [InlineKeyboardButton("📋 تصفح جميع المستخدمين", callback_data="points_browse:list:1", style="primary")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_points_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+USERS_BROWSE_PAGE_SIZE = 20
+
+
+def _users_browse_display_name(row: dict) -> str:
+    first_name = row.get("first_name")
+    username = row.get("username")
+    if first_name:
+        return first_name
+    if username:
+        return f"@{username}"
+    return str(row.get("user_id"))
+
+
+def build_users_points_browse_message(rows: list, page: int,
+                                       title: str = "📋 تصفح المستخدمين") -> tuple:
+    """رسالة عامة لقائمة تصفّح المستخدمين (20 لكل صفحة) — قابلة لإعادة
+    الاستخدام من أي قسم يحتاج عرض المستخدمين مع نقاطهم."""
+    total_pages = max(1, (len(rows) + USERS_BROWSE_PAGE_SIZE - 1) // USERS_BROWSE_PAGE_SIZE)
+    content = [title, "\n\n"]
+    if not rows:
+        content.append((["📭 لا يوجد أي مستخدم مسجّل حتى الآن ”"], "blockquote", None))
+    else:
+        content.append(([
+            f"👥 إجمالي المستخدمين: {len(rows)} — صفحة {page}/{total_pages}\n",
+            "💎 = عدد النقاط  •  📥 = عدد الإحالات\n",
+            "اضغط على أي مستخدم لعرض بياناته وتعديل نقاطه ”",
+        ], "blockquote", None))
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_users_points_browse_keyboard(rows: list, page: int, callback_prefix: str,
+                                        back_callback: str) -> InlineKeyboardMarkup:
+    """كيبورد عام لتصفّح المستخدمين (20 لكل صفحة) مع تنقّل أمام/خلف — قابل
+    لإعادة الاستخدام من أي قسم عبر تمرير callback_prefix مختلف لكل قسم
+    (مثال: 'points_browse') وback_callback الخاص بزر الرجوع لذلك القسم.
+    صيغة الأزرار الناتجة:
+      - {prefix}:list:<page>       تنقّل بين الصفحات
+      - {prefix}:pick:<uid>:<page> اختيار مستخدم من الصفحة الحالية
+      - {prefix}:noop              زر رقم الصفحة (بلا أي إجراء)"""
+    total_pages = max(1, (len(rows) + USERS_BROWSE_PAGE_SIZE - 1) // USERS_BROWSE_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * USERS_BROWSE_PAGE_SIZE
+    page_items = rows[start:start + USERS_BROWSE_PAGE_SIZE]
+
+    kb_rows = []
+    for row in page_items:
+        uid = row.get("user_id")
+        name = _users_browse_display_name(row)
+        pts = row.get("points", 0)
+        refs = row.get("referred_count", 0)
+        kb_rows.append([InlineKeyboardButton(
+            f"👤 {name} — 💎 {pts} — 📥 {refs}",
+            callback_data=f"{callback_prefix}:pick:{uid}:{page}",
+        )])
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"{callback_prefix}:list:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data=f"{callback_prefix}:noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"{callback_prefix}:list:{page + 1}"))
+        kb_rows.append(nav_row)
+
+    kb_rows.append([InlineKeyboardButton("🔙 رجوع", callback_data=back_callback, style="danger",
+                                         **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(kb_rows)
+
+
+def build_user_points_profile_message(row: dict) -> tuple:
+    name = _users_browse_display_name(row)
+    content = [
+        "👤 رصيد نقاط المستخدم",
+        "\n\n",
+        ([
+            f"🆔 المعرف: {row.get('user_id')}\n",
+            f"👤 الاسم: {name}\n",
+            f"🔗 اليوزر: @{row['username']}\n" if row.get("username") else "🔗 اليوزر: لا يوجد\n",
+            f"💎 الرصيد الحالي: {row.get('points', 0)} نقطة\n",
+            f"📥 عدد الإحالات: {row.get('referred_count', 0)}",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_user_points_profile_keyboard(user_id: int, back_page: int = 1,
+                                        browse_prefix: str = "points_browse") -> InlineKeyboardMarkup:
+    """كيبورد بروفايل نقاط مستخدم واحد. browse_prefix يحدّد إلى أي قائمة
+    تصفّح يعود زر «رجوع للقائمة» (نفس البادئة التي فُتح منها هذا البروفايل)،
+    ليعمل البروفايل بشكل صحيح بغضّ النظر عن القسم الذي استُدعي منه."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "➕ إضافة نقاط", callback_data=f"points_manual_add:{user_id}:{back_page}:{browse_prefix}",
+                style="success"),
+            InlineKeyboardButton(
+                "➖ خصم نقاط", callback_data=f"points_manual_deduct:{user_id}:{back_page}:{browse_prefix}",
+                style="danger"),
+        ],
+        [InlineKeyboardButton(
+            "🔙 رجوع للقائمة", callback_data=f"{browse_prefix}:list:{back_page}", style="danger",
+            **emoji_kwargs("back_section_btn"))],
     ])
 
 
@@ -4726,6 +5829,9 @@ def build_owner_users_section_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✅ فك حظر مستخدم", callback_data="owner_users_unban", style="success")],
         [InlineKeyboardButton("📋 قائمة المحظورين", callback_data="owner_users_banned:1", style="primary")],
         [InlineKeyboardButton("📊 إحصائيات المستخدمين", callback_data="owner_users_stats", style="primary")],
+        [InlineKeyboardButton(
+            "📋 تصفح المستخدمين (النقاط والإحالات)", callback_data="users_browse:list:1", style="primary",
+        )],
         [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
                               **emoji_kwargs("back_section_btn"))],
     ])
@@ -4833,6 +5939,871 @@ def build_owner_users_stats_message(stats: dict) -> tuple:
 def build_owner_users_stats_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+# ---------------------------------------------------------------------------
+# 👨‍💻 إدارة المشرفين (قسم المالك) — إضافة/حذف مشرفين وتحديد صلاحيات كل واحد
+# منهم بدقة (إضافة مشرفين، حذف سحوبات، حذف سحب سريع، إدارة مستخدمين، ...).
+# ---------------------------------------------------------------------------
+
+def _moderator_display_name(row: dict) -> str:
+    username = row.get("username")
+    first_name = row.get("first_name")
+    if first_name:
+        return first_name
+    if username:
+        return f"@{username}"
+    return str(row.get("user_id"))
+
+
+def build_owner_admins_section_message() -> tuple:
+    count = len(list_moderators())
+    return build_text_with_emojis([
+        ([
+            "👨‍💻 إدارة المشرفين — إدارة المالك",
+            "\n\n",
+            ([f"👥 عدد المشرفين الحاليين: {count}"], "blockquote", None),
+            "\n\n",
+            (["اختر ما تريد فعله من الأزرار أدناه ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_admins_section_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ إضافة مشرف", callback_data="owner_admins_add", style="success")],
+        [InlineKeyboardButton("📋 عرض المشرفين", callback_data="owner_admins_list:view:1", style="primary")],
+        [InlineKeyboardButton("🔐 صلاحيات مشرف", callback_data="owner_admins_list:perms:1", style="primary")],
+        [InlineKeyboardButton("🗑️ حذف مشرف", callback_data="owner_admins_list:remove:1", style="danger")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+ADMINS_PAGE_SIZE = 8
+
+
+def build_owner_admins_list_message(mods: list, mode: str) -> tuple:
+    title = {
+        "view": "📋 عرض المشرفين",
+        "perms": "🔐 اختر مشرفًا لتعديل صلاحياته",
+        "remove": "🗑️ اختر مشرفًا لحذفه",
+    }.get(mode, "📋 عرض المشرفين")
+    if not mods:
+        content = [title, "\n\n", (["لا يوجد أي مشرف مسجّل حاليًا ”"], "blockquote", None)]
+    else:
+        content = [f"{title} ({len(mods)})", "\n\n", (["اضغط على أي مشرف من القائمة ”"], "blockquote", None)]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_admins_list_keyboard(mods: list, mode: str, page: int) -> InlineKeyboardMarkup:
+    total_pages = max(1, (len(mods) + ADMINS_PAGE_SIZE - 1) // ADMINS_PAGE_SIZE)
+    start = (page - 1) * ADMINS_PAGE_SIZE
+    page_items = mods[start:start + ADMINS_PAGE_SIZE]
+
+    rows = []
+    for row in page_items:
+        uid = row.get("user_id")
+        name = _moderator_display_name(row)
+        rows.append([InlineKeyboardButton(f"👤 {name}", callback_data=f"owner_admins_pick:{mode}:{uid}")])
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"owner_admins_list:{mode}:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="owner_admins_noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"owner_admins_list:{mode}:{page + 1}"))
+        rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_admins_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_moderator_profile_message(row: dict) -> tuple:
+    perms = row.get("permissions", {})
+    enabled = [label for key, label in MODERATOR_PERMISSIONS.items() if perms.get(key)]
+    perms_line = "، ".join(enabled) if enabled else "لا يوجد أي صلاحية مفعّلة"
+    content = [
+        "👤 بيانات المشرف",
+        "\n\n",
+        ([
+            f"🆔 المعرف: {row.get('user_id')}\n",
+            f"🔗 اليوزر: @{row['username']}\n" if row.get("username") else "🔗 اليوزر: لا يوجد\n",
+            f"🕐 تاريخ الإضافة: {_format_ts(row.get('added_at'))}\n",
+            f"🔐 الصلاحيات المفعّلة: {perms_line}",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_moderator_profile_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔐 تعديل الصلاحيات", callback_data=f"owner_admins_pick:perms:{user_id}",
+                               style="primary")],
+        [InlineKeyboardButton("🗑️ حذف هذا المشرف", callback_data=f"owner_admins_pick:remove:{user_id}",
+                               style="danger")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_admins_list:view:1", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_moderator_perms_message(row: dict) -> tuple:
+    name = _moderator_display_name(row)
+    content = [
+        "🔐 تعديل صلاحيات المشرف",
+        "\n\n",
+        ([f"👤 المشرف: {name}\n", "اضغط على أي صلاحية لتفعيلها أو تعطيلها ”"], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_moderator_perms_keyboard(row: dict) -> InlineKeyboardMarkup:
+    perms = row.get("permissions", {})
+    user_id = row.get("user_id")
+    rows = []
+    for key, label in MODERATOR_PERMISSIONS.items():
+        state_icon = "✅" if perms.get(key) else "❌"
+        rows.append([InlineKeyboardButton(
+            f"{state_icon} {label}", callback_data=f"owner_admins_toggle:{user_id}:{key}",
+        )])
+    rows.append([InlineKeyboardButton(
+        "🔙 رجوع", callback_data=f"owner_admins_pick:view:{user_id}", style="danger",
+        **emoji_kwargs("back_section_btn"),
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_moderator_delete_confirm_message(row: dict) -> tuple:
+    name = _moderator_display_name(row)
+    content = [
+        "🗑️ تأكيد حذف مشرف",
+        "\n\n",
+        ([f"هل أنت متأكد أنك تريد حذف {name} من قائمة المشرفين؟ ”"], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_moderator_delete_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ تأكيد الحذف", callback_data=f"owner_admins_remove_do:{user_id}",
+                               style="danger")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_admins_pick:view:{user_id}", style="primary",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+# ---------------------------------------------------------------------------
+# 🔗 واجهات إدارة روابط الدعوة (قسم المالك)
+# ---------------------------------------------------------------------------
+
+def _referrer_display_name(row: dict) -> str:
+    username = row.get("username")
+    first_name = row.get("first_name")
+    if first_name:
+        return first_name
+    if username:
+        return f"@{username}"
+    return str(row.get("user_id"))
+
+
+def build_owner_referrals_section_message() -> tuple:
+    stats = get_referrals_overview_stats()
+    return build_text_with_emojis([
+        ([
+            "🔗 إدارة روابط الدعوة — إدارة المالك",
+            "\n\n",
+            ([
+                f"👥 عدد أصحاب الروابط: {stats['total_referrers']}\n",
+                f"🟢 الروابط النشطة: {stats['active_referrers']}\n",
+                f"📥 إجمالي القادمين عبر الإحالة: {stats['total_referred']}\n",
+                f"💎 إجمالي نقاط الإحالة الموزَّعة: {stats['total_points']}\n",
+                f"⚙️ النسبة الافتراضية العامة: {get_referral_default_percentage()}%",
+            ], "blockquote", None),
+            "\n\n",
+            (["اختر ما تريد فعله من الأزرار أدناه ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_referrals_section_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ إضافة مستخدم", callback_data="owner_referrals_add", style="success")],
+        [InlineKeyboardButton("🗑️ إزالة مستخدم", callback_data="owner_referrals_list:remove:1", style="danger")],
+        [InlineKeyboardButton("📋 أصحاب الروابط", callback_data="owner_referrals_list:view:1", style="primary")],
+        [InlineKeyboardButton("🔍 البحث عن مستخدم", callback_data="owner_referrals_search", style="primary")],
+        [InlineKeyboardButton("📊 إحصائيات الإحالة", callback_data="owner_referrals_stats", style="primary")],
+        [InlineKeyboardButton("⚙️ إعدادات النسبة", callback_data="owner_referrals_settings", style="primary")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+REFERRALS_PAGE_SIZE = 8
+
+
+def build_owner_referrals_list_message(rows: list, mode: str) -> tuple:
+    title = {
+        "view": "📋 أصحاب الروابط",
+        "remove": "🗑️ اختر مستخدمًا لإزالة صلاحية الإحالة عنه",
+    }.get(mode, "📋 أصحاب الروابط")
+    if not rows:
+        content = [title, "\n\n", (["لا يوجد أي صاحب رابط دعوة مسجّل حاليًا ”"], "blockquote", None)]
+    else:
+        content = [f"{title} ({len(rows)})", "\n\n", (["اضغط على أي مستخدم من القائمة ”"], "blockquote", None)]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_referrals_list_keyboard(rows: list, mode: str, page: int) -> InlineKeyboardMarkup:
+    total_pages = max(1, (len(rows) + REFERRALS_PAGE_SIZE - 1) // REFERRALS_PAGE_SIZE)
+    start = (page - 1) * REFERRALS_PAGE_SIZE
+    page_items = rows[start:start + REFERRALS_PAGE_SIZE]
+
+    kb_rows = []
+    for row in page_items:
+        uid = row.get("user_id")
+        name = _referrer_display_name(row)
+        status_icon = "🟢" if row.get("active") else "🔴"
+        kb_rows.append([InlineKeyboardButton(
+            f"{status_icon} {name} — {row.get('percentage')}%",
+            callback_data=f"owner_referrals_pick:{mode}:{uid}",
+        )])
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"owner_referrals_list:{mode}:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="owner_referrals_noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"owner_referrals_list:{mode}:{page + 1}"))
+        kb_rows.append(nav_row)
+
+    kb_rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_section", style="danger",
+                                         **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(kb_rows)
+
+
+def build_referrer_profile_message(row: dict) -> tuple:
+    name = _referrer_display_name(row)
+    status = "🟢 مفعّل" if row.get("active") else "🔴 معطّل"
+    content = [
+        "👤 بيانات صاحب رابط الدعوة",
+        "\n\n",
+        ([
+            f"🆔 المعرف: {row.get('user_id')}\n",
+            f"👤 الاسم: {name}\n",
+            f"🔗 اليوزر: @{row['username']}\n" if row.get("username") else "🔗 اليوزر: لا يوجد\n",
+            f"📊 نسبة الإحالة: {row.get('percentage')}%\n",
+            f"📥 عدد الإحالات: {row.get('referred_count', 0)}\n",
+            f"💎 أرباح الإحالة: {row.get('points_earned', 0)} نقطة\n",
+            f"📌 حالة الرابط: {status}\n",
+            f"🕐 تاريخ الإنشاء: {_format_ts(row.get('created_at'))}\n",
+            f"🔗 الرابط: {get_referral_link(row.get('user_id'))}",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_referrer_profile_keyboard(row: dict) -> InlineKeyboardMarkup:
+    user_id = row.get("user_id")
+    toggle_text = "🔴 تعطيل" if row.get("active") else "🟢 تفعيل"
+    toggle_style = "danger" if row.get("active") else "success"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle_text, callback_data=f"owner_referrals_toggle:{user_id}", style=toggle_style)],
+        [InlineKeyboardButton("📊 تعديل النسبة", callback_data=f"owner_referrals_edit_pct:{user_id}",
+                              style="primary")],
+        [InlineKeyboardButton("🗑️ إزالة هذا المستخدم", callback_data=f"owner_referrals_pick:remove:{user_id}",
+                              style="danger")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_list:view:1", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_referrer_delete_confirm_message(row: dict) -> tuple:
+    name = _referrer_display_name(row)
+    content = [
+        "🗑️ تأكيد إزالة صاحب رابط دعوة",
+        "\n\n",
+        ([f"هل أنت متأكد أنك تريد إزالة صلاحية الإحالة عن {name}؟\n",
+          "📌 إحصائياته السابقة تبقى محفوظة، لكن رابطه سيتوقف عن العمل فورًا ”"], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_referrer_delete_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ تأكيد الإزالة", callback_data=f"owner_referrals_remove_do:{user_id}",
+                              style="danger")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_referrals_pick:view:{user_id}", style="primary",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_owner_referrals_stats_message() -> tuple:
+    stats = get_referrals_overview_stats()
+    content = [
+        "📊 إحصائيات نظام الإحالة",
+        "\n\n",
+        ([
+            f"👥 عدد أصحاب الروابط: {stats['total_referrers']}\n",
+            f"🟢 الروابط النشطة: {stats['active_referrers']}\n",
+            f"📥 إجمالي القادمين عبر الإحالة: {stats['total_referred']}\n",
+            f"💎 إجمالي نقاط الإحالة الموزَّعة: {stats['total_points']}",
+        ], "blockquote", None),
+        "\n\n",
+    ]
+    if not stats["top"]:
+        content.append((["📭 لا توجد أي إحالات مسجّلة حتى الآن ”"], "blockquote", None))
+    else:
+        content.append((["🏆 أفضل 5 بعدد الإحالات ”"], "blockquote", None))
+        content.append("\n\n")
+        medals = ["🥇", "🥈", "🥉", "🏅", "🎖️"]
+        for index, row in enumerate(stats["top"]):
+            name = _referrer_display_name(row)
+            content.append(([
+                f"{medals[index]} {index + 1}. {name}\n",
+                f"📥 الإحالات: {row.get('referred_count', 0)} — 💎 النقاط: {row.get('points_earned', 0)}\n",
+                "━━━━━━━━━━━━\n",
+            ], "blockquote", None))
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_referrals_stats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 تحديث", callback_data="owner_referrals_stats", style="primary")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_owner_referrals_settings_message() -> tuple:
+    return build_text_with_emojis([
+        ([
+            "⚙️ إعدادات نسبة الإحالة",
+            "\n\n",
+            ([
+                f"📊 النسبة الافتراضية العامة: {get_referral_default_percentage()}%\n",
+                f"💎 نقاط كل إحالة جديدة (عند نسبة 100%): {get_referral_signup_points()} نقطة",
+            ], "blockquote", None),
+            "\n\n",
+            (["📌 هذه النسبة تُطبَّق تلقائيًا على أي مستخدم جديد يُضاف للنظام دون تحديد نسبة خاصة به ”"],
+             "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_referrals_settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 تعديل النسبة الافتراضية", callback_data="owner_referrals_edit_default_pct",
+                              style="primary")],
+        [InlineKeyboardButton("💎 تعديل نقاط الإحالة", callback_data="owner_referrals_edit_signup_points",
+                              style="primary")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_referral_info_block(user_id: int) -> list:
+    """يبني مقطعًا نصيًا (blockquote) يعرض رابط الدعوة الخاص بالمستخدم وبياناته
+    إن كان مصرَّحًا له بالإحالة ورابطه مفعّل حاليًا. يُستخدم داخل قسم ربح
+    (build_points_message) — يعود بقائمة فارغة إن لم يكن مؤهّلًا فلا يظهر شيء."""
+    row = get_referral(user_id)
+    if not row or not row.get("active"):
+        return []
+    return [
+        "\n\n",
+        ([
+            "🔗 رابط دعوتك الخاص\n",
+            f"{get_referral_link(user_id)}\n",
+            f"📊 نسبتك: {row.get('percentage')}%\n",
+            f"📥 عدد الإحالات: {row.get('referred_count', 0)}\n",
+            f"💎 أرباح الإحالة: {row.get('points_earned', 0)} نقطة ”",
+        ], "blockquote", None),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 📊 إحصائيات البوت (قسم المالك) — نظرة شاملة على المستخدمين والقنوات
+# والمجموعات، بالاعتماد على الاستخدام الفعلي للبوت (last_seen_at) لا مجرد
+# محاولة الاشتراك في شرط التحقق.
+# ---------------------------------------------------------------------------
+
+def build_owner_stats_message(stats: dict, required_members) -> tuple:
+    u = stats["users"]
+    c = stats["channels"]
+    g = stats["groups"]
+    members_line = f"{required_members}" if required_members is not None else "—"
+
+    content = [
+        "📊 إحصائيات البوت",
+        "\n\n",
+        (["👥 المستخدمون\n"], "bold", None),
+        ([
+            f"📌 إجمالي المستخدمين منذ إنشاء البوت: {u['total']}\n",
+            f"🟢 النشطون اليوم: {u['active_today']}\n",
+            f"🟢 النشطون آخر أسبوع: {u['active_week']}\n",
+            f"🟢 النشطون آخر شهر: {u['active_month']}\n",
+            f"🟢 النشطون منذ بداية البوت: {u['active_ever']}\n",
+            f"🆕 المستخدمون الجدد اليوم: {u['new_today']}\n",
+            f"🆕 المستخدمون الجدد هذا الأسبوع: {u['new_week']}\n",
+            f"🆕 المستخدمون الجدد هذا الشهر: {u['new_month']}\n",
+            f"🚫 المحظورون: {u['banned']}",
+        ], "blockquote", None),
+        "\n\n",
+        (["📢 القنوات\n"], "bold", None),
+        ([
+            f"📌 إجمالي القنوات: {c['total']}\n",
+            f"🟢 القنوات النشطة: {c['active']}\n",
+            f"🔴 القنوات غير النشطة: {c['inactive']}\n",
+            f"📡 قنوات الاشتراك الإجباري: {c['required_count']}\n",
+            f"👥 إجمالي أعضاء قنوات الاشتراك: {members_line}",
+        ], "blockquote", None),
+        "\n\n",
+        (["👥 المجموعات\n"], "bold", None),
+        ([
+            f"📌 إجمالي المجموعات: {g['total']}\n",
+            f"🟢 المجموعات النشطة: {g['active']}\n",
+            f"🔴 المجموعات غير النشطة: {g['inactive']}\n",
+            f"🆕 مجموعات جديدة اليوم/الأسبوع/الشهر: {g['new_today']} / {g['new_week']} / {g['new_month']}",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_owner_stats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 تحديث", callback_data="owner_stats_section", style="primary")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+# ---------------------------------------------------------------------------
+# 🎁 السحوبات (قسم المالك) — عرض/حذف كل سحوبات البوت وإحصائياتها فقط
+# (بدون اختيار فائز أو إعادة سحب، هذه صلاحية صاحب كل سحب وحده).
+# ---------------------------------------------------------------------------
+
+ADMGW_FILTER_LABELS = {
+    "all": "📋 كل السحوبات",
+    "active": "🟢 السحوبات النشطة",
+    "closed": "⏰ السحوبات المنتهية",
+    "delete": "🗑️ حذف أي سحب",
+}
+
+
+def _admgw_filter_giveaways(giveaways: list, filt: str) -> list:
+    if filt == "active":
+        return [g for g in giveaways if g["status"] in ("open", "paused")]
+    if filt == "closed":
+        return [g for g in giveaways if g["status"] == "closed"]
+    return list(giveaways)
+
+
+def build_owner_draws_section_message() -> tuple:
+    return build_text_with_emojis([
+        ([
+            "🎁 السحوبات — إدارة المالك",
+            "\n\n",
+            (["اختر ما تريد فعله من الأزرار أدناه ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_draws_section_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 عرض السحوبات", callback_data="admgw_list:all:1", style="primary")],
+        [InlineKeyboardButton("🟢 السحوبات النشطة", callback_data="admgw_list:active:1", style="success")],
+        [InlineKeyboardButton("⏰ السحوبات المنتهية", callback_data="admgw_list:closed:1", style="primary")],
+        [InlineKeyboardButton("🗑️ حذف أي سحب", callback_data="admgw_list:delete:1", style="danger")],
+        [InlineKeyboardButton("📊 إحصائيات السحوبات", callback_data="admgw_stats", style="primary")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_admgw_list_message(filt: str, page: int, total_pages: int, count: int) -> tuple:
+    label = ADMGW_FILTER_LABELS.get(filt, "📋 كل السحوبات")
+    if not count:
+        content = [label, "\n\n", (["لا توجد أي سحوبات هنا حاليًا ”"], "blockquote", None)]
+        return build_text_with_emojis([(content, "bold", None)])
+    hint = "اضغط على أي سحب لحذفه نهائيًا ”" if filt == "delete" else "اضغط على أي سحب لعرض تفاصيله ”"
+    content = [
+        f"{label} ({count})",
+        "\n\n",
+        ([f"صفحة {page}/{total_pages}", "\n", hint], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_admgw_list_keyboard(giveaways: list, filt: str, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    start = (page - 1) * GW_LIST_PAGE_SIZE
+    page_items = giveaways[start:start + GW_LIST_PAGE_SIZE]
+
+    rows = []
+    for offset, gw in enumerate(page_items):
+        index = start + offset + 1
+        dot = "🟢" if gw["status"] in ("open", "paused") else "🔴"
+        if filt == "delete":
+            rows.append([InlineKeyboardButton(
+                f"🗑️ {dot} #{index}", callback_data=f"admgw_delc:{gw['gw_code']}:{filt}:{page}",
+            )])
+        else:
+            rows.append([InlineKeyboardButton(
+                f"{dot} #{index}", callback_data=f"admgw_detail:{gw['gw_code']}:{filt}:{page}",
+            )])
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"admgw_list:{filt}:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="admgw_noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"admgw_list:{filt}:{page + 1}"))
+        rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_draws_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_admgw_detail_message(giveaway, index: int, channel_title: str, participants_total: int) -> tuple:
+    status_line = "🟢 نشط" if giveaway["status"] in ("open", "paused") else "🔴 منتهي"
+    parts = [
+        ([
+            f"🎁 السحب #{index}",
+            "\n\n",
+            f"🆔 الكود : {giveaway['gw_code']}\n",
+            f"👑 صاحب السحب : {giveaway['owner_id']}\n",
+            f"👥 عدد المشاركين : {participants_total}\n",
+            f"🏆 عدد الفائزين : {giveaway['winners_count']}\n",
+            f"📊 الحالة : {status_line}\n",
+            f"📢 القناة : {channel_title}\n",
+            f"🕐 تاريخ الإنشاء : {_format_ts(giveaway.get('created_at'))}",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_admgw_detail_keyboard(gw_code: str, filt: str, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ حذف هذا السحب", callback_data=f"admgw_delc:{gw_code}:{filt}:{page}",
+                              style="danger")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"admgw_list:{filt}:{page}", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_admgw_delete_confirm_message(giveaway) -> tuple:
+    content = [
+        "🗑️ تأكيد حذف السحب",
+        "\n\n",
+        ([f"هل أنت متأكد من حذف السحب {giveaway['gw_code']} نهائيًا؟ سيتم حذف كل بيانات مشاركيه أيضًا ”"],
+         "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_admgw_delete_confirm_keyboard(gw_code: str, filt: str, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("❌ إلغاء", callback_data=f"admgw_detail:{gw_code}:{filt}:{page}", style="primary"),
+            InlineKeyboardButton("🗑️ تأكيد الحذف", callback_data=f"admgw_delete_do:{gw_code}:{filt}:{page}",
+                                 style="danger"),
+        ],
+    ])
+
+
+def build_admgw_stats_message(stats: dict) -> tuple:
+    top_line = (
+        f"🔥 أكثر سحب مشاركةً : {stats['top_gw_code']} ({stats['top_count']} مشارك)"
+        if stats["top_gw_code"] else "🔥 أكثر سحب مشاركةً : لا يوجد"
+    )
+    content = [
+        "📊 إحصائيات السحوبات",
+        "\n\n",
+        ([
+            f"🎁 إجمالي السحوبات : {stats['total']}\n",
+            f"🟢 السحوبات النشطة : {stats['active']}\n",
+            f"🔴 السحوبات المنتهية : {stats['finished']}\n",
+            f"👥 إجمالي المشاركين : {stats['total_participants']}\n",
+            f"📈 متوسط المشاركين لكل سحب : {stats['avg_participants']:.1f}\n",
+            f"🆕 سحوبات اليوم : {stats['today_count']}\n",
+            f"📆 سحوبات آخر 7 أيام : {stats['week_count']}\n",
+            f"🗓️ سحوبات آخر 30 يوم : {stats['month_count']}\n",
+            top_line,
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_admgw_stats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_draws_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+# ---------------------------------------------------------------------------
+# ⚡ السحب السريع (قسم المالك) — عرض/حذف عمليات الروليت السريع وإحصائياتها فقط.
+# ---------------------------------------------------------------------------
+
+ADMRR_FILTER_LABELS = {
+    "all": "📋 كل عمليات السحب السريع",
+    "active": "🟢 السحوبات السريعة النشطة",
+    "closed": "⏰ السحوبات السريعة المنتهية",
+    "delete": "🗑️ حذف أي سحب سريع",
+}
+
+
+def _admrr_filter_roulettes(roulettes: list, filt: str) -> list:
+    if filt == "active":
+        return [r for r in roulettes if r["status"] in ("open", "waiting_spin")]
+    if filt == "closed":
+        return [r for r in roulettes if r["status"] == "closed"]
+    return list(roulettes)
+
+
+def build_owner_quick_roulette_section_message() -> tuple:
+    return build_text_with_emojis([
+        ([
+            "⚡ السحب السريع — إدارة المالك",
+            "\n\n",
+            (["اختر ما تريد فعله من الأزرار أدناه ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_quick_roulette_section_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 عرض عمليات السحب السريع", callback_data="admrr_list:all:1", style="primary")],
+        [InlineKeyboardButton("🟢 النشطة", callback_data="admrr_list:active:1", style="success")],
+        [InlineKeyboardButton("⏰ المنتهية", callback_data="admrr_list:closed:1", style="primary")],
+        [InlineKeyboardButton("🗑️ حذف أي سحب سريع", callback_data="admrr_list:delete:1", style="danger")],
+        [InlineKeyboardButton("📊 إحصائيات السحب السريع", callback_data="admrr_stats", style="primary")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_admrr_list_message(filt: str, page: int, total_pages: int, count: int) -> tuple:
+    label = ADMRR_FILTER_LABELS.get(filt, "📋 كل عمليات السحب السريع")
+    if not count:
+        content = [label, "\n\n", (["لا توجد أي عمليات سحب سريع هنا حاليًا ”"], "blockquote", None)]
+        return build_text_with_emojis([(content, "bold", None)])
+    hint = "اضغط على أي سحب سريع لحذفه نهائيًا ”" if filt == "delete" else "اضغط على أي سحب سريع لعرض تفاصيله ”"
+    content = [
+        f"{label} ({count})",
+        "\n\n",
+        ([f"صفحة {page}/{total_pages}", "\n", hint], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_admrr_list_keyboard(roulettes: list, filt: str, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    start = (page - 1) * GW_LIST_PAGE_SIZE
+    page_items = roulettes[start:start + GW_LIST_PAGE_SIZE]
+
+    rows = []
+    for offset, rr in enumerate(page_items):
+        index = start + offset + 1
+        dot = "🟢" if rr["status"] in ("open", "waiting_spin") else "🔴"
+        if filt == "delete":
+            rows.append([InlineKeyboardButton(
+                f"🗑️ {dot} #{index}", callback_data=f"admrr_delc:{rr['roulette_id']}:{filt}:{page}",
+            )])
+        else:
+            rows.append([InlineKeyboardButton(
+                f"{dot} #{index}", callback_data=f"admrr_detail:{rr['roulette_id']}:{filt}:{page}",
+            )])
+
+    if total_pages > 1:
+        nav_row = []
+        if page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"admrr_list:{filt}:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="admrr_noop"))
+        if page < total_pages:
+            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"admrr_list:{filt}:{page + 1}"))
+        rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_quick_roulette_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_admrr_detail_message(roulette, index: int, participants_total: int) -> tuple:
+    status_labels = {"open": "🟢 نشط", "waiting_spin": "🟡 بانتظار التدوير", "closed": "🔴 منتهي"}
+    status_line = status_labels.get(roulette["status"], roulette["status"])
+    parts = [
+        ([
+            f"⚡ السحب السريع #{index}",
+            "\n\n",
+            f"🆔 المعرف : {roulette['roulette_id']}\n",
+            f"👑 صاحب السحب : {roulette['owner_id']}\n",
+            f"👥 عدد المشاركين : {participants_total}/{roulette['target_count']}\n",
+            f"📊 الحالة : {status_line}\n",
+            f"🕐 تاريخ الإنشاء : {_format_ts(roulette.get('created_at'))}",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_admrr_detail_keyboard(roulette_id: int, filt: str, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ حذف هذا السحب", callback_data=f"admrr_delc:{roulette_id}:{filt}:{page}",
+                              style="danger")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"admrr_list:{filt}:{page}", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_admrr_delete_confirm_message(roulette) -> tuple:
+    content = [
+        "🗑️ تأكيد حذف السحب السريع",
+        "\n\n",
+        ([f"هل أنت متأكد من حذف السحب السريع رقم {roulette['roulette_id']} نهائيًا؟ سيتم حذف كل بيانات مشاركيه أيضًا ”"],
+         "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_admrr_delete_confirm_keyboard(roulette_id: int, filt: str, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("❌ إلغاء", callback_data=f"admrr_detail:{roulette_id}:{filt}:{page}", style="primary"),
+            InlineKeyboardButton("🗑️ تأكيد الحذف", callback_data=f"admrr_delete_do:{roulette_id}:{filt}:{page}",
+                                 style="danger"),
+        ],
+    ])
+
+
+def build_admrr_stats_message(stats: dict) -> tuple:
+    content = [
+        "📊 إحصائيات السحب السريع",
+        "\n\n",
+        ([
+            f"⚡ إجمالي السحوبات السريعة : {stats['total']}\n",
+            f"🟢 النشطة : {stats['active']}\n",
+            f"🔴 المنتهية : {stats['finished']}\n",
+            f"👥 إجمالي المشاركات : {stats['total_participants']}\n",
+            f"📈 متوسط المشاركات لكل سحب : {stats['avg_participants']:.1f}\n",
+            f"🆕 سحوبات اليوم : {stats['today_count']}\n",
+            f"📆 سحوبات آخر 7 أيام : {stats['week_count']}\n",
+            f"🗓️ سحوبات آخر 30 يوم : {stats['month_count']}",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_admrr_stats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_quick_roulette_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+# ---------------------------------------------------------------------------
+# 📣 الإذاعة (قسم المالك) — إرسال رسالة جماعية، إيقافها، وعرض إحصائياتها.
+# ---------------------------------------------------------------------------
+
+BROADCAST_TYPE_LABELS = {"text": "📝 نص", "photo": "🖼️ صورة", "video": "🎥 فيديو", "document": "📎 ملف"}
+BROADCAST_STATUS_LABELS = {
+    "idle": "⚪ لا توجد إذاعة بعد",
+    "running": "🟡 قيد التنفيذ",
+    "stopped": "⏹️ تم إيقافها يدويًا",
+    "completed": "✅ مكتملة",
+}
+
+
+def build_owner_broadcast_section_message() -> tuple:
+    return build_text_with_emojis([
+        ([
+            "📣 الإذاعة — إدارة المالك",
+            "\n\n",
+            (["اختر ما تريد فعله من الأزرار أدناه ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_broadcast_section_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 إرسال لجميع المستخدمين", callback_data="broadcast_send_menu", style="primary")],
+        [InlineKeyboardButton("⏹️ إيقاف الإذاعة", callback_data="broadcast_stop", style="danger")],
+        [InlineKeyboardButton("📊 إحصائيات الإرسال", callback_data="broadcast_stats", style="primary")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_broadcast_send_menu_message() -> tuple:
+    return build_text_with_emojis([
+        ([
+            "📢 إرسال لجميع المستخدمين",
+            "\n\n",
+            (["اختر نوع المحتوى الذي تريد إرساله ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_broadcast_send_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📝 نص", callback_data="broadcast_pick:text", style="primary"),
+            InlineKeyboardButton("🖼️ صورة", callback_data="broadcast_pick:photo", style="primary"),
+        ],
+        [
+            InlineKeyboardButton("🎥 فيديو", callback_data="broadcast_pick:video", style="primary"),
+            InlineKeyboardButton("📎 ملف", callback_data="broadcast_pick:document", style="primary"),
+        ],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_broadcast_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_broadcast_prompt_message(content_type: str) -> tuple:
+    prompts = {
+        "text": "✍️ أرسل الآن نص الرسالة التي تريد إذاعتها لكل المستخدمين ”",
+        "photo": "🖼️ أرسل الآن الصورة (مع نص اختياري) التي تريد إذاعتها لكل المستخدمين ”",
+        "video": "🎥 أرسل الآن الفيديو (مع نص اختياري) الذي تريد إذاعته لكل المستخدمين ”",
+        "document": "📎 أرسل الآن الملف (مع نص اختياري) الذي تريد إذاعته لكل المستخدمين ”",
+    }
+    return build_text_with_emojis([
+        ([prompts.get(content_type, "✍️ أرسل الآن المحتوى ”")], "blockquote", None),
+    ])
+
+
+def build_broadcast_prompt_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 رجوع", callback_data="broadcast_send_menu", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_broadcast_stats_message(stats: dict) -> tuple:
+    status = stats.get("status", "idle")
+    status_line = BROADCAST_STATUS_LABELS.get(status, status)
+    type_line = BROADCAST_TYPE_LABELS.get(stats.get("content_type"), "—")
+    content = [
+        "📊 إحصائيات الإرسال",
+        "\n\n",
+        ([
+            f"📌 الحالة : {status_line}\n",
+            f"📦 نوع المحتوى : {type_line}\n",
+            f"👥 إجمالي المستهدفين : {stats.get('total', 0)}\n",
+            f"📤 تم الإرسال : {stats.get('sent', 0)}\n",
+            f"⚠️ فشل الإرسال : {stats.get('failed', 0)}\n",
+            f"🕐 بدأت في : {_format_ts(stats.get('started_at'))}\n",
+            f"🕓 انتهت في : {_format_ts(stats.get('finished_at'))}",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_broadcast_stats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_broadcast_section", style="danger",
                               **emoji_kwargs("back_section_btn"))],
     ])
 
@@ -5050,6 +7021,27 @@ async def _ban_gate_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raise ApplicationHandlerStop()
 
 
+async def _maintenance_gate_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """بوابة عامة (group=-1) تُنفَّذ بعد بوابة الحظر مباشرة: إن كان وضع
+    الصيانة مفعّلًا من قسم «🛠️ صيانة البوت»، يُوقَف تمرير التحديث لكل
+    المستخدمين ما عدا مالك البوت والمشرفين، مع رسالة توضيحية بدل أي استجابة
+    عادية للبوت."""
+    user = update.effective_user
+    if not user or is_owner(user.id) or is_moderator(user.id):
+        return
+    if not is_maintenance_mode():
+        return
+    text = "🛠️ البوت تحت الصيانة حاليًا، نعتذر عن الإزعاج ونعمل على تحسين الخدمة، حاول لاحقًا 🙏"
+    try:
+        if update.callback_query:
+            await update.callback_query.answer(text, show_alert=True)
+        elif update.effective_message:
+            await update.effective_message.reply_text(text)
+    except Exception:
+        logger.exception("تعذّر إرسال إشعار الصيانة للمستخدم %s", user.id)
+    raise ApplicationHandlerStop()
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if args and args[0].startswith("gwjoin_"):
@@ -5080,6 +7072,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id, update.effective_user)
 
     args = context.args
+    if args and args[0].startswith("ref_") and is_genuinely_new:
+        # المستخدم اجتاز بالفعل شرط الاشتراك الإجباري بالقنوات أعلاه (بوابة
+        # الحماية ضد الرشق)، لذا تُحتسب الإحالة هنا لصاحب الرابط إن كان مصرَّحًا
+        # له ومفعّلًا حاليًا.
+        process_referral_signup(args[0][len("ref_"):], update.effective_user.id, update.effective_user)
     if args and await _dispatch_start_arg(update, context, args[0], is_genuinely_new):
         return
 
@@ -5109,6 +7106,8 @@ async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAUL
     pending_arg = context.user_data.pop("pending_start_arg", None)
     if pending_arg:
         is_genuinely_new = register_bot_user_and_check_new(query.from_user.id, query.from_user)
+        if pending_arg.startswith("ref_") and is_genuinely_new:
+            process_referral_signup(pending_arg[len("ref_"):], query.from_user.id, query.from_user)
         shim_update = SimpleNamespace(
             effective_user=query.from_user,
             message=_ReplyOnlyMessageShim(context.bot, query.from_user.id),
@@ -5778,6 +7777,7 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = query.from_user
+    register_bot_user_and_check_new(user.id, user)
     if is_giveaway_participant(gw_code, user.id):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
         return
@@ -6034,6 +8034,138 @@ async def gw_resume_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 _GW_DRAW_STATE = {}
+
+
+# ---------------------------------------------------------------------------
+# 📣 الإذاعة (قسم المالك) — إرسال رسالة (نص/صورة/فيديو/ملف) لكل مستخدمي البوت،
+# مع إمكانية إيقافها أثناء التنفيذ وعرض إحصائيات آخر عملية إرسال.
+# ---------------------------------------------------------------------------
+
+_BROADCAST_STATE = {
+    "running": False,
+    "stop_requested": False,
+    "content_type": None,
+    "total": 0,
+    "sent": 0,
+    "failed": 0,
+    "started_at": None,
+    "finished_at": None,
+    "status": "idle",
+}
+
+
+def get_broadcast_target_user_ids() -> list:
+    """يعيد معرفات كل مستخدمي البوت غير المحظورين — هدف الإذاعة."""
+    ids = []
+    for doc in fs_db().collection("known_bot_users").stream():
+        data = doc.to_dict() or {}
+        if data.get("banned"):
+            continue
+        try:
+            ids.append(int(doc.id))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def save_broadcast_stats() -> None:
+    """يحفظ حالة الإذاعة الحالية في Firestore لتبقى متاحة حتى بعد انتهائها أو إعادة تشغيل البوت."""
+    fs_db().collection("broadcasts").document("current").set({
+        "status": _BROADCAST_STATE["status"],
+        "content_type": _BROADCAST_STATE["content_type"],
+        "started_at": _BROADCAST_STATE["started_at"],
+        "finished_at": _BROADCAST_STATE["finished_at"],
+        "total": _BROADCAST_STATE["total"],
+        "sent": _BROADCAST_STATE["sent"],
+        "failed": _BROADCAST_STATE["failed"],
+    })
+
+
+def get_broadcast_stats() -> dict:
+    """يعيد حالة الإذاعة الحالية (إن كانت قيد التنفيذ الآن من الذاكرة)، وإلا آخر
+    حالة محفوظة في Firestore."""
+    if _BROADCAST_STATE["running"]:
+        return dict(_BROADCAST_STATE)
+    doc = fs_db().collection("broadcasts").document("current").get()
+    if doc.exists:
+        data = doc.to_dict() or {}
+        data["running"] = False
+        data.setdefault("status", "idle")
+        return data
+    return dict(_BROADCAST_STATE)
+
+
+async def run_broadcast(context: ContextTypes.DEFAULT_TYPE, content_type: str, owner_id: int,
+                         text: str = None, entities=None, file_id: str = None,
+                         caption: str = None, caption_entities=None) -> None:
+    """يرسل محتوى الإذاعة لكل المستخدمين المستهدفين واحدًا تلو الآخر، مع احترام
+    حدود تيليجرام (RetryAfter) وإمكانية الإيقاف من زر «⏹️ إيقاف الإذاعة»."""
+    user_ids = get_broadcast_target_user_ids()
+    log_admin_action(
+        "broadcast", owner_id, details=f"نوع المحتوى: {content_type} — عدد المستهدفين: {len(user_ids)}",
+    )
+    _BROADCAST_STATE.update({
+        "running": True,
+        "stop_requested": False,
+        "content_type": content_type,
+        "total": len(user_ids),
+        "sent": 0,
+        "failed": 0,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "status": "running",
+    })
+    save_broadcast_stats()
+
+    for uid in user_ids:
+        if _BROADCAST_STATE["stop_requested"]:
+            break
+        for attempt in range(2):
+            try:
+                if content_type == "text":
+                    await context.bot.send_message(chat_id=uid, text=text, entities=entities)
+                elif content_type == "photo":
+                    await context.bot.send_photo(
+                        chat_id=uid, photo=file_id, caption=caption, caption_entities=caption_entities,
+                    )
+                elif content_type == "video":
+                    await context.bot.send_video(
+                        chat_id=uid, video=file_id, caption=caption, caption_entities=caption_entities,
+                    )
+                elif content_type == "document":
+                    await context.bot.send_document(
+                        chat_id=uid, document=file_id, caption=caption, caption_entities=caption_entities,
+                    )
+                _BROADCAST_STATE["sent"] += 1
+                break
+            except RetryAfter as exc:
+                if attempt == 0 and exc.retry_after <= 10:
+                    await asyncio.sleep(exc.retry_after)
+                    continue
+                _BROADCAST_STATE["failed"] += 1
+                break
+            except Exception:
+                _BROADCAST_STATE["failed"] += 1
+                break
+        await asyncio.sleep(0.05)
+        if (_BROADCAST_STATE["sent"] + _BROADCAST_STATE["failed"]) % 50 == 0:
+            save_broadcast_stats()
+
+    _BROADCAST_STATE["running"] = False
+    _BROADCAST_STATE["finished_at"] = datetime.now(timezone.utc).isoformat()
+    _BROADCAST_STATE["status"] = "stopped" if _BROADCAST_STATE["stop_requested"] else "completed"
+    save_broadcast_stats()
+    try:
+        summary = (
+            "⏹️ تم إيقاف الإذاعة يدويًا." if _BROADCAST_STATE["status"] == "stopped"
+            else "✅ اكتملت الإذاعة."
+        )
+        await context.bot.send_message(
+            chat_id=owner_id,
+            text=f"{summary}\n📤 تم الإرسال: {_BROADCAST_STATE['sent']}\n⚠️ فشل: {_BROADCAST_STATE['failed']}",
+        )
+    except Exception:
+        pass
 
 
 def build_gw_draw_result_keyboard(gw_code: str) -> InlineKeyboardMarkup:
@@ -6477,6 +8609,7 @@ async def _contest_participation_callback_inner(update: Update, context: Context
     if data.startswith("comp_confirm_join:"):
         contest_code = data.split(":", 1)[1]
         user = query.from_user
+        register_bot_user_and_check_new(user.id, user)
 
         contest = get_contest(contest_code)
         if not contest:
@@ -6807,6 +8940,7 @@ async def vote_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TY
 async def rr_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
+    register_bot_user_and_check_new(user.id, user)
     roulette_id = int(query.data.replace("rr_join_", ""))
 
     result = join_roulette(user.id, roulette_id, user.first_name or user.username or str(user.id))
@@ -7040,6 +9174,11 @@ async def handle_setting_input(update: Update, context: ContextTypes.DEFAULT_TYP
 
     set_setting(field, value)
     context.user_data.pop("awaiting_setting", None)
+    if field.startswith("points_") or field.startswith("required_channel_"):
+        log_admin_action(
+            "change_settings", update.effective_user.id, details=f"{field} = {value}",
+            actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+        )
 
     if field == "game_cliche":
         reply_markup = InlineKeyboardMarkup([
@@ -7106,6 +9245,120 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(
             text=text, entities=entities,
             reply_markup=build_owner_points_section_keyboard(),
+        )
+        return
+
+    if query.data == "points_manage_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_points_manage_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_points_manage_section_keyboard(),
+        )
+        return
+
+    if query.data in ("points_manage_add_lookup", "points_manage_deduct_lookup"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        action = "add" if query.data == "points_manage_add_lookup" else "deduct"
+        context.user_data["awaiting"] = f"points_manual_{action}_lookup"
+        verb = "إضافة" if action == "add" else "خصم"
+        await query.edit_message_text(
+            f"✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) لـ{verb} النقاط منه ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="points_manage_section", style="danger")
+            ]]),
+        )
+        return
+
+    # قائمة تصفّح المستخدمين (نقاط + إحالات) قابلة للربط من عدة أقسام —
+    # كل قسم يمرّر بادئة (prefix) خاصة به وزر رجوع خاص به، مع نفس المنطق
+    # والعرض الموحّد. لإضافة القائمة إلى قسم جديد يكفي إضافة بادئة هنا.
+    BROWSE_LIST_PREFIXES = {
+        "points_browse": "points_manage_section",
+        "users_browse": "owner_users_section",
+    }
+
+    if query.data in (f"{p}:noop" for p in BROWSE_LIST_PREFIXES):
+        await query.answer()
+        return
+
+    _browse_list_prefix = next(
+        (p for p in BROWSE_LIST_PREFIXES if query.data.startswith(f"{p}:list:")), None,
+    )
+    if _browse_list_prefix:
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        page_str = query.data.split(":", 2)[2]
+        page = int(page_str) if page_str.isdigit() else 1
+        rows = get_all_known_users_with_points()
+        text, entities = build_users_points_browse_message(rows, page)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_users_points_browse_keyboard(
+                rows, page, callback_prefix=_browse_list_prefix,
+                back_callback=BROWSE_LIST_PREFIXES[_browse_list_prefix],
+            ),
+        )
+        return
+
+    _browse_pick_prefix = next(
+        (p for p in BROWSE_LIST_PREFIXES if query.data.startswith(f"{p}:pick:")), None,
+    )
+    if _browse_pick_prefix:
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, _, uid_str, page_str = query.data.split(":", 3)
+        target_id = int(uid_str)
+        back_page = int(page_str) if page_str.isdigit() else 1
+        row = get_bot_user(target_id)
+        if not row:
+            await query.answer("⚠️ تعذّر العثور على بيانات هذا المستخدم.", show_alert=True)
+            return
+        referral = get_referral(target_id)
+        row = FSRow({
+            "user_id": target_id,
+            "username": row.get("username"),
+            "first_name": row.get("first_name"),
+            "points": get_points(target_id),
+            "referred_count": int(referral.get("referred_count") or 0) if referral else 0,
+        })
+        text, entities = build_user_points_profile_message(row)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_user_points_profile_keyboard(
+                target_id, back_page, browse_prefix=_browse_pick_prefix,
+            ),
+        )
+        return
+
+    if query.data.startswith("points_manual_add:") or query.data.startswith("points_manual_deduct:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        action = "add" if query.data.startswith("points_manual_add:") else "deduct"
+        parts = query.data.split(":")
+        uid_str, page_str = parts[1], parts[2]
+        browse_prefix = parts[3] if len(parts) > 3 else "points_browse"
+        target_id = int(uid_str)
+        back_page = int(page_str) if page_str.isdigit() else 1
+        context.user_data["awaiting"] = f"points_manual_{action}_amount"
+        context.user_data["points_manual_target_id"] = target_id
+        context.user_data["points_manual_back_page"] = back_page
+        context.user_data["points_manual_browse_prefix"] = browse_prefix
+        verb = "إضافتها" if action == "add" else "خصمها"
+        await query.edit_message_text(
+            f"✍️ أرسل الآن عدد النقاط المراد {verb} (رقم صحيح موجب) ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "🔙 رجوع", callback_data=f"{browse_prefix}:pick:{target_id}:{back_page}", style="danger",
+                )
+            ]]),
         )
         return
 
@@ -7272,6 +9525,10 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             username=username, target_count=target, auto_delete_on_target=auto_delete,
             added_by=query.from_user.id,
         )
+        log_admin_action(
+            "add_channel", query.from_user.id, details=f"@{username}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
         warning = await _check_bot_can_verify_channel(context, username)
         channel = get_required_channel(channel_id)
         await query.answer("✅ تمت إضافة القناة بنجاح")
@@ -7406,7 +9663,14 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
         channel_id = int(query.data.split(":", 1)[1])
+        _deleted_channel = get_required_channel(channel_id)
         delete_required_channel(channel_id)
+        _deleted_username = _deleted_channel.get("username") if _deleted_channel else None
+        log_admin_action(
+            "delete_channel", query.from_user.id,
+            details=f"@{_deleted_username}" if _deleted_username else f"معرف القناة: {channel_id}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
         await query.answer("🗑️ تم حذف القناة بنجاح")
         channels = get_required_channels()
         text, entities = build_owner_sub_list_message(channels)
@@ -7590,6 +9854,10 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         target_id = int(query.data.split(":", 1)[1])
         unban_bot_user(target_id)
+        log_admin_action(
+            "unban_user", query.from_user.id, details=f"معرف المستخدم: {target_id}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
         await query.answer("✅ تم فك الحظر بنجاح")
         row = get_bot_user(target_id) or FSRow({"user_id": target_id})
         text, entities = build_user_profile_message(row)
@@ -7614,6 +9882,700 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if query.data == "owner_users_noop":
         await query.answer()
+        return
+
+    if query.data == "owner_admins_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_owner_admins_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_admins_section_keyboard(),
+        )
+        return
+
+    if query.data == "owner_admins_add":
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
+            await query.answer("⛔ ليس لديك صلاحية إضافة مشرفين.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "mod_add_lookup"
+        await query.edit_message_text(
+            "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) لإضافته كمشرف ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_admins_section", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data.startswith("owner_admins_list:"):
+        _, mode, page_str = query.data.split(":", 2)
+        needs_owner = mode in ("perms", "remove")
+        if needs_owner and not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+            return
+        if not needs_owner and not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        page = int(page_str) if page_str.isdigit() else 1
+        mods = list_moderators()
+        text, entities = build_owner_admins_list_message(mods, mode)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_admins_list_keyboard(mods, mode, page),
+        )
+        return
+
+    if query.data == "owner_admins_noop":
+        await query.answer()
+        return
+
+    if query.data.startswith("owner_admins_pick:"):
+        _, mode, uid_str = query.data.split(":", 2)
+        target_id = int(uid_str)
+        if mode == "view":
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
+                await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+        elif not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+            return
+        row = get_moderator(target_id)
+        if not row:
+            await query.answer("⚠️ هذا المشرف لم يعد موجودًا.", show_alert=True)
+            return
+        if mode == "remove":
+            text, entities = build_moderator_delete_confirm_message(row)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_moderator_delete_confirm_keyboard(target_id),
+            )
+        elif mode == "perms":
+            text, entities = build_moderator_perms_message(row)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_moderator_perms_keyboard(row),
+            )
+        else:
+            text, entities = build_moderator_profile_message(row)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_moderator_profile_keyboard(target_id),
+            )
+        return
+
+    if query.data.startswith("owner_admins_toggle:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, uid_str, perm_key = query.data.split(":", 2)
+        target_id = int(uid_str)
+        row = get_moderator(target_id)
+        if not row:
+            await query.answer("⚠️ هذا المشرف لم يعد موجودًا.", show_alert=True)
+            return
+        current = bool(row.get("permissions", {}).get(perm_key))
+        set_moderator_permission(target_id, perm_key, not current)
+        row = get_moderator(target_id)
+        text, entities = build_moderator_perms_message(row)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_moderator_perms_keyboard(row),
+        )
+        return
+
+    if query.data.startswith("owner_admins_remove_do:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+            return
+        target_id = int(query.data.split(":", 1)[1])
+        remove_moderator(target_id)
+        log_admin_action(
+            "remove_admin", query.from_user.id, details=f"معرف المشرف: {target_id}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
+        await query.answer("✅ تم حذف المشرف بنجاح")
+        mods = list_moderators()
+        text, entities = build_owner_admins_list_message(mods, "view")
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_admins_list_keyboard(mods, "view", 1),
+        )
+        return
+
+    if query.data == "owner_referrals_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_owner_referrals_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_referrals_section_keyboard(),
+        )
+        return
+
+    if query.data == "owner_referrals_add":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "referral_add_lookup"
+        await query.edit_message_text(
+            "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) لمنحه رابط دعوة ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_section", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data == "owner_referrals_search":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "referral_search_lookup"
+        await query.edit_message_text(
+            "🔍 أرسل الآن معرف المستخدم (ID) أو يوزره (@username) للبحث عنه ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_section", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data == "owner_referrals_stats":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        await query.answer()
+        text, entities = build_owner_referrals_stats_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_referrals_stats_keyboard(),
+        )
+        return
+
+    if query.data == "owner_referrals_settings":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_owner_referrals_settings_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_referrals_settings_keyboard(),
+        )
+        return
+
+    if query.data == "owner_referrals_edit_default_pct":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "referral_default_pct"
+        await query.edit_message_text(
+            "✍️ أرسل الآن النسبة الافتراضية الجديدة (رقم من 0 إلى 100) ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_settings", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data == "owner_referrals_edit_signup_points":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "referral_signup_points"
+        await query.edit_message_text(
+            "✍️ أرسل الآن عدد نقاط كل إحالة جديدة عند نسبة 100% (رقم صحيح) ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_settings", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data == "owner_referrals_noop":
+        await query.answer()
+        return
+
+    if query.data.startswith("owner_referrals_list:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, mode, page_str = query.data.split(":", 2)
+        page = int(page_str) if page_str.isdigit() else 1
+        rows = list_referrers()
+        text, entities = build_owner_referrals_list_message(rows, mode)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_referrals_list_keyboard(rows, mode, page),
+        )
+        return
+
+    if query.data.startswith("owner_referrals_pick:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, mode, uid_str = query.data.split(":", 2)
+        target_id = int(uid_str)
+        row = get_referral(target_id)
+        if not row:
+            await query.answer("⚠️ هذا المستخدم لم يعد صاحب رابط دعوة.", show_alert=True)
+            return
+        if mode == "remove":
+            text, entities = build_referrer_delete_confirm_message(row)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_referrer_delete_confirm_keyboard(target_id),
+            )
+        else:
+            text, entities = build_referrer_profile_message(row)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_referrer_profile_keyboard(row),
+            )
+        return
+
+    if query.data.startswith("owner_referrals_toggle:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        target_id = int(query.data.split(":", 1)[1])
+        row = get_referral(target_id)
+        if not row:
+            await query.answer("⚠️ هذا المستخدم لم يعد صاحب رابط دعوة.", show_alert=True)
+            return
+        new_state = not row.get("active")
+        set_referrer_active(target_id, new_state)
+        log_admin_action(
+            "toggle_referrer", query.from_user.id,
+            details=f"معرف المستخدم: {target_id} — الحالة الجديدة: {'مفعّل' if new_state else 'معطّل'}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
+        row = get_referral(target_id)
+        text, entities = build_referrer_profile_message(row)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_referrer_profile_keyboard(row),
+        )
+        return
+
+    if query.data.startswith("owner_referrals_edit_pct:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        target_id = int(query.data.split(":", 1)[1])
+        if not get_referral(target_id):
+            await query.answer("⚠️ هذا المستخدم لم يعد صاحب رابط دعوة.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "referral_edit_percentage"
+        context.user_data["referral_target_id"] = target_id
+        await query.edit_message_text(
+            "✍️ أرسل الآن نسبة الإحالة الجديدة لهذا المستخدم (رقم من 0 إلى 100) ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_referrals_pick:view:{target_id}", style="danger")
+            ]]),
+        )
+        return
+
+    if query.data.startswith("owner_referrals_remove_do:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+            return
+        target_id = int(query.data.split(":", 1)[1])
+        remove_referrer(target_id)
+        log_admin_action(
+            "remove_referrer", query.from_user.id, details=f"معرف المستخدم: {target_id}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
+        await query.answer("✅ تمت إزالة صاحب رابط الدعوة بنجاح")
+        rows = list_referrers()
+        text, entities = build_owner_referrals_list_message(rows, "view")
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_referrals_list_keyboard(rows, "view", 1),
+        )
+        return
+
+    if query.data == "owner_stats_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        await query.answer()
+        stats = get_full_bot_statistics()
+        required_members = await get_required_channels_total_members(context)
+        text, entities = build_owner_stats_message(stats, required_members)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_stats_keyboard(),
+        )
+        return
+
+    if query.data == "owner_logs_noop":
+        await query.answer()
+        return
+
+    if query.data.startswith("owner_logs:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        await query.answer()
+        page = int(query.data.split(":", 1)[1])
+        logs = get_admin_logs()
+        text, entities = build_owner_logs_section_message(logs, page)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_logs_section_keyboard(logs, page),
+        )
+        return
+
+    if query.data == "owner_maintenance_noop":
+        await query.answer()
+        return
+
+    if query.data == "owner_maintenance_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        await query.answer()
+        text, entities = build_owner_maintenance_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_maintenance_section_keyboard(),
+        )
+        return
+
+    if query.data == "owner_maintenance_toggle":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        new_state = not is_maintenance_mode()
+        set_maintenance_mode(new_state)
+        log_admin_action(
+            "change_settings", query.from_user.id,
+            details=f"وضع الصيانة: {'مفعّل' if new_state else 'معطّل'}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
+        await query.answer("🔴 تم تفعيل وضع الصيانة" if new_state else "🟢 تم إيقاف وضع الصيانة", show_alert=True)
+        text, entities = build_owner_maintenance_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_maintenance_section_keyboard(),
+        )
+        return
+
+    if query.data == "owner_maintenance_speedtest":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        await query.answer("⏳ جاري فحص السرعة ”")
+        try:
+            elapsed_ms, label = measure_bot_response_time()
+        except Exception:
+            logger.exception("تعذّر إجراء فحص سرعة الاستجابة")
+            await query.answer("⚠️ تعذّر إجراء الفحص، حاول مجددًا.", show_alert=True)
+            return
+        text, entities = build_owner_maintenance_speedtest_message(elapsed_ms, label)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_maintenance_section_keyboard(),
+        )
+        return
+
+    if query.data == "owner_maintenance_status":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        await query.answer()
+        text, entities = build_owner_maintenance_status_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_maintenance_section_keyboard(),
+        )
+        return
+
+    if query.data.startswith("owner_maintenance_errors:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        await query.answer()
+        page = int(query.data.split(":", 1)[1])
+        errors = get_bot_errors()
+        text, entities = build_owner_maintenance_errors_message(errors, page)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_maintenance_errors_keyboard(errors, page),
+        )
+        return
+
+    if query.data == "owner_draws_section":
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_owner_draws_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_draws_section_keyboard(),
+        )
+        return
+
+    if query.data.startswith("admgw_list:"):
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, filt, page_str = query.data.split(":", 2)
+        page = int(page_str) if page_str.isdigit() else 1
+        giveaways = _admgw_filter_giveaways(get_all_giveaways(), filt)
+        total_pages = max(1, -(-len(giveaways) // GW_LIST_PAGE_SIZE))
+        page = max(1, min(page, total_pages))
+        text, entities = build_admgw_list_message(filt, page, total_pages, len(giveaways))
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admgw_list_keyboard(giveaways, filt, page, total_pages),
+        )
+        return
+
+    if query.data.startswith("admgw_detail:"):
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, gw_code, filt, page_str = query.data.split(":", 3)
+        page = int(page_str) if page_str.isdigit() else 1
+        giveaway = get_giveaway(gw_code)
+        if not giveaway:
+            await query.answer("⚠️ هذا السحب لم يعد موجودًا.", show_alert=True)
+            return
+        giveaways = _admgw_filter_giveaways(get_all_giveaways(), filt)
+        index = next((i + 1 for i, g in enumerate(giveaways) if g["gw_code"] == gw_code), 0)
+        channel_title = get_chat_title_by_id(giveaway["chat_id"])
+        participants_total = count_giveaway_participants(gw_code)
+        text, entities = build_admgw_detail_message(giveaway, index, channel_title, participants_total)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admgw_detail_keyboard(gw_code, filt, page),
+        )
+        return
+
+    if query.data.startswith("admgw_delc:"):
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, gw_code, filt, page_str = query.data.split(":", 3)
+        page = int(page_str) if page_str.isdigit() else 1
+        giveaway = get_giveaway(gw_code)
+        if not giveaway:
+            await query.answer("⚠️ هذا السحب لم يعد موجودًا.", show_alert=True)
+            return
+        text, entities = build_admgw_delete_confirm_message(giveaway)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admgw_delete_confirm_keyboard(gw_code, filt, page),
+        )
+        return
+
+    if query.data.startswith("admgw_delete_do:"):
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, gw_code, filt, page_str = query.data.split(":", 3)
+        page = int(page_str) if page_str.isdigit() else 1
+        delete_giveaway_admin(gw_code)
+        log_admin_action(
+            "delete_giveaway", query.from_user.id, details=f"كود السحب: {gw_code}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
+        await query.answer("🗑️ تم حذف السحب بنجاح")
+        giveaways = _admgw_filter_giveaways(get_all_giveaways(), filt)
+        total_pages = max(1, -(-len(giveaways) // GW_LIST_PAGE_SIZE))
+        page = max(1, min(page, total_pages))
+        text, entities = build_admgw_list_message(filt, page, total_pages, len(giveaways))
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admgw_list_keyboard(giveaways, filt, page, total_pages),
+        )
+        return
+
+    if query.data == "admgw_stats":
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        stats = get_giveaways_statistics()
+        text, entities = build_admgw_stats_message(stats)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admgw_stats_keyboard(),
+        )
+        return
+
+    if query.data == "admgw_noop":
+        await query.answer()
+        return
+
+    if query.data == "owner_quick_roulette_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_owner_quick_roulette_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_quick_roulette_section_keyboard(),
+        )
+        return
+
+    if query.data.startswith("admrr_list:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, filt, page_str = query.data.split(":", 2)
+        page = int(page_str) if page_str.isdigit() else 1
+        roulettes = _admrr_filter_roulettes(get_all_quick_roulettes(), filt)
+        total_pages = max(1, -(-len(roulettes) // GW_LIST_PAGE_SIZE))
+        page = max(1, min(page, total_pages))
+        text, entities = build_admrr_list_message(filt, page, total_pages, len(roulettes))
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admrr_list_keyboard(roulettes, filt, page, total_pages),
+        )
+        return
+
+    if query.data.startswith("admrr_detail:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, rid_str, filt, page_str = query.data.split(":", 3)
+        roulette_id = int(rid_str)
+        page = int(page_str) if page_str.isdigit() else 1
+        roulette = get_roulette(roulette_id)
+        if not roulette:
+            await query.answer("⚠️ هذا السحب لم يعد موجودًا.", show_alert=True)
+            return
+        roulettes = _admrr_filter_roulettes(get_all_quick_roulettes(), filt)
+        index = next((i + 1 for i, r in enumerate(roulettes) if r["roulette_id"] == roulette_id), 0)
+        participants_total = count_participants(roulette_id)
+        text, entities = build_admrr_detail_message(roulette, index, participants_total)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admrr_detail_keyboard(roulette_id, filt, page),
+        )
+        return
+
+    if query.data.startswith("admrr_delc:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, rid_str, filt, page_str = query.data.split(":", 3)
+        roulette_id = int(rid_str)
+        page = int(page_str) if page_str.isdigit() else 1
+        roulette = get_roulette(roulette_id)
+        if not roulette:
+            await query.answer("⚠️ هذا السحب لم يعد موجودًا.", show_alert=True)
+            return
+        text, entities = build_admrr_delete_confirm_message(roulette)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admrr_delete_confirm_keyboard(roulette_id, filt, page),
+        )
+        return
+
+    if query.data.startswith("admrr_delete_do:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, rid_str, filt, page_str = query.data.split(":", 3)
+        roulette_id = int(rid_str)
+        page = int(page_str) if page_str.isdigit() else 1
+        delete_quick_roulette_admin(roulette_id)
+        log_admin_action(
+            "delete_quick_roulette", query.from_user.id, details=f"معرف السحب السريع: {roulette_id}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
+        await query.answer("🗑️ تم حذف السحب السريع بنجاح")
+        roulettes = _admrr_filter_roulettes(get_all_quick_roulettes(), filt)
+        total_pages = max(1, -(-len(roulettes) // GW_LIST_PAGE_SIZE))
+        page = max(1, min(page, total_pages))
+        text, entities = build_admrr_list_message(filt, page, total_pages, len(roulettes))
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admrr_list_keyboard(roulettes, filt, page, total_pages),
+        )
+        return
+
+    if query.data == "admrr_stats":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        stats = get_quick_roulette_statistics()
+        text, entities = build_admrr_stats_message(stats)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admrr_stats_keyboard(),
+        )
+        return
+
+    if query.data == "admrr_noop":
+        await query.answer()
+        return
+
+    if query.data == "owner_broadcast_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_owner_broadcast_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_broadcast_section_keyboard(),
+        )
+        return
+
+    if query.data == "broadcast_send_menu":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        if _BROADCAST_STATE["running"]:
+            await query.answer("⚠️ توجد إذاعة قيد التنفيذ بالفعل، أوقفها أولاً إن أردت إرسال إذاعة جديدة.",
+                               show_alert=True)
+            return
+        text, entities = build_broadcast_send_menu_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_broadcast_send_menu_keyboard(),
+        )
+        return
+
+    if query.data.startswith("broadcast_pick:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        if _BROADCAST_STATE["running"]:
+            await query.answer("⚠️ توجد إذاعة قيد التنفيذ بالفعل.", show_alert=True)
+            return
+        content_type = query.data.split(":", 1)[1]
+        if content_type not in BROADCAST_TYPE_LABELS:
+            return
+        context.user_data["awaiting"] = f"broadcast_input_{content_type}"
+        text, entities = build_broadcast_prompt_message(content_type)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_broadcast_prompt_keyboard(),
+        )
+        return
+
+    if query.data == "broadcast_stop":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        if not _BROADCAST_STATE["running"]:
+            await query.answer("ℹ️ لا توجد إذاعة قيد التنفيذ حاليًا.", show_alert=True)
+        else:
+            _BROADCAST_STATE["stop_requested"] = True
+            await query.answer("⏹️ سيتم إيقاف الإذاعة خلال لحظات ”", show_alert=True)
+        return
+
+    if query.data == "broadcast_stats":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        stats = get_broadcast_stats()
+        text, entities = build_broadcast_stats_message(stats)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_broadcast_stats_keyboard(),
+        )
         return
 
 
@@ -7645,6 +10607,10 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         set_setting("points_title", DEFAULT_POINTS_TITLE)
         set_setting("points_conditions", DEFAULT_POINTS_CONDITIONS)
+        log_admin_action(
+            "change_settings", query.from_user.id, details="إعادة نصوص قسم ربح للوضع الافتراضي",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
         await query.answer("✅ تمت إعادة نصوص قسم ربح للوضع الافتراضي.")
         text, entities = build_points_text_settings_message()
         await query.edit_message_text(
@@ -7657,7 +10623,13 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
             return
-        set_setting("points_enabled", "0" if get_setting("points_enabled") == "1" else "1")
+        new_value = "0" if get_setting("points_enabled") == "1" else "1"
+        set_setting("points_enabled", new_value)
+        log_admin_action(
+            "change_settings", query.from_user.id,
+            details=f"تفعيل قسم ربح: {'مفعّل' if new_value == '1' else 'معطّل'}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
         text, entities = build_points_settings_message()
         await query.edit_message_text(
             text=text, entities=entities,
@@ -7944,12 +10916,65 @@ def _resolve_admin_user_query(raw: str):
     return None, None
 
 
+async def handle_broadcast_media_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يلتقط الصورة/الفيديو/الملف عندما يكون المالك بصدد إرسال إذاعة من هذا النوع."""
+    awaiting = context.user_data.get("awaiting")
+    if awaiting not in ("broadcast_input_photo", "broadcast_input_video", "broadcast_input_document"):
+        return
+    if not is_owner(update.effective_user.id):
+        context.user_data.pop("awaiting", None)
+        return
+
+    message = update.message
+    content_type = None
+    file_id = None
+    if awaiting == "broadcast_input_photo" and message.photo:
+        content_type, file_id = "photo", message.photo[-1].file_id
+    elif awaiting == "broadcast_input_video" and message.video:
+        content_type, file_id = "video", message.video.file_id
+    elif awaiting == "broadcast_input_document" and message.document:
+        content_type, file_id = "document", message.document.file_id
+
+    if not content_type:
+        await message.reply_text("⚠️ أرسل النوع الصحيح من المحتوى المطلوب ”")
+        return
+
+    if _BROADCAST_STATE["running"]:
+        await message.reply_text("⚠️ توجد إذاعة قيد التنفيذ بالفعل، انتظر حتى تنتهي أو أوقفها أولاً.")
+        return
+
+    context.user_data.pop("awaiting", None)
+    caption = message.caption
+    caption_entities = message.caption_entities
+    await message.reply_text("📣 بدأت عملية الإذاعة الآن، سيصلك إشعار عند الانتهاء ”")
+    asyncio.create_task(run_broadcast(
+        context, content_type, update.effective_user.id,
+        file_id=file_id, caption=caption, caption_entities=caption_entities,
+    ))
+
+
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     awaiting = context.user_data.get("awaiting")
     awaiting_setting = context.user_data.get("awaiting_setting")
 
     if awaiting_setting:
         await handle_setting_input(update, context)
+        return
+
+    if awaiting == "broadcast_input_text":
+        if not is_owner(update.effective_user.id):
+            context.user_data.pop("awaiting", None)
+            return
+        if _BROADCAST_STATE["running"]:
+            await update.message.reply_text("⚠️ توجد إذاعة قيد التنفيذ بالفعل، انتظر حتى تنتهي أو أوقفها أولاً.")
+            return
+        context.user_data.pop("awaiting", None)
+        text = update.message.text
+        entities = update.message.entities
+        await update.message.reply_text("📣 بدأت عملية الإذاعة الآن، سيصلك إشعار عند الانتهاء ”")
+        asyncio.create_task(run_broadcast(
+            context, "text", update.effective_user.id, text=text, entities=entities,
+        ))
         return
 
     if awaiting == "admin_channel_add_username":
@@ -7978,6 +11003,10 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             channel_id = create_required_channel(
                 username=username, target_count=None, auto_delete_on_target=False,
                 added_by=update.effective_user.id,
+            )
+            log_admin_action(
+                "add_channel", update.effective_user.id, details=f"@{username}",
+                actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
             )
             context.user_data.pop("admin_new_channel_username", None)
             warning = await _check_bot_can_verify_channel(context, username)
@@ -8080,6 +11109,253 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if awaiting == "mod_add_lookup":
+        context.user_data.pop("awaiting", None)
+        if not (is_owner(update.effective_user.id) or moderator_can(update.effective_user.id, "add_admins")):
+            return
+        row, target_id = _resolve_admin_user_query(update.message.text)
+        if target_id is None:
+            await update.message.reply_text(
+                "⚠️ لم يتم التعرف على هذا المدخل. أرسل معرفًا رقميًا، أو يوزر مستخدم استخدم البوت من قبل ”",
+            )
+            return
+        if is_owner(target_id):
+            await update.message.reply_text("⚠️ هذا المستخدم أصلًا أحد ملّاك البوت.")
+            return
+        if is_moderator(target_id):
+            await update.message.reply_text("ℹ️ هذا المستخدم مشرف بالفعل.")
+            return
+        username = row.get("username") if row else None
+        first_name = row.get("first_name") if row else None
+        add_moderator(target_id, added_by=update.effective_user.id, username=username, first_name=first_name)
+        log_admin_action(
+            "add_admin", update.effective_user.id, details=f"معرف المشرف الجديد: {target_id}",
+            actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+        )
+        new_row = get_moderator(target_id)
+        if is_owner(update.effective_user.id):
+            await update.message.reply_text("✅ تمت إضافة المشرف بنجاح. الآن حدّد صلاحياته:")
+            text, entities = build_moderator_perms_message(new_row)
+            await update.message.reply_text(
+                text=text, entities=entities,
+                reply_markup=build_moderator_perms_keyboard(new_row),
+            )
+        else:
+            await update.message.reply_text(
+                "✅ تمت إضافة المشرف بنجاح. سيقوم مالك البوت بتحديد صلاحياته.",
+            )
+        return
+
+    if awaiting == "referral_add_lookup":
+        context.user_data.pop("awaiting", None)
+        if not is_owner(update.effective_user.id):
+            return
+        row, target_id = _resolve_admin_user_query(update.message.text)
+        if target_id is None:
+            await update.message.reply_text(
+                "⚠️ لم يتم التعرف على هذا المدخل. أرسل معرفًا رقميًا، أو يوزر مستخدم استخدم البوت من قبل ”",
+            )
+            return
+        if get_referral(target_id):
+            await update.message.reply_text("ℹ️ هذا المستخدم يملك رابط دعوة بالفعل.")
+            return
+        context.user_data["awaiting"] = "referral_add_percentage"
+        context.user_data["referral_target_id"] = target_id
+        context.user_data["referral_target_username"] = row.get("username") if row else None
+        context.user_data["referral_target_first_name"] = row.get("first_name") if row else None
+        await update.message.reply_text(
+            "✍️ أرسل الآن نسبة الإحالة لهذا المستخدم (رقم من 0 إلى 100)، "
+            f"أو أرسل - لاستخدام النسبة الافتراضية ({get_referral_default_percentage()}%) ”",
+        )
+        return
+
+    if awaiting == "referral_add_percentage":
+        context.user_data.pop("awaiting", None)
+        target_id = context.user_data.pop("referral_target_id", None)
+        username = context.user_data.pop("referral_target_username", None)
+        first_name = context.user_data.pop("referral_target_first_name", None)
+        if not target_id or not is_owner(update.effective_user.id):
+            return
+        raw = (update.message.text or "").strip()
+        if raw == "-":
+            percentage = None
+        elif raw.isdigit() and 0 <= int(raw) <= 100:
+            percentage = int(raw)
+        else:
+            await update.message.reply_text("⚠️ أرسل رقمًا صحيحًا من 0 إلى 100، أو - لاستخدام النسبة الافتراضية.")
+            return
+        add_referrer(target_id, added_by=update.effective_user.id, percentage=percentage,
+                      username=username, first_name=first_name)
+        applied_pct = percentage if percentage is not None else get_referral_default_percentage()
+        log_admin_action(
+            "add_referrer", update.effective_user.id,
+            details=f"معرف المستخدم: {target_id} — النسبة: {applied_pct}%",
+            actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+        )
+        row = get_referral(target_id)
+        await update.message.reply_text("✅ تمت إضافة رابط الدعوة بنجاح.")
+        text, entities = build_referrer_profile_message(row)
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_referrer_profile_keyboard(row),
+        )
+        return
+
+    if awaiting == "referral_search_lookup":
+        context.user_data.pop("awaiting", None)
+        if not is_owner(update.effective_user.id):
+            return
+        _, target_id = _resolve_admin_user_query(update.message.text)
+        if target_id is None:
+            await update.message.reply_text(
+                "⚠️ لم يتم التعرف على هذا المدخل. أرسل معرفًا رقميًا، أو يوزر مستخدم استخدم البوت من قبل ”",
+            )
+            return
+        row = get_referral(target_id)
+        if not row:
+            await update.message.reply_text("⚠️ هذا المستخدم ليس صاحب رابط دعوة.")
+            return
+        text, entities = build_referrer_profile_message(row)
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_referrer_profile_keyboard(row),
+        )
+        return
+
+    if awaiting == "referral_edit_percentage":
+        target_id = context.user_data.pop("referral_target_id", None)
+        context.user_data.pop("awaiting", None)
+        if not target_id or not is_owner(update.effective_user.id):
+            return
+        raw = (update.message.text or "").strip()
+        if not raw.isdigit() or not (0 <= int(raw) <= 100):
+            await update.message.reply_text("⚠️ أرسل رقمًا صحيحًا من 0 إلى 100.")
+            return
+        set_referrer_percentage(target_id, int(raw))
+        log_admin_action(
+            "edit_referrer_percentage", update.effective_user.id,
+            details=f"معرف المستخدم: {target_id} — النسبة الجديدة: {raw}%",
+            actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+        )
+        row = get_referral(target_id)
+        if not row:
+            await update.message.reply_text("⚠️ هذا المستخدم لم يعد صاحب رابط دعوة.")
+            return
+        text, entities = build_referrer_profile_message(row)
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_referrer_profile_keyboard(row),
+        )
+        return
+
+    if awaiting == "referral_default_pct":
+        context.user_data.pop("awaiting", None)
+        if not is_owner(update.effective_user.id):
+            return
+        raw = (update.message.text or "").strip()
+        if not raw.isdigit() or not (0 <= int(raw) <= 100):
+            await update.message.reply_text("⚠️ أرسل رقمًا صحيحًا من 0 إلى 100.")
+            return
+        set_referral_default_percentage(int(raw))
+        log_admin_action(
+            "change_settings", update.effective_user.id, details=f"النسبة الافتراضية للإحالة: {raw}%",
+            actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+        )
+        text, entities = build_owner_referrals_settings_message()
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_referrals_settings_keyboard(),
+        )
+        return
+
+    if awaiting == "referral_signup_points":
+        context.user_data.pop("awaiting", None)
+        if not is_owner(update.effective_user.id):
+            return
+        raw = (update.message.text or "").strip()
+        if not raw.isdigit():
+            await update.message.reply_text("⚠️ أرسل رقمًا صحيحًا.")
+            return
+        set_referral_signup_points(int(raw))
+        log_admin_action(
+            "change_settings", update.effective_user.id, details=f"نقاط الإحالة عند 100%: {raw}",
+            actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+        )
+        text, entities = build_owner_referrals_settings_message()
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_referrals_settings_keyboard(),
+        )
+        return
+
+    if awaiting in ("points_manual_add_lookup", "points_manual_deduct_lookup"):
+        context.user_data.pop("awaiting", None)
+        if not is_owner(update.effective_user.id):
+            return
+        action = "add" if awaiting == "points_manual_add_lookup" else "deduct"
+        row, target_id = _resolve_admin_user_query(update.message.text)
+        if target_id is None:
+            await update.message.reply_text(
+                "⚠️ لم يتم التعرف على هذا المدخل. أرسل معرفًا رقميًا، أو يوزر مستخدم استخدم البوت من قبل ”",
+            )
+            return
+        context.user_data["awaiting"] = f"points_manual_{action}_amount"
+        context.user_data["points_manual_target_id"] = target_id
+        context.user_data["points_manual_back_page"] = 1
+        context.user_data["points_manual_browse_prefix"] = "points_browse"
+        verb = "إضافتها" if action == "add" else "خصمها"
+        current = get_points(target_id)
+        await update.message.reply_text(
+            f"💎 رصيده الحالي: {current} نقطة\n"
+            f"✍️ أرسل الآن عدد النقاط المراد {verb} (رقم صحيح موجب) ”",
+        )
+        return
+
+    if awaiting in ("points_manual_add_amount", "points_manual_deduct_amount"):
+        target_id = context.user_data.pop("points_manual_target_id", None)
+        back_page = context.user_data.pop("points_manual_back_page", 1)
+        browse_prefix = context.user_data.pop("points_manual_browse_prefix", "points_browse")
+        context.user_data.pop("awaiting", None)
+        if not target_id or not is_owner(update.effective_user.id):
+            return
+        raw = (update.message.text or "").strip()
+        if not raw.isdigit() or int(raw) <= 0:
+            await update.message.reply_text("⚠️ أرسل رقمًا صحيحًا موجبًا أكبر من صفر.")
+            return
+        amount = int(raw)
+        if awaiting == "points_manual_add_amount":
+            new_balance = add_points_to_user(target_id, amount)
+            log_admin_action(
+                "add_points_manual", update.effective_user.id,
+                details=f"معرف المستخدم: {target_id} — إضافة: {amount} نقطة — الرصيد الجديد: {new_balance}",
+                actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+            )
+            await update.message.reply_text(f"✅ تمت إضافة {amount} نقطة بنجاح. الرصيد الجديد: {new_balance} نقطة.")
+        else:
+            new_balance = deduct_points_from_user(target_id, amount)
+            log_admin_action(
+                "deduct_points_manual", update.effective_user.id,
+                details=f"معرف المستخدم: {target_id} — خصم: {amount} نقطة — الرصيد الجديد: {new_balance}",
+                actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+            )
+            await update.message.reply_text(f"✅ تم خصم {amount} نقطة بنجاح. الرصيد الجديد: {new_balance} نقطة.")
+
+        row = get_bot_user(target_id) or FSRow({"user_id": target_id})
+        referral = get_referral(target_id)
+        row = FSRow({
+            "user_id": target_id,
+            "username": row.get("username"),
+            "first_name": row.get("first_name"),
+            "points": new_balance,
+            "referred_count": int(referral.get("referred_count") or 0) if referral else 0,
+        })
+        text, entities = build_user_points_profile_message(row)
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_user_points_profile_keyboard(target_id, back_page, browse_prefix=browse_prefix),
+        )
+        return
+
     if awaiting == "admin_user_lookup":
         row, target_id = _resolve_admin_user_query(update.message.text)
         context.user_data.pop("awaiting", None)
@@ -8129,6 +11405,11 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if reason == "-":
             reason = ""
         ban_bot_user(target_id, reason, update.effective_user.id)
+        log_admin_action(
+            "ban_user", update.effective_user.id,
+            details=f"معرف المستخدم: {target_id}" + (f" — السبب: {reason}" if reason else ""),
+            actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+        )
         row = get_bot_user(target_id) or FSRow({"user_id": target_id, "banned": True, "ban_reason": reason})
         text, entities = build_user_profile_message(row)
         await update.message.reply_text("🚫 تم حظر المستخدم بنجاح.")
@@ -8150,6 +11431,10 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("ℹ️ هذا المستخدم غير محظور أصلاً.")
             return
         unban_bot_user(target_id)
+        log_admin_action(
+            "unban_user", update.effective_user.id, details=f"معرف المستخدم: {target_id}",
+            actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+        )
         row = get_bot_user(target_id)
         text, entities = build_user_profile_message(row)
         await update.message.reply_text("✅ تم فك حظر المستخدم بنجاح.")
@@ -8436,6 +11721,10 @@ async def contest_management_callback(update: Update, context: ContextTypes.DEFA
 
     if action == "comp_delete_all":
         delete_contest_completely(code)
+        log_admin_action(
+            "delete_contest", query.from_user.id, details=f"كود المسابقة: {code}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
         await query.answer("تم حذف المسابقة بالكامل.", show_alert=True)
         text, entities = build_contest_section_message()
         await query.edit_message_text(
@@ -9196,8 +12485,17 @@ async def _go_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """يسجّل أي خطأ غير متوقع بدل أن يختفي بصمت — هذا كان السبب في تعذّر تشخيص
-    مشاكل مثل «الزر لا يستجيب أحيانًا» أو «لم تُرسل رسالة عند انتهاء الوقت»."""
+    مشاكل مثل «الزر لا يستجيب أحيانًا» أو «لم تُرسل رسالة عند انتهاء الوقت».
+    كما يحفظ نص الخطأ في Firestore ليظهر ضمن «⚠️ عرض الأخطاء» في قسم صيانة
+    البوت لدى المالك."""
     logger.exception("خطأ غير متوقع أثناء معالجة تحديث: %s", update, exc_info=context.error)
+    try:
+        tb_text = "".join(
+            traceback.format_exception(type(context.error), context.error, context.error.__traceback__)
+        )
+    except Exception:
+        tb_text = str(context.error)
+    log_bot_error(tb_text[-2000:])
 
 
 def main():
@@ -9249,6 +12547,11 @@ def main():
     # قبل أي معالج آخر لأي تحديث، وتوقف تمريره تمامًا (ApplicationHandlerStop)
     # إن كان مُرسِله محظورًا من قسم «إدارة المستخدمين».
     app.add_handler(TypeHandler(Update, _ban_gate_handler), group=-1)
+
+    # بوابة الصيانة العامة: بنفس أولوية بوابة الحظر (group=-1)، تُنفَّذ بعدها
+    # مباشرة وتوقف تمرير التحديث لأي مستخدم عادي إن كان وضع الصيانة مفعّلًا
+    # من قسم «🛠️ صيانة البوت» لدى المالك.
+    app.add_handler(TypeHandler(Update, _maintenance_gate_handler), group=-1)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("getid", get_id_prompt))
@@ -9327,6 +12630,10 @@ def main():
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, support_successful_payment_callback))
     app.add_handler(MessageHandler(filters.FORWARDED & filters.ChatType.PRIVATE, channel_forward_handler))
     app.add_handler(MessageHandler(filters.Regex("تفعيل روليت") & filters.ChatType.GROUPS, group_activation_handler))
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.VIDEO | filters.Document.ALL) & filters.ChatType.PRIVATE,
+        handle_broadcast_media_input,
+    ))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
     app.add_handler(ChatMemberHandler(bot_chat_status_update, ChatMemberHandler.MY_CHAT_MEMBER))
 
