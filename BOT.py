@@ -2386,13 +2386,7 @@ def build_my_giveaways_list_keyboard(giveaways, page: int, total_pages: int) -> 
         )])
 
     if total_pages > 1:
-        nav_row = []
-        if page > 1:
-            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"gwmy_page:{page - 1}"))
-        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="gw_noop"))
-        if page < total_pages:
-            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"gwmy_page:{page + 1}"))
-        rows.append(nav_row)
+        rows.append(build_pager_nav_row(page, total_pages, "gwmy_page:{page}", "gw_noop"))
 
     rows.append([InlineKeyboardButton(
         "رجوع", callback_data="back_main_menu",
@@ -5205,21 +5199,23 @@ def build_owner_section_message() -> tuple:
 
 
 def build_owner_section_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💰 قسم ربح", callback_data="owner_points_section", style="primary")],
-        [InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="owner_sub_section", style="primary")],
-        [InlineKeyboardButton("👥 إدارة المستخدمين", callback_data="owner_users_section", style="primary")],
-        [InlineKeyboardButton("🎁 السحوبات", callback_data="owner_draws_section", style="primary")],
-        [InlineKeyboardButton("⚡ السحب السريع", callback_data="owner_quick_roulette_section", style="primary")],
-        [InlineKeyboardButton("📣 الإذاعة", callback_data="owner_broadcast_section", style="primary")],
-        [InlineKeyboardButton("👨‍💻 إدارة المشرفين", callback_data="owner_admins_section", style="primary")],
-        [InlineKeyboardButton("🔗 إدارة روابط الدعوة", callback_data="owner_referrals_section", style="primary")],
-        [InlineKeyboardButton("📊 إحصائيات البوت", callback_data="owner_stats_section", style="primary")],
-        [InlineKeyboardButton("📜 سجل العمليات", callback_data="owner_logs:1", style="primary")],
-        [InlineKeyboardButton("🛠️ صيانة البوت", callback_data="owner_maintenance_section", style="primary")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="back_main_menu", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
-    ])
+    menu_buttons = [
+        InlineKeyboardButton("💰 قسم ربح", callback_data="owner_points_section", style="primary"),
+        InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="owner_sub_section", style="primary"),
+        InlineKeyboardButton("👥 إدارة المستخدمين", callback_data="owner_users_section", style="primary"),
+        InlineKeyboardButton("🎁 السحوبات", callback_data="owner_draws_section", style="primary"),
+        InlineKeyboardButton("⚡ السحب السريع", callback_data="owner_quick_roulette_section", style="primary"),
+        InlineKeyboardButton("📣 الإذاعة", callback_data="owner_broadcast_section", style="primary"),
+        InlineKeyboardButton("👨‍💻 إدارة المشرفين", callback_data="owner_admins_section", style="primary"),
+        InlineKeyboardButton("🔗 إدارة روابط الدعوة", callback_data="owner_referrals_section", style="primary"),
+        InlineKeyboardButton("📊 إحصائيات البوت", callback_data="owner_stats_section", style="primary"),
+        InlineKeyboardButton("📜 سجل العمليات", callback_data="owner_logs:1", style="primary"),
+        InlineKeyboardButton("🛠️ صيانة البوت", callback_data="owner_maintenance_section", style="primary"),
+    ]
+    rows = pair_buttons(menu_buttons)
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_main_menu", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_owner_logs_section_message(logs: list, page: int) -> tuple:
@@ -5256,13 +5252,7 @@ def build_owner_logs_section_keyboard(logs: list, page: int) -> InlineKeyboardMa
 
     rows = []
     if total_pages > 1:
-        nav_row = []
-        if page > 1:
-            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"owner_logs:{page - 1}"))
-        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="owner_logs_noop"))
-        if page < total_pages:
-            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"owner_logs:{page + 1}"))
-        rows.append(nav_row)
+        rows.append(build_pager_nav_row(page, total_pages, "owner_logs:{page}", "owner_logs_noop"))
 
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
                                       **emoji_kwargs("back_section_btn"))])
@@ -5295,14 +5285,15 @@ def build_owner_maintenance_section_keyboard() -> InlineKeyboardMarkup:
     maintenance_on = is_maintenance_mode()
     toggle_text = "🟢 إيقاف وضع الصيانة" if maintenance_on else "🔴 تفعيل وضع الصيانة"
     toggle_style = "success" if maintenance_on else "danger"
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(toggle_text, callback_data="owner_maintenance_toggle", style=toggle_style)],
-        [InlineKeyboardButton("📶 فحص سرعة الاستجابة", callback_data="owner_maintenance_speedtest", style="primary")],
-        [InlineKeyboardButton("⚠️ عرض الأخطاء", callback_data="owner_maintenance_errors:1", style="primary")],
-        [InlineKeyboardButton("📊 عرض حالة البوت", callback_data="owner_maintenance_status", style="primary")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
+    rows = [[InlineKeyboardButton(toggle_text, callback_data="owner_maintenance_toggle", style=toggle_style)]]
+    rows += pair_buttons([
+        InlineKeyboardButton("📶 فحص سرعة الاستجابة", callback_data="owner_maintenance_speedtest", style="primary"),
+        InlineKeyboardButton("⚠️ عرض الأخطاء", callback_data="owner_maintenance_errors:1", style="primary"),
+        InlineKeyboardButton("📊 عرض حالة البوت", callback_data="owner_maintenance_status", style="primary"),
     ])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_owner_maintenance_speedtest_message(elapsed_ms: float, label: str) -> tuple:
@@ -5370,13 +5361,9 @@ def build_owner_maintenance_errors_keyboard(errors: list, page: int) -> InlineKe
 
     rows = []
     if total_pages > 1:
-        nav_row = []
-        if page > 1:
-            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"owner_maintenance_errors:{page - 1}"))
-        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="owner_maintenance_noop"))
-        if page < total_pages:
-            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"owner_maintenance_errors:{page + 1}"))
-        rows.append(nav_row)
+        rows.append(build_pager_nav_row(
+            page, total_pages, "owner_maintenance_errors:{page}", "owner_maintenance_noop",
+        ))
 
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_maintenance_section", style="danger",
                                       **emoji_kwargs("back_section_btn"))])
@@ -5394,22 +5381,15 @@ def build_owner_points_section_message() -> tuple:
 
 
 def build_owner_points_section_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "⚙️ إعدادات", callback_data="points_settings",
-            style="primary", **emoji_kwargs("gear"),
-        )],
-        [InlineKeyboardButton(
-            "💎 إدارة نقاط المستخدمين", callback_data="points_manage_section",
-            style="primary",
-        )],
-        [InlineKeyboardButton(
-            "💳 سجلات طلبات السحب", callback_data="owner_withdraw_section",
-            style="primary",
-        )],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
+    rows = pair_buttons([
+        InlineKeyboardButton("⚙️ إعدادات", callback_data="points_settings",
+                             style="primary", **emoji_kwargs("gear")),
+        InlineKeyboardButton("💎 إدارة نقاط المستخدمين", callback_data="points_manage_section", style="primary"),
+        InlineKeyboardButton("💳 سجلات طلبات السحب", callback_data="owner_withdraw_section", style="primary"),
     ])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -5428,19 +5408,23 @@ def build_points_manage_section_message() -> tuple:
 
 
 def build_points_manage_section_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ إضافة نقاط لمستخدم", callback_data="points_manage_add_lookup", style="success")],
-        [InlineKeyboardButton("➖ خصم نقاط من مستخدم", callback_data="points_manage_deduct_lookup", style="danger")],
-        [InlineKeyboardButton("📋 تصفح جميع المستخدمين", callback_data="points_browse:list:1", style="primary")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_points_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
+    rows = pair_buttons([
+        InlineKeyboardButton("➕ إضافة نقاط لمستخدم", callback_data="points_manage_add_lookup", style="success"),
+        InlineKeyboardButton("➖ خصم نقاط من مستخدم", callback_data="points_manage_deduct_lookup", style="danger"),
+        InlineKeyboardButton("📋 تصفح جميع المستخدمين", callback_data="points_browse:list:1", style="primary"),
     ])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_points_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 USERS_BROWSE_PAGE_SIZE = 20
 
 
-def _users_browse_display_name(row: dict) -> str:
+def _display_name(row: dict) -> str:
+    """اسم معروض موحّد لأي مستخدم عبر كل أقسام البوت (تصفّح النقاط،
+    المشرفين، أصحاب روابط الإحالة، ...) — دالة واحدة مشتركة بدل تكرارها
+    باسم مختلف في كل قسم."""
     first_name = row.get("first_name")
     username = row.get("username")
     if first_name:
@@ -5448,6 +5432,34 @@ def _users_browse_display_name(row: dict) -> str:
     if username:
         return f"@{username}"
     return str(row.get("user_id"))
+
+
+def build_pager_nav_row(page: int, total_pages: int, page_callback: str, noop_callback: str) -> list:
+    """صف تنقّل موحّد «◀️ السابق / صفحة X من Y / التالي ▶️» يُستخدم في كل
+    قوائم الصفحات بالبوت (تصفّح المستخدمين، سجل العمليات، القنوات، أخطاء
+    الصيانة، المشرفين، أصحاب روابط الإحالة، السحوبات، السحب السريع، ...)
+    بدل تكرار نفس منطق التنقّل في كل قسم على حدة.
+
+    page_callback: نص callback_data يحتوي '{page}' ليُستبدل برقم الصفحة
+    الجديد عند الضغط على السابق/التالي، مثل 'owner_logs:{page}' أو
+    'owner_admins_list:view:{page}' (يمكن تضمين أي متغيّرات إضافية داخل
+    النص طالما بقي '{page}' هو الجزء المتغيّر الوحيد).
+    noop_callback: callback_data لزر رقم الصفحة نفسه (بلا أي إجراء)."""
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=page_callback.format(page=page - 1)))
+    nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data=noop_callback))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=page_callback.format(page=page + 1)))
+    return nav_row
+
+
+def pair_buttons(buttons: list) -> list:
+    """يحوّل قائمة أزرار بعرض السطر الكامل (زر واحد لكل سطر) إلى صفوف من
+    زرّين متجاورين في مستطيل واحد صغير — يُستخدم لتصغير القوائم الطويلة
+    (قوائم أقسام المالك، تصفّح المستخدمين، ...) بدل زر عريض واحد لكل سطر.
+    إن كان عدد الأزرار فرديًا يبقى آخر زر بمفرده في سطره."""
+    return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
 
 
 def build_users_points_browse_message(rows: list, page: int,
@@ -5482,24 +5494,24 @@ def build_users_points_browse_keyboard(rows: list, page: int, callback_prefix: s
     page_items = rows[start:start + USERS_BROWSE_PAGE_SIZE]
 
     kb_rows = []
+    user_buttons = []
     for row in page_items:
         uid = row.get("user_id")
-        name = _users_browse_display_name(row)
+        name = _display_name(row)
+        if len(name) > 10:
+            name = name[:10] + "…"
         pts = row.get("points", 0)
         refs = row.get("referred_count", 0)
-        kb_rows.append([InlineKeyboardButton(
-            f"👤 {name} — 💎 {pts} — 📥 {refs}",
+        user_buttons.append(InlineKeyboardButton(
+            f"{name} 💎{pts} 📥{refs}",
             callback_data=f"{callback_prefix}:pick:{uid}:{page}",
-        )])
+        ))
+    kb_rows.extend(pair_buttons(user_buttons))
 
     if total_pages > 1:
-        nav_row = []
-        if page > 1:
-            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"{callback_prefix}:list:{page - 1}"))
-        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data=f"{callback_prefix}:noop"))
-        if page < total_pages:
-            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"{callback_prefix}:list:{page + 1}"))
-        kb_rows.append(nav_row)
+        kb_rows.append(build_pager_nav_row(
+            page, total_pages, f"{callback_prefix}:list:{{page}}", f"{callback_prefix}:noop",
+        ))
 
     kb_rows.append([InlineKeyboardButton("🔙 رجوع", callback_data=back_callback, style="danger",
                                          **emoji_kwargs("back_section_btn"))])
@@ -5507,7 +5519,7 @@ def build_users_points_browse_keyboard(rows: list, page: int, callback_prefix: s
 
 
 def build_user_points_profile_message(row: dict) -> tuple:
-    name = _users_browse_display_name(row)
+    name = _display_name(row)
     content = [
         "👤 رصيد نقاط المستخدم",
         "\n\n",
@@ -5575,16 +5587,15 @@ def build_owner_sub_section_message() -> tuple:
 
 
 def build_owner_sub_section_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ إضافة قناة", callback_data="owner_sub_add", style="success")],
-        [InlineKeyboardButton("📋 عرض جميع القنوات", callback_data="owner_sub_list:1", style="primary")],
-        [InlineKeyboardButton("🔢 ترتيب القنوات", callback_data="owner_sub_reorder", style="primary")],
-        [InlineKeyboardButton(
-            "📊 إحصائيات جميع قنوات الاشتراك", callback_data="owner_sub_stats_all", style="primary",
-        )],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
+    rows = pair_buttons([
+        InlineKeyboardButton("➕ إضافة قناة", callback_data="owner_sub_add", style="success"),
+        InlineKeyboardButton("📋 عرض جميع القنوات", callback_data="owner_sub_list:1", style="primary"),
+        InlineKeyboardButton("🔢 ترتيب القنوات", callback_data="owner_sub_reorder", style="primary"),
+        InlineKeyboardButton("📊 إحصائيات جميع قنوات الاشتراك", callback_data="owner_sub_stats_all", style="primary"),
     ])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_owner_sub_list_message(channels: list) -> tuple:
@@ -5608,24 +5619,19 @@ def build_owner_sub_list_keyboard(channels: list, page: int) -> InlineKeyboardMa
     start = (page - 1) * REQUIRED_CHANNELS_PAGE_SIZE
     page_items = channels[start:start + REQUIRED_CHANNELS_PAGE_SIZE]
 
-    rows = []
+    item_buttons = []
     for ch in page_items:
         dot = "🟢" if ch.get("enabled", True) else "🔴"
         label = f"{dot} @{ch.get('username', '')}"
         if ch.get("target_count"):
             label += f" 🎯{ch.get('target_count')}"
-        rows.append([InlineKeyboardButton(
+        item_buttons.append(InlineKeyboardButton(
             label, callback_data=f"owner_sub_channel:{ch['channel_id']}", style="primary",
-        )])
+        ))
+    rows = pair_buttons(item_buttons)
 
     if total_pages > 1:
-        nav_row = []
-        if page > 1:
-            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"owner_sub_list:{page - 1}"))
-        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="owner_sub_noop"))
-        if page < total_pages:
-            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"owner_sub_list:{page + 1}"))
-        rows.append(nav_row)
+        rows.append(build_pager_nav_row(page, total_pages, "owner_sub_list:{page}", "owner_sub_noop"))
 
     rows.append([InlineKeyboardButton("➕ إضافة قناة", callback_data="owner_sub_add", style="success")])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_section", style="danger",
@@ -5822,19 +5828,20 @@ def build_owner_users_section_message() -> tuple:
 
 
 def build_owner_users_section_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔎 البحث عن مستخدم", callback_data="owner_users_search", style="primary")],
-        [InlineKeyboardButton("👤 عرض بيانات مستخدم", callback_data="owner_users_view", style="primary")],
-        [InlineKeyboardButton("🚫 حظر مستخدم", callback_data="owner_users_ban", style="danger")],
-        [InlineKeyboardButton("✅ فك حظر مستخدم", callback_data="owner_users_unban", style="success")],
-        [InlineKeyboardButton("📋 قائمة المحظورين", callback_data="owner_users_banned:1", style="primary")],
-        [InlineKeyboardButton("📊 إحصائيات المستخدمين", callback_data="owner_users_stats", style="primary")],
-        [InlineKeyboardButton(
+    rows = pair_buttons([
+        InlineKeyboardButton("🔎 البحث عن مستخدم", callback_data="owner_users_search", style="primary"),
+        InlineKeyboardButton("👤 عرض بيانات مستخدم", callback_data="owner_users_view", style="primary"),
+        InlineKeyboardButton("🚫 حظر مستخدم", callback_data="owner_users_ban", style="danger"),
+        InlineKeyboardButton("✅ فك حظر مستخدم", callback_data="owner_users_unban", style="success"),
+        InlineKeyboardButton("📋 قائمة المحظورين", callback_data="owner_users_banned:1", style="primary"),
+        InlineKeyboardButton("📊 إحصائيات المستخدمين", callback_data="owner_users_stats", style="primary"),
+        InlineKeyboardButton(
             "📋 تصفح المستخدمين (النقاط والإحالات)", callback_data="users_browse:list:1", style="primary",
-        )],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
+        ),
     ])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_user_profile_message(row: dict) -> tuple:
@@ -5900,22 +5907,17 @@ def build_owner_users_banned_list_keyboard(banned_users: list, page: int) -> Inl
     start = (page - 1) * BANNED_USERS_PAGE_SIZE
     page_items = banned_users[start:start + BANNED_USERS_PAGE_SIZE]
 
-    rows = []
+    item_buttons = []
     for row in page_items:
         uid = row.get("user_id")
         name = row.get("first_name") or (f"@{row['username']}" if row.get("username") else str(uid))
-        rows.append([InlineKeyboardButton(
+        item_buttons.append(InlineKeyboardButton(
             f"🚫 {name}", callback_data=f"owner_users_profile:{uid}", style="primary",
-        )])
+        ))
+    rows = pair_buttons(item_buttons)
 
     if total_pages > 1:
-        nav_row = []
-        if page > 1:
-            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"owner_users_banned:{page - 1}"))
-        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="owner_users_noop"))
-        if page < total_pages:
-            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"owner_users_banned:{page + 1}"))
-        rows.append(nav_row)
+        rows.append(build_pager_nav_row(page, total_pages, "owner_users_banned:{page}", "owner_users_noop"))
 
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger",
                                       **emoji_kwargs("back_section_btn"))])
@@ -5948,16 +5950,6 @@ def build_owner_users_stats_keyboard() -> InlineKeyboardMarkup:
 # منهم بدقة (إضافة مشرفين، حذف سحوبات، حذف سحب سريع، إدارة مستخدمين، ...).
 # ---------------------------------------------------------------------------
 
-def _moderator_display_name(row: dict) -> str:
-    username = row.get("username")
-    first_name = row.get("first_name")
-    if first_name:
-        return first_name
-    if username:
-        return f"@{username}"
-    return str(row.get("user_id"))
-
-
 def build_owner_admins_section_message() -> tuple:
     count = len(list_moderators())
     return build_text_with_emojis([
@@ -5972,14 +5964,15 @@ def build_owner_admins_section_message() -> tuple:
 
 
 def build_owner_admins_section_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ إضافة مشرف", callback_data="owner_admins_add", style="success")],
-        [InlineKeyboardButton("📋 عرض المشرفين", callback_data="owner_admins_list:view:1", style="primary")],
-        [InlineKeyboardButton("🔐 صلاحيات مشرف", callback_data="owner_admins_list:perms:1", style="primary")],
-        [InlineKeyboardButton("🗑️ حذف مشرف", callback_data="owner_admins_list:remove:1", style="danger")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
+    rows = pair_buttons([
+        InlineKeyboardButton("➕ إضافة مشرف", callback_data="owner_admins_add", style="success"),
+        InlineKeyboardButton("📋 عرض المشرفين", callback_data="owner_admins_list:view:1", style="primary"),
+        InlineKeyboardButton("🔐 صلاحيات مشرف", callback_data="owner_admins_list:perms:1", style="primary"),
+        InlineKeyboardButton("🗑️ حذف مشرف", callback_data="owner_admins_list:remove:1", style="danger"),
     ])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 ADMINS_PAGE_SIZE = 8
@@ -6003,20 +5996,17 @@ def build_owner_admins_list_keyboard(mods: list, mode: str, page: int) -> Inline
     start = (page - 1) * ADMINS_PAGE_SIZE
     page_items = mods[start:start + ADMINS_PAGE_SIZE]
 
-    rows = []
+    item_buttons = []
     for row in page_items:
         uid = row.get("user_id")
-        name = _moderator_display_name(row)
-        rows.append([InlineKeyboardButton(f"👤 {name}", callback_data=f"owner_admins_pick:{mode}:{uid}")])
+        name = _display_name(row)
+        item_buttons.append(InlineKeyboardButton(f"👤 {name}", callback_data=f"owner_admins_pick:{mode}:{uid}"))
+    rows = pair_buttons(item_buttons)
 
     if total_pages > 1:
-        nav_row = []
-        if page > 1:
-            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"owner_admins_list:{mode}:{page - 1}"))
-        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="owner_admins_noop"))
-        if page < total_pages:
-            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"owner_admins_list:{mode}:{page + 1}"))
-        rows.append(nav_row)
+        rows.append(build_pager_nav_row(
+            page, total_pages, f"owner_admins_list:{mode}:{{page}}", "owner_admins_noop",
+        ))
 
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_admins_section", style="danger",
                                       **emoji_kwargs("back_section_btn"))])
@@ -6052,7 +6042,7 @@ def build_moderator_profile_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 
 def build_moderator_perms_message(row: dict) -> tuple:
-    name = _moderator_display_name(row)
+    name = _display_name(row)
     content = [
         "🔐 تعديل صلاحيات المشرف",
         "\n\n",
@@ -6078,7 +6068,7 @@ def build_moderator_perms_keyboard(row: dict) -> InlineKeyboardMarkup:
 
 
 def build_moderator_delete_confirm_message(row: dict) -> tuple:
-    name = _moderator_display_name(row)
+    name = _display_name(row)
     content = [
         "🗑️ تأكيد حذف مشرف",
         "\n\n",
@@ -6100,16 +6090,6 @@ def build_moderator_delete_confirm_keyboard(user_id: int) -> InlineKeyboardMarku
 # 🔗 واجهات إدارة روابط الدعوة (قسم المالك)
 # ---------------------------------------------------------------------------
 
-def _referrer_display_name(row: dict) -> str:
-    username = row.get("username")
-    first_name = row.get("first_name")
-    if first_name:
-        return first_name
-    if username:
-        return f"@{username}"
-    return str(row.get("user_id"))
-
-
 def build_owner_referrals_section_message() -> tuple:
     stats = get_referrals_overview_stats()
     return build_text_with_emojis([
@@ -6130,16 +6110,17 @@ def build_owner_referrals_section_message() -> tuple:
 
 
 def build_owner_referrals_section_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ إضافة مستخدم", callback_data="owner_referrals_add", style="success")],
-        [InlineKeyboardButton("🗑️ إزالة مستخدم", callback_data="owner_referrals_list:remove:1", style="danger")],
-        [InlineKeyboardButton("📋 أصحاب الروابط", callback_data="owner_referrals_list:view:1", style="primary")],
-        [InlineKeyboardButton("🔍 البحث عن مستخدم", callback_data="owner_referrals_search", style="primary")],
-        [InlineKeyboardButton("📊 إحصائيات الإحالة", callback_data="owner_referrals_stats", style="primary")],
-        [InlineKeyboardButton("⚙️ إعدادات النسبة", callback_data="owner_referrals_settings", style="primary")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
+    rows = pair_buttons([
+        InlineKeyboardButton("➕ إضافة مستخدم", callback_data="owner_referrals_add", style="success"),
+        InlineKeyboardButton("🗑️ إزالة مستخدم", callback_data="owner_referrals_list:remove:1", style="danger"),
+        InlineKeyboardButton("📋 أصحاب الروابط", callback_data="owner_referrals_list:view:1", style="primary"),
+        InlineKeyboardButton("🔍 البحث عن مستخدم", callback_data="owner_referrals_search", style="primary"),
+        InlineKeyboardButton("📊 إحصائيات الإحالة", callback_data="owner_referrals_stats", style="primary"),
+        InlineKeyboardButton("⚙️ إعدادات النسبة", callback_data="owner_referrals_settings", style="primary"),
     ])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 REFERRALS_PAGE_SIZE = 8
@@ -6162,24 +6143,21 @@ def build_owner_referrals_list_keyboard(rows: list, mode: str, page: int) -> Inl
     start = (page - 1) * REFERRALS_PAGE_SIZE
     page_items = rows[start:start + REFERRALS_PAGE_SIZE]
 
-    kb_rows = []
+    item_buttons = []
     for row in page_items:
         uid = row.get("user_id")
-        name = _referrer_display_name(row)
+        name = _display_name(row)
         status_icon = "🟢" if row.get("active") else "🔴"
-        kb_rows.append([InlineKeyboardButton(
-            f"{status_icon} {name} — {row.get('percentage')}%",
+        item_buttons.append(InlineKeyboardButton(
+            f"{status_icon} {name} {row.get('percentage')}%",
             callback_data=f"owner_referrals_pick:{mode}:{uid}",
-        )])
+        ))
+    kb_rows = pair_buttons(item_buttons)
 
     if total_pages > 1:
-        nav_row = []
-        if page > 1:
-            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"owner_referrals_list:{mode}:{page - 1}"))
-        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="owner_referrals_noop"))
-        if page < total_pages:
-            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"owner_referrals_list:{mode}:{page + 1}"))
-        kb_rows.append(nav_row)
+        kb_rows.append(build_pager_nav_row(
+            page, total_pages, f"owner_referrals_list:{mode}:{{page}}", "owner_referrals_noop",
+        ))
 
     kb_rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_section", style="danger",
                                          **emoji_kwargs("back_section_btn"))])
@@ -6187,7 +6165,7 @@ def build_owner_referrals_list_keyboard(rows: list, mode: str, page: int) -> Inl
 
 
 def build_referrer_profile_message(row: dict) -> tuple:
-    name = _referrer_display_name(row)
+    name = _display_name(row)
     status = "🟢 مفعّل" if row.get("active") else "🔴 معطّل"
     content = [
         "👤 بيانات صاحب رابط الدعوة",
@@ -6223,7 +6201,7 @@ def build_referrer_profile_keyboard(row: dict) -> InlineKeyboardMarkup:
 
 
 def build_referrer_delete_confirm_message(row: dict) -> tuple:
-    name = _referrer_display_name(row)
+    name = _display_name(row)
     content = [
         "🗑️ تأكيد إزالة صاحب رابط دعوة",
         "\n\n",
@@ -6262,7 +6240,7 @@ def build_owner_referrals_stats_message() -> tuple:
         content.append("\n\n")
         medals = ["🥇", "🥈", "🥉", "🏅", "🎖️"]
         for index, row in enumerate(stats["top"]):
-            name = _referrer_display_name(row)
+            name = _display_name(row)
             content.append(([
                 f"{medals[index]} {index + 1}. {name}\n",
                 f"📥 الإحالات: {row.get('referred_count', 0)} — 💎 النقاط: {row.get('points_earned', 0)}\n",
@@ -6413,15 +6391,16 @@ def build_owner_draws_section_message() -> tuple:
 
 
 def build_owner_draws_section_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 عرض السحوبات", callback_data="admgw_list:all:1", style="primary")],
-        [InlineKeyboardButton("🟢 السحوبات النشطة", callback_data="admgw_list:active:1", style="success")],
-        [InlineKeyboardButton("⏰ السحوبات المنتهية", callback_data="admgw_list:closed:1", style="primary")],
-        [InlineKeyboardButton("🗑️ حذف أي سحب", callback_data="admgw_list:delete:1", style="danger")],
-        [InlineKeyboardButton("📊 إحصائيات السحوبات", callback_data="admgw_stats", style="primary")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
+    rows = pair_buttons([
+        InlineKeyboardButton("📋 عرض السحوبات", callback_data="admgw_list:all:1", style="primary"),
+        InlineKeyboardButton("🟢 السحوبات النشطة", callback_data="admgw_list:active:1", style="success"),
+        InlineKeyboardButton("⏰ السحوبات المنتهية", callback_data="admgw_list:closed:1", style="primary"),
+        InlineKeyboardButton("🗑️ حذف أي سحب", callback_data="admgw_list:delete:1", style="danger"),
+        InlineKeyboardButton("📊 إحصائيات السحوبات", callback_data="admgw_stats", style="primary"),
     ])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_admgw_list_message(filt: str, page: int, total_pages: int, count: int) -> tuple:
@@ -6456,13 +6435,9 @@ def build_admgw_list_keyboard(giveaways: list, filt: str, page: int, total_pages
             )])
 
     if total_pages > 1:
-        nav_row = []
-        if page > 1:
-            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"admgw_list:{filt}:{page - 1}"))
-        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="admgw_noop"))
-        if page < total_pages:
-            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"admgw_list:{filt}:{page + 1}"))
-        rows.append(nav_row)
+        rows.append(build_pager_nav_row(
+            page, total_pages, f"admgw_list:{filt}:{{page}}", "admgw_noop",
+        ))
 
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_draws_section", style="danger",
                                       **emoji_kwargs("back_section_btn"))])
@@ -6577,15 +6552,16 @@ def build_owner_quick_roulette_section_message() -> tuple:
 
 
 def build_owner_quick_roulette_section_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 عرض عمليات السحب السريع", callback_data="admrr_list:all:1", style="primary")],
-        [InlineKeyboardButton("🟢 النشطة", callback_data="admrr_list:active:1", style="success")],
-        [InlineKeyboardButton("⏰ المنتهية", callback_data="admrr_list:closed:1", style="primary")],
-        [InlineKeyboardButton("🗑️ حذف أي سحب سريع", callback_data="admrr_list:delete:1", style="danger")],
-        [InlineKeyboardButton("📊 إحصائيات السحب السريع", callback_data="admrr_stats", style="primary")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
+    rows = pair_buttons([
+        InlineKeyboardButton("📋 عرض عمليات السحب السريع", callback_data="admrr_list:all:1", style="primary"),
+        InlineKeyboardButton("🟢 النشطة", callback_data="admrr_list:active:1", style="success"),
+        InlineKeyboardButton("⏰ المنتهية", callback_data="admrr_list:closed:1", style="primary"),
+        InlineKeyboardButton("🗑️ حذف أي سحب سريع", callback_data="admrr_list:delete:1", style="danger"),
+        InlineKeyboardButton("📊 إحصائيات السحب السريع", callback_data="admrr_stats", style="primary"),
     ])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_admrr_list_message(filt: str, page: int, total_pages: int, count: int) -> tuple:
@@ -6620,13 +6596,9 @@ def build_admrr_list_keyboard(roulettes: list, filt: str, page: int, total_pages
             )])
 
     if total_pages > 1:
-        nav_row = []
-        if page > 1:
-            nav_row.append(InlineKeyboardButton("◀️ السابق", callback_data=f"admrr_list:{filt}:{page - 1}"))
-        nav_row.append(InlineKeyboardButton(f"صفحة {page}/{total_pages}", callback_data="admrr_noop"))
-        if page < total_pages:
-            nav_row.append(InlineKeyboardButton("التالي ▶️", callback_data=f"admrr_list:{filt}:{page + 1}"))
-        rows.append(nav_row)
+        rows.append(build_pager_nav_row(
+            page, total_pages, f"admrr_list:{filt}:{{page}}", "admrr_noop",
+        ))
 
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_quick_roulette_section", style="danger",
                                       **emoji_kwargs("back_section_btn"))])
@@ -6728,13 +6700,14 @@ def build_owner_broadcast_section_message() -> tuple:
 
 
 def build_owner_broadcast_section_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 إرسال لجميع المستخدمين", callback_data="broadcast_send_menu", style="primary")],
-        [InlineKeyboardButton("⏹️ إيقاف الإذاعة", callback_data="broadcast_stop", style="danger")],
-        [InlineKeyboardButton("📊 إحصائيات الإرسال", callback_data="broadcast_stats", style="primary")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
+    rows = pair_buttons([
+        InlineKeyboardButton("📢 إرسال لجميع المستخدمين", callback_data="broadcast_send_menu", style="primary"),
+        InlineKeyboardButton("⏹️ إيقاف الإذاعة", callback_data="broadcast_stop", style="danger"),
+        InlineKeyboardButton("📊 إحصائيات الإرسال", callback_data="broadcast_stats", style="primary"),
     ])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_broadcast_send_menu_message() -> tuple:
