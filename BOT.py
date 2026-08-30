@@ -3163,9 +3163,10 @@ def build_giveaway_channel_message(cliche_text: str, cliche_entities, gw_code: s
                                     autospin: dict = None) -> tuple:
     """منشور السحب الذي يُنشر في القناة/القروب (Image 5).
 
-    gw_code: كود السحب الفريد — يُعرض كسطر صغير أعلى تذييل العلامة بصيغة
-    monospace قابلة للنسخ بضغطة واحدة، حتى يتمكن المالك أو أي مشرف من
-    استخدامه لاحقًا للبحث عن هذا السحب تحديدًا داخل قسم إدارة السحوبات.
+    gw_code: كود السحب الفريد. لا يُعرض داخل منشور القناة/القروب العام —
+    يبقى مقصورًا على قسم «🎁 السحوبات» الخاص بالمالك (build_admgw_detail_message)
+    حيث يظهر بصيغة monospace قابلة للنسخ بضغطة واحدة، حتى يتمكن المالك أو أي
+    مشرف من استخدامه لاحقًا للبحث عن هذا السحب تحديدًا داخل قسم إدارة السحوبات.
 
     إذا كان السحب مشروطًا بالتصويت لمتسابق (vote_link)، يُضاف أعلى تذييل العلامة
     التجارية اقتباس مزخرف «شرط تصويت» تحمل فيه كلمة «هنا» رابطًا مخفيًا يفتح
@@ -3212,8 +3213,11 @@ def build_giveaway_channel_message(cliche_text: str, cliche_entities, gw_code: s
         quote_content = [icon, " ", notice_text]
         extra_parts += ["\n\n", (quote_content, "blockquote", None)]
 
-    if gw_code:
-        extra_parts += ["\n\n", "🆔 كود السحب : ", (gw_code, "code", None)]
+    # 🚫 لم يعد كود السحب يُعرض داخل منشور القناة/القروب العام — أصبح مقصورًا
+    # على قسم «🎁 السحوبات» الخاص بالمالك (build_admgw_detail_message) حيث
+    # يظهر بصيغة code قابلة للنسخ بضغطة واحدة. الوسيط gw_code ما زال يُمرَّر
+    # لهذه الدالة لأنه يُستخدم في بناء الكيبورد (build_giveaway_channel_keyboard)
+    # في مواضع الاستدعاء، لكنه لم يعد يُدرَج ضمن نص المنشور نفسه.
 
     extra_text, extra_entities = build_text_with_emojis(extra_parts) if extra_parts else ("", [])
     footer_text, footer_entities = build_brand_footer()
@@ -6960,13 +6964,19 @@ def build_admgw_list_keyboard(giveaways: list, filt: str, page: int, total_pages
 
 
 def build_admgw_detail_message(giveaway, index, channel_title: str, participants_total: int) -> tuple:
+    """تفاصيل السحب داخل قسم «🎁 السحوبات» الخاص بالمالك (Image 3).
+
+    الكود يُعرض بصيغة code (monospace) عبر تركيبة (gw_code, "code", None)
+    بدل تضمينه كنص عادي داخل سطر الاقتباس، حتى يستطيع المالك/المشرف نسخه
+    بضغطة واحدة مباشرة من هذه الرسالة — هذا هو المكان الوحيد الذي يظهر
+    فيه الكود الآن، بعد إزالته من منشور السحب العام في القناة/القروب."""
     status_line = "🟢 نشط" if giveaway["status"] in ("open", "paused") else "🔴 منتهي"
     header = f"🎁 السحب #{index}" if index else "🎁 تفاصيل السحب"
     parts = [
         ([
             header,
             "\n\n",
-            f"🆔 الكود : {giveaway['gw_code']}\n",
+            "🆔 الكود : ", (str(giveaway['gw_code']), "code", None), "\n",
             f"👑 صاحب السحب : {giveaway['owner_id']}\n",
             f"👥 عدد المشاركين : {participants_total}\n",
             f"🏆 عدد الفائزين : {giveaway['winners_count']}\n",
