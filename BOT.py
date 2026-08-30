@@ -4062,6 +4062,64 @@ def get_top_channel_points(limit: int = 5):
     return candidates[:max(1, min(int(limit), 5))]
 
 
+def bump_channel_new_users(chat_id: int) -> None:
+    """يزيد عدّاد المستخدمين الجدد الذين انضمّوا للبوت عبر قناة معيّنة (من خلال
+    سحب أو مسابقة نُشرت فيها) بمقدار واحد. يُستدعى مرة واحدة فقط لكل مستخدم
+    جديد فعليًا (is_genuinely_new=True)، بمعزل تام عن نظام النقاط."""
+    if not chat_id:
+        return
+    ref = fs_db().collection("channel_new_users").document(str(chat_id))
+    _fs_bump_counter(ref, "new_users", 1, extra={"chat_id": chat_id})
+
+
+def get_channel_roulette_counts() -> dict:
+    """يحسب عدد عمليات «الروليت» (سحوبات + مسابقات) التي استُضيفت في كل قناة،
+    بتجميع وثائق مجموعتي giveaways وcontests حسب chat_id. لا يشمل الروليت
+    السريع لأن بنية بياناته غير مرتبطة بأي قناة محددة (يُنشر عبر البحث
+    المضمّن Inline داخل أي محادثة)."""
+    counts = {}
+    for doc in fs_db().collection("giveaways").stream():
+        chat_id = doc.to_dict().get("chat_id")
+        if chat_id:
+            counts[chat_id] = counts.get(chat_id, 0) + 1
+    for doc in fs_db().collection("contests").stream():
+        chat_id = doc.to_dict().get("chat_id")
+        if chat_id:
+            counts[chat_id] = counts.get(chat_id, 0) + 1
+    return counts
+
+
+def get_channel_new_users_counts() -> dict:
+    """يعيد عدد المستخدمين الجدد المسجَّلين فعليًا لكل قناة (chat_id) من
+    مجموعة channel_new_users."""
+    counts = {}
+    for doc in fs_db().collection("channel_new_users").stream():
+        data = doc.to_dict()
+        chat_id = data.get("chat_id")
+        if chat_id:
+            counts[chat_id] = data.get("new_users", 0) or 0
+    return counts
+
+
+def get_top_channels_full_stats(limit: int = 5) -> list:
+    """يجمع لكل قناة من أعلى القنوات نقاطًا: عدد عمليات الروليت (سحوبات +
+    مسابقات) المستضافة فيها، وعدد المستخدمين الجدد القادمين للبوت عبرها،
+    إضافة للنقاط المكتسبة منها — تُستخدم في شاشة «📊 الإحصائيات» العامة."""
+    top_points = get_top_channel_points(limit)
+    roulette_counts = get_channel_roulette_counts()
+    new_user_counts = get_channel_new_users_counts()
+    result = []
+    for row in top_points:
+        chat_id = row["chat_id"]
+        result.append({
+            "chat_id": chat_id,
+            "chat_title": row["chat_title"],
+            "points": row.get("points") or 0,
+            "roulette_count": roulette_counts.get(chat_id, 0),
+            "new_users": new_user_counts.get(chat_id, 0),
+        })
+    return result
+
 
 def register_bot_user_and_check_new(user_id: int, user=None) -> bool:
     """
@@ -5798,29 +5856,66 @@ def build_points_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def build_points_statistics_message() -> tuple:
-    """عرض أعلى خمس قنوات بحسب النقاط المسجلة فعليًا."""
-    rows = get_top_channel_points(5)
+async def build_points_statistics_message(context: ContextTypes.DEFAULT_TYPE) -> tuple:
+    """لوحة إحصائيات عامة احترافية: تعرض أعلى 5 قنوات نشاطًا (وفق النقاط
+    المسجَّلة فعليًا)، ولكل قناة اسمها كرابط قابل للضغط، وعدد عمليات «الروليت»
+    التي استضافتها (سحوبات + مسابقات)، وعدد المستخدمين الجدد الذين دخلوا
+    البوت عبرها، ونقاطها. تُذيَّل بملخّص عام يشمل الروليت السريع أيضًا."""
+    rows = get_top_channels_full_stats(5)
+    quick_stats = get_quick_roulette_statistics()
+    gw_stats = get_giveaways_statistics()
+    ct_stats = get_contests_statistics()
+
+    total_roulette_ops = gw_stats["total"] + ct_stats["total"] + quick_stats["total"]
+    grand_new_users = get_channel_new_users_counts()
+    total_new_via_channels = sum(grand_new_users.values()) if grand_new_users else 0
+
     content = [
-        ("📊", EMOJI["chart"]),
-        " إحصائيات النقاط",
-        "\n\n",
+        ("📊", EMOJI["chart"]), " لوحة الإحصائيات",
+        "\n", "⟡▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬⟡", "\n\n",
     ]
+
+    content.append(([
+        ("🎡", EMOJI["roulette"]), " إجمالي عمليات الروليت: ", f"{total_roulette_ops}", "\n",
+        ("👥", EMOJI["people"]), " إجمالي المستخدمين الجدد عبر القنوات: ", f"{total_new_via_channels}",
+    ], "blockquote", None))
+    content.append("\n\n")
+
     if not rows:
-        content.append((["📭 لا توجد نقاط مسجلة للقنوات حتى الآن ”"], "blockquote", None))
+        content.append((["📭 لا توجد إحصائيات مسجّلة للقنوات حتى الآن ”"], "blockquote", None))
     else:
-        content.append((["🏆 أعلى 5 قنوات بالنقاط ”"], "blockquote", None))
+        content.append(([("🏆", EMOJI["trophy_win"]), " الصدارة — أعلى 5 قنوات أداءً ”"], "blockquote", None))
         content.append("\n\n")
         medals = ["🥇", "🥈", "🥉", "🏅", "🎖️"]
         for index, row in enumerate(rows):
             title = row["chat_title"] or str(row["chat_id"])
-            content.append(([
-                f"{medals[index]} {index + 1}. {title}\n",
-                f"💎 النقاط: {row['points']}\n",
-                "━━━━━━━━━━━━\n",
-            ], "blockquote", None))
-    content.append("\n")
-    content.append((["📌 تُحتسب النقاط من المشاركات المؤكدة في سحوبات منع الرشق فقط ”"], "blockquote", None))
+            link = ""
+            try:
+                link = await build_contest_channel_join_link(context, row["chat_id"])
+            except Exception:
+                link = ""
+            name_part = (title, "link", link) if link else title
+            block = [
+                f"{medals[index]} ", name_part, "\n",
+                "⟡ ", ("🎡", EMOJI["roulette"]), f" عمليات الروليت: {row['roulette_count']}\n",
+                "⟡ ", ("👥", EMOJI["people"]), f" مستخدمون جدد: {row['new_users']}\n",
+                "⟡ ", ("💎", EMOJI["star"]), f" النقاط: {row['points']}",
+            ]
+            if index < len(rows) - 1:
+                block.append("\n⟡▬▬▬▬▬▬▬▬▬▬▬▬▬")
+            content.append((block, "blockquote", None))
+            content.append("\n\n" if index < len(rows) - 1 else "\n")
+
+    content.append(([
+        "📌 الترتيب والنقاط يُحتسبان من المشاركات المؤكدة في سحوبات منع الرشق، "
+        "وعدّاد الروليت يشمل السحوبات والمسابقات معًا لكل قناة ”"
+    ], "blockquote", None))
+    if quick_stats["total"]:
+        content.append("\n")
+        content.append(([
+            ("⚡", EMOJI["roulette"]),
+            f" الروليت السريع (غير مرتبط بقناة محددة): {quick_stats['total']} عملية",
+        ], "blockquote", None))
     return build_text_with_emojis([(content, "bold", None)])
 
 
@@ -7117,20 +7212,30 @@ def build_owner_referrals_settings_keyboard() -> InlineKeyboardMarkup:
 
 
 def build_referral_info_block(user_id: int) -> list:
-    """يبني مقطعًا نصيًا (blockquote) يعرض رابط الدعوة الخاص بالمستخدم وبياناته
-    إن كان مصرَّحًا له بالإحالة ورابطه مفعّل حاليًا. يُستخدم داخل قسم ربح
-    (build_points_message) — يعود بقائمة فارغة إن لم يكن مؤهّلًا فلا يظهر شيء."""
+    """يبني قسمًا مستقلاً منسَّقًا باحترافية يعرض رابط الدعوة الخاص بالمستخدم
+    وبياناته، إن كان مصرَّحًا له بالإحالة ورابطه مفعّل حاليًا. يُستخدم داخل
+    قسم ربح (build_points_message) — يعود بقائمة فارغة إن لم يكن مؤهّلًا
+    فلا يظهر شيء. الرابط يُعرض بصيغة code (monospace) لينسخه المستخدم بضغطة
+    واحدة بدل رابط خام قد يلتف بشكل غير مرتّب."""
     row = get_referral(user_id)
     if not row or not row.get("active"):
         return []
+    link = get_referral_link(user_id)
     return [
         "\n\n",
+        "⟡▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬⟡",
+        "\n\n",
+        "🔗 قسم الإحالة الخاص بك",
+        "\n\n",
         ([
-            "🔗 رابط دعوتك الخاص\n",
-            f"{get_referral_link(user_id)}\n",
-            f"📊 نسبتك: {row.get('percentage')}%\n",
-            f"📥 عدد الإحالات: {row.get('referred_count', 0)}\n",
-            f"💎 أرباح الإحالة: {row.get('points_earned', 0)} نقطة ”",
+            "📎 رابطك الخاص (اضغط عليه لنسخه) :\n",
+            (link, "code", None),
+        ], "blockquote", None),
+        "\n\n",
+        ([
+            f"📊 نسبتك : {row.get('percentage')}%\n",
+            f"📥 عدد الإحالات : {row.get('referred_count', 0)}\n",
+            f"💎 أرباح الإحالة : {row.get('points_earned', 0)} نقطة ”",
         ], "blockquote", None),
     ]
 
@@ -9014,6 +9119,11 @@ async def finalize_giveaway_join(context: ContextTypes.DEFAULT_TYPE, gw_code: st
     added = add_giveaway_participant(gw_code, user.id, display_name, user.username)
     if not added:
         return
+    if is_genuinely_new:
+        try:
+            bump_channel_new_users(giveaway["chat_id"])
+        except Exception:
+            logger.exception("تعذّر تحديث عدّاد المستخدمين الجدد لقناة السحب %s", giveaway.get("chat_id"))
     if bool(giveaway["antispam"]) and is_genuinely_new:
         reward_giveaway_user(
             user.id, gw_code, giveaway["owner_id"], giveaway["chat_id"]
@@ -10122,7 +10232,8 @@ async def _contest_participation_callback_inner(update: Update, context: Context
     if data.startswith("comp_confirm_join:"):
         contest_code = data.split(":", 1)[1]
         user = query.from_user
-        if register_bot_user_and_check_new(user.id, user):
+        is_genuinely_new = register_bot_user_and_check_new(user.id, user)
+        if is_genuinely_new:
             await _notify_new_user_join(context, user)
 
         contest = get_contest(contest_code)
@@ -10171,6 +10282,11 @@ async def _contest_participation_callback_inner(update: Update, context: Context
         participant_code = generate_participant_code(contest_code)
         try:
             add_contest_participant(contest_code, user.id, display_name, participant_code)
+            if is_genuinely_new:
+                try:
+                    bump_channel_new_users(contest["chat_id"])
+                except Exception:
+                    logger.exception("تعذّر تحديث عدّاد المستخدمين الجدد لقناة المسابقة %s", contest.get("chat_id"))
         except sqlite3.IntegrityError:
             existing = get_contest_participant(contest_code, user.id)
             if existing:
@@ -10987,7 +11103,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if query.data == "points_stats":
-        text, entities = build_points_statistics_message()
+        text, entities = await build_points_statistics_message(context)
         await query.edit_message_text(
             text=text, entities=entities,
             reply_markup=build_points_statistics_keyboard(),
