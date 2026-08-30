@@ -22,6 +22,7 @@ def is_owner(user_id: int) -> bool:
 MODERATOR_PERMISSIONS = {
     "add_admins": "➕ إضافة مشرفين جدد",
     "delete_giveaways": "🎁 حذف السحوبات",
+    "delete_contests": "🏁 حذف المسابقات",
     "delete_quick_roulette": "⚡ حذف السحب السريع",
     "manage_users": "👥 إدارة المستخدمين (حظر/فك حظر)",
     "manage_subscription": "📢 إدارة الاشتراك الإجباري",
@@ -204,7 +205,7 @@ from telegram import (
     BotCommand,
     LinkPreviewOptions,
 )
-from telegram.error import RetryAfter
+from telegram.error import RetryAfter, BadRequest, Forbidden
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -230,7 +231,7 @@ TECH_SUPPORT_USERNAME = "y66vlBOT"
 SUPPORT_BOT_STARS_AMOUNT = 5
 
 BRAND_NAME = "𝚁𝙾𝚄𝙻𝙴𝚃𝚃𝙴 𝚅𝙾𝚁𝚃𝙴𝚇"
-BRAND_URL = "https://t.me/e_ggf"
+BRAND_URL = "https://t.me/NOP3BOT"
 
 GIVEAWAYS_LINK_TEXT = "السحوبات"
 GIVEAWAYS_CHANNEL_URL = "https://t.me/n_bbo"
@@ -420,7 +421,7 @@ def build_text_with_emojis(parts) -> tuple:
                 length = len(placeholder.encode("utf-16-le")) // 2
                 entities.append(MessageEntity(type=MessageEntity.CUSTOM_EMOJI, offset=offset, length=length, custom_emoji_id=custom_emoji_id))
                 text += placeholder
-            elif len(p) == 3 and p[1] in ["bold", "blockquote", "italic", "spoiler"]:
+            elif len(p) == 3 and p[1] in ["bold", "blockquote", "italic", "spoiler", "code"]:
                 content, ent_type, _ = p
                 start_offset = len(text.encode("utf-16-le")) // 2
                 if isinstance(content, list):
@@ -435,6 +436,7 @@ def build_text_with_emojis(parts) -> tuple:
                     "blockquote": MessageEntity.BLOCKQUOTE,
                     "italic": MessageEntity.ITALIC,
                     "spoiler": MessageEntity.SPOILER,
+                    "code": MessageEntity.CODE,
                 }[ent_type]
                 entities.append(MessageEntity(type=t_type, offset=start_offset, length=length))
             elif len(p) == 3 and p[1] == "link":
@@ -1871,7 +1873,8 @@ def build_brand_footer() -> tuple:
 
 
 def build_contest_channel_message(cliche_text: str, cliche_entities, target_count: int,
-                                   end_type: str, time_minutes: int, votes_target: int = None) -> tuple:
+                                   end_type: str, time_minutes: int, votes_target: int = None,
+                                   contest_code: str = None) -> tuple:
     """
     منشور المسابقة الذي يُنشر في القناة/القروب المحدد (صورة image 2):
     - كليشة المسابقة كما أرسلها صاحب المسابقة (بتنسيقاتها الأصلية).
@@ -1879,6 +1882,8 @@ def build_contest_channel_message(cliche_text: str, cliche_entities, target_coun
     - تعليمات التسجيل داخل اقتباس ملوّن منفصل.
     - وقت انتهاء المسابقة تلقائيًا داخل اقتباس ملوّن منفصل (إذا كان معتمدًا على الوقت)،
       أو عدد الأصوات الذي تنتهي عنده المسابقة (إذا كان معتمدًا على عدد الأصوات).
+    - كود المسابقة الفريد (contest_code) بصيغة monospace قابلة للنسخ بضغطة واحدة،
+      حتى يتمكن أي مستخدم من استخدامه للبحث عن هذه المسابقة لاحقًا في قسم «المسابقات».
     - تذييل باسم العلامة التجارية بلون أزرق قابل للضغط.
     """
     extra_parts = [
@@ -1895,6 +1900,9 @@ def build_contest_channel_message(cliche_text: str, cliche_entities, target_coun
         extra_parts.append(([
             f"ستنتهي المسابقة عند وصول أحد المتسابقين إلى {votes_target} صوت  ”",
         ], "blockquote", None))
+
+    if contest_code:
+        extra_parts += ["\n\n", "🆔 كود المسابقة : ", (contest_code, "code", None)]
 
     extra_text, extra_entities = build_text_with_emojis(extra_parts)
     footer_text, footer_entities = build_brand_footer()
@@ -2231,6 +2239,48 @@ def build_vote_captcha_wrong_alert() -> str:
     return "❌ رمز غير صحيح، حاول اختيار الرمز الصحيح مرة أخرى."
 
 
+def build_contest_new_vote_owner_notify_message(voter_display_name: str, voter_id: int,
+                                                  participant_display_name: str, vote_number: int) -> tuple:
+    """إشعار احترافي يُرسل لصاحب المسابقة فور احتساب تصويت جديد ومؤكد لأحد
+    متسابقيه (بعد اجتياز المصوّت كل الشروط: كابتشا + اشتراك + بريميوم إن
+    وُجد). يتضمن اسم المصوّت ومعرفه، اسم من صوّت له، ورقم هذا الصوت ضمن
+    إجمالي أصوات المتسابق."""
+    parts = [
+        ("🗳️ تم تسجيل تصويت جديد", "bold", None),
+        "\n\n",
+        ([
+            f"👤 المصوّت: {voter_display_name}\n",
+            f"🆔 المعرّف: {voter_id}\n",
+            f"🎯 صوّت لـ: {participant_display_name}\n",
+            f"🔢 رقم التصويت: {vote_number}",
+        ], "blockquote", None),
+        "\n\n",
+        ("✅ تم احتساب التصويت بنجاح.", "bold", None),
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_contest_vote_deducted_owner_notify_message(voter_display_name: str,
+                                                        participant_display_name: str,
+                                                        current_votes: int) -> tuple:
+    """إشعار احترافي يُرسل لصاحب المسابقة عند إلغاء تصويت كان مؤكدًا سابقًا،
+    بسبب مغادرة المصوّت لإحدى القنوات الإلزامية، مع عدد أصوات المتسابق
+    المحدّث فور الخصم مباشرة."""
+    parts = [
+        ("⚠️ تم خصم تصويت", "bold", None),
+        "\n\n",
+        ([
+            f"👤 المصوّت: {voter_display_name}\n",
+            f"🎯 المشارك: {participant_display_name}\n",
+            "❌ سبب الخصم: مغادرة إحدى القنوات المطلوبة.",
+        ], "blockquote", None),
+        "\n\n",
+        "📉 تم خصم صوت واحد من إجمالي أصوات المشارك.\n\n",
+        f"🔢 عدد الأصوات الحالي: {current_votes}",
+    ]
+    return build_text_with_emojis(parts)
+
+
 QUICK_ROULETTE_TEXT = (
     "🎡 قسم روليت سريع\n\n"
     "• انشاء روليت: انشاء روليت سريع\n"
@@ -2248,11 +2298,14 @@ def _roulette_progress_bar(current: int, target: int, length: int = 10) -> str:
     return "🟩" * filled + "⬜️" * (length - filled)
 
 
-def build_quick_roulette_channel_message(target: int, current: int) -> tuple:
+def build_quick_roulette_channel_message(target: int, current: int, roulette_id=None) -> tuple:
     """رسالة «روليت سريع» الاحترافية التي تُنشر عبر الوضع المضمّن (inline) في
     القناة/القروب، وتُحدَّث في نفس الرسالة عند كل مشاركة جديدة. تتضمّن كليشة
     اللعبة، عداد المشاركين مع شريط تقدّم داخل اقتباس مميّز، وتذييل العلامة
-    التجارية الموحّد (نفس تذييل منشورات السحب/المسابقة)."""
+    التجارية الموحّد (نفس تذييل منشورات السحب/المسابقة).
+
+    roulette_id: معرّف السحب السريع الفريد — يُعرض كسطر monospace قابل للنسخ
+    حتى يمكن لاحقًا البحث عنه من قسم إدارة السحب السريع لدى المالك."""
     cliche = get_setting("game_cliche") or DEFAULT_GAME_CLICHE
     bar = _roulette_progress_bar(current, target)
     parts = [
@@ -2267,6 +2320,8 @@ def build_quick_roulette_channel_message(target: int, current: int) -> tuple:
             bar,
         ], "blockquote", None),
     ]
+    if roulette_id is not None:
+        parts += ["\n\n", "🆔 كود السحب السريع : ", (str(roulette_id), "code", None)]
     base_text, base_entities = build_text_with_emojis(parts)
     footer_text, footer_entities = build_brand_footer()
     shift = utf16_len(base_text)
@@ -3103,10 +3158,14 @@ def build_giveaway_autospin_notice_text(giveaway) -> str:
     return ""
 
 
-def build_giveaway_channel_message(cliche_text: str, cliche_entities, vote_link: str = None,
+def build_giveaway_channel_message(cliche_text: str, cliche_entities, gw_code: str = None, vote_link: str = None,
                                     condition_channels=None, boost_link: str = None,
                                     autospin: dict = None) -> tuple:
     """منشور السحب الذي يُنشر في القناة/القروب (Image 5).
+
+    gw_code: كود السحب الفريد — يُعرض كسطر صغير أعلى تذييل العلامة بصيغة
+    monospace قابلة للنسخ بضغطة واحدة، حتى يتمكن المالك أو أي مشرف من
+    استخدامه لاحقًا للبحث عن هذا السحب تحديدًا داخل قسم إدارة السحوبات.
 
     إذا كان السحب مشروطًا بالتصويت لمتسابق (vote_link)، يُضاف أعلى تذييل العلامة
     التجارية اقتباس مزخرف «شرط تصويت» تحمل فيه كلمة «هنا» رابطًا مخفيًا يفتح
@@ -3152,6 +3211,9 @@ def build_giveaway_channel_message(cliche_text: str, cliche_entities, vote_link:
         notice_text = autospin.get("notice_text") or ""
         quote_content = [icon, " ", notice_text]
         extra_parts += ["\n\n", (quote_content, "blockquote", None)]
+
+    if gw_code:
+        extra_parts += ["\n\n", "🆔 كود السحب : ", (gw_code, "code", None)]
 
     extra_text, extra_entities = build_text_with_emojis(extra_parts) if extra_parts else ("", [])
     footer_text, footer_entities = build_brand_footer()
@@ -3588,6 +3650,9 @@ def init_db():
         "required_channel_url": REQUIRED_CHANNEL_URL,
         "required_channel_next_username": "",
         "required_channel_auto_target": REQUIRED_CHANNEL_DEFAULT_TARGET,
+        "withdraw_channel_id": "",
+        "withdraw_channel_username": "",
+        "withdraw_channel_title": "",
     }
     for k, v in defaults.items():
         ref = client.collection("settings").document(k)
@@ -4425,7 +4490,7 @@ def get_pending_withdraw_requests(limit: int = 15):
 
 
 def mark_withdraw_completed(request_id: str) -> bool:
-    """يعلّم طلب سحب كـ«مكتمل» (استلمه المستخدم فعليًا) — يُستدعى فقط من
+    """يعلّم طلب سحب كـ«مقبول» (استلمه المستخدم فعليًا) — يُستدعى فقط من
     قسم المالك بعد إرسال المكافأة الحقيقية للمستخدم يدويًا. يعيد True فقط
     إذا كان الطلب لا يزال «قيد الانتظار» فعليًا (يمنع التأكيد المزدوج)."""
     ref = fs_db().collection("withdraw_requests").document(request_id)
@@ -4437,6 +4502,155 @@ def mark_withdraw_completed(request_id: str) -> bool:
         "completed_at": datetime.now(timezone.utc).isoformat(),
     })
     return True
+
+
+def mark_withdraw_rejected(request_id: str) -> bool:
+    """يعلّم طلب سحب كـ«مرفوض» ويعيد النقاط المخصومة عند تقديم الطلب إلى
+    رصيد المستخدم فورًا (لأن create_withdraw_request يخصمها مسبقًا). يعيد
+    True فقط إذا كان الطلب لا يزال «قيد الانتظار» فعليًا (يمنع الرفض المزدوج)."""
+    ref = fs_db().collection("withdraw_requests").document(request_id)
+    doc = ref.get()
+    if not doc.exists or doc.to_dict().get("status") != "pending":
+        return False
+    data = doc.to_dict()
+    ref.update({
+        "status": "rejected",
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    })
+    owner_ref = fs_db().collection("owner_points").document(str(data.get("user_id")))
+    _fs_bump_counter(owner_ref, "points", int(data.get("points_amount") or 0),
+                      extra={"owner_id": data.get("user_id")})
+    invalidate_users_points_cache()
+    return True
+
+
+def get_all_withdraw_requests(limit: int = 30):
+    """يعيد كل طلبات السحب (بكل حالاتها: قيد الانتظار/مقبول/مرفوض) مرتّبة
+    تنازليًا (الأحدث أولاً) — تُستخدم لعرض سجل كامل في قسم المالك."""
+    docs = fs_db().collection("withdraw_requests").stream()
+    rows = []
+    for d in docs:
+        data = d.to_dict()
+        data["request_id"] = d.id
+        rows.append(data)
+    rows.sort(key=lambda r: r.get("requested_at") or "", reverse=True)
+    return rows[:limit]
+
+
+def withdraw_status_label(status: str) -> str:
+    """يحوّل قيمة حالة طلب السحب المخزّنة إلى نص عربي معروض للمستخدم/المالك."""
+    return {
+        "pending": "🟡 قيد الانتظار",
+        "completed": "🟢 مقبول",
+        "rejected": "🔴 مرفوض",
+    }.get(status, status or "-")
+
+
+# ---------------------------------------------------------------------------
+# 📢 قناة استقبال طلبات السحب — إعداد اختياري من المالك: عند تحديدها يُرسَل
+# تفصيل كل طلب سحب جديد إليها تلقائيًا مع أزرار قبول/رفض، بجانب إشعار
+# المالكين المباشر (OWNER_IDS) الذي يبقى يعمل دومًا كخط احتياط.
+# ---------------------------------------------------------------------------
+
+def get_withdraw_channel() -> dict:
+    """يعيد بيانات قناة استقبال طلبات السحب الحالية، أو None إن لم تُحدَّد بعد."""
+    chat_id = get_setting("withdraw_channel_id")
+    if not chat_id:
+        return None
+    return {
+        "chat_id": chat_id,
+        "username": get_setting("withdraw_channel_username") or "",
+        "title": get_setting("withdraw_channel_title") or "",
+    }
+
+
+def set_withdraw_channel(chat_id, username: str, title: str) -> None:
+    set_setting("withdraw_channel_id", str(chat_id))
+    set_setting("withdraw_channel_username", username or "")
+    set_setting("withdraw_channel_title", title or "")
+
+
+def clear_withdraw_channel() -> None:
+    set_setting("withdraw_channel_id", "")
+    set_setting("withdraw_channel_username", "")
+    set_setting("withdraw_channel_title", "")
+
+
+# ---------------------------------------------------------------------------
+# 🔔 إشعارات دخول المستخدمين الجدد — إعداد اختياري من المالك: عند تفعيلها
+# وتحديد قناة، يُرسَل إشعار تلقائي بكل مستخدم يدخل البوت لأول مرة (اسمه،
+# يوزره، معرّفه، ووقت الدخول) إلى تلك القناة.
+# ---------------------------------------------------------------------------
+
+def is_new_user_notify_enabled() -> bool:
+    """يتحقق مما إذا كانت ميزة إشعارات دخول المستخدمين الجدد مفعّلة حاليًا."""
+    return get_setting("new_user_notify_enabled") == "1"
+
+
+def set_new_user_notify_enabled(enabled: bool) -> None:
+    """يفعّل/يوقف ميزة إشعارات دخول المستخدمين الجدد."""
+    set_setting("new_user_notify_enabled", "1" if enabled else "0")
+
+
+def get_new_user_notify_channel() -> dict:
+    """يعيد بيانات قناة إشعارات دخول المستخدمين الحالية، أو None إن لم تُحدَّد بعد."""
+    chat_id = get_setting("new_user_notify_channel_id")
+    if not chat_id:
+        return None
+    return {
+        "chat_id": chat_id,
+        "username": get_setting("new_user_notify_channel_username") or "",
+        "title": get_setting("new_user_notify_channel_title") or "",
+    }
+
+
+def set_new_user_notify_channel(chat_id, username: str, title: str) -> None:
+    set_setting("new_user_notify_channel_id", str(chat_id))
+    set_setting("new_user_notify_channel_username", username or "")
+    set_setting("new_user_notify_channel_title", title or "")
+
+
+def clear_new_user_notify_channel() -> None:
+    set_setting("new_user_notify_channel_id", "")
+    set_setting("new_user_notify_channel_username", "")
+    set_setting("new_user_notify_channel_title", "")
+
+
+async def _notify_new_user_join(context: ContextTypes.DEFAULT_TYPE, user) -> None:
+    """يرسل إشعارًا بدخول مستخدم جديد إلى قناة الإشعارات المحددة، فقط إن كانت
+    الميزة مفعّلة وتم تحديد قناة فعليًا. لا يرفع أي استثناء عند فشل الإرسال
+    (تعطُّل الإشعار لا يجب أن يؤثر على تجربة المستخدم الجديد نفسه إطلاقًا)."""
+    if not user or not is_new_user_notify_enabled():
+        return
+    channel = get_new_user_notify_channel()
+    if not channel or not channel.get("chat_id"):
+        return
+    full_name = (getattr(user, "first_name", "") or "").strip()
+    last_name = (getattr(user, "last_name", "") or "").strip()
+    if last_name:
+        full_name = f"{full_name} {last_name}".strip()
+    full_name = full_name or "بدون اسم"
+    username = getattr(user, "username", None)
+    username_line = f"@{username}" if username else "لا يوجد"
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    text, entities = build_text_with_emojis([
+        ([
+            "🔔 مستخدم جديد دخل البوت",
+            "\n\n",
+            ([
+                f"👤 الاسم: {full_name}\n",
+                f"🔗 اليوزر: {username_line}\n",
+                f"🆔 المعرف: {user.id}\n",
+                f"🕒 وقت الدخول: {now_str}",
+            ], "blockquote", None),
+        ], "bold", None),
+    ])
+    try:
+        await context.bot.send_message(
+            chat_id=int(channel["chat_id"]), text=text, entities=entities,
+        )
+    except Exception:
+        logger.exception("تعذّر إرسال إشعار مستخدم جديد إلى قناة الإشعارات")
 
 def toggle_remind_win(user_id: int) -> bool:
     ref = fs_db().collection("remind_win").document(str(user_id))
@@ -4752,11 +4966,13 @@ def has_voted(contest_code: str, voter_id: int) -> bool:
 
 
 def register_confirmed_contest_vote(contest_code: str, voter_id: int, participant_user_id: int,
-                                     owner_id: int) -> bool:
+                                     owner_id: int, voter_display_name: str = None) -> bool:
     """يسجّل تصويتًا «مؤكدًا» بعد اجتياز كل الشروط (اشتراك + تحقق + عدم تلاعب)،
     ويمنح صاحب المسابقة نقاطه فورًا لهذا الصوت. إن كان هناك تصويت سابق أُلغي
     لنفس المصوّت في نفس المسابقة، يُستبدل بتصويت جديد مؤكد بدل رفضه. يعيد
-    True إذا سُجّل التصويت فعليًا، وFalse إذا كان هناك تصويت مؤكد سابقًا بالفعل."""
+    True إذا سُجّل التصويت فعليًا، وFalse إذا كان هناك تصويت مؤكد سابقًا بالفعل.
+    يُخزَّن أيضًا اسم المصوّت وقت التصويت (voter_display_name) لاستخدامه لاحقًا
+    في إشعار خصم الصوت دون الحاجة لطلب بيانات المستخدم من تيليجرام من جديد."""
     ref = fs_db().collection("contest_votes").document(f"{contest_code}_{voter_id}")
     snap = ref.get()
     if snap.exists and snap.to_dict().get("status", "confirmed") == "confirmed":
@@ -4766,6 +4982,7 @@ def register_confirmed_contest_vote(contest_code: str, voter_id: int, participan
         "voter_id": voter_id,
         "participant_user_id": participant_user_id,
         "owner_id": owner_id,
+        "voter_display_name": voter_display_name or str(voter_id),
         "voted_at": datetime.now(timezone.utc).isoformat(),
         "status": "confirmed",
         "points_awarded": 0,
@@ -4836,6 +5053,79 @@ def get_open_time_contests():
         if data.get("end_type") == "time" and data.get("time_minutes") is not None:
             rows.append(FSRow(data))
     return rows
+
+
+# ---------------------------------------------------------------------------
+# 🏁 المسابقات (قسم المالك) — عرض/حذف كل المسابقات وإحصائياتها، بنفس نظام
+# إدارة السحوبات لدى المالك (admgw_*) أعلاه. المسابقات المنتهية (status == "ended")
+# لا تُحذف تلقائيًا أبدًا، وتبقى محفوظة بكل بياناتها حتى يحذفها المالك يدويًا.
+# ---------------------------------------------------------------------------
+
+def get_all_contests() -> list:
+    """يعيد كل مسابقات البوت (لكل المستخدمين، بجميع الحالات)، الأحدث أولًا."""
+    docs = fs_db().collection("contests").stream()
+    rows = [FSRow(d.to_dict()) for d in docs]
+    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return rows
+
+
+def delete_contest_admin(contest_code: str) -> None:
+    """يحذف مسابقة نهائيًا مع كل متسابقيها وأصواتها — يُستخدم من قسم إدارة المسابقات لدى المالك."""
+    delete_contest_completely(contest_code)
+
+
+def get_contests_statistics() -> dict:
+    """إحصائيات شاملة عن كل مسابقات البوت — تُستخدم في «📊 إحصائيات المسابقات»
+    ضمن قسم إدارة المسابقات لدى المالك."""
+    now = datetime.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=7)
+    month_start = now - timedelta(days=30)
+
+    contests = get_all_contests()
+    total = len(contests)
+    active = sum(1 for c in contests if c.get("status") in ("open", "paused"))
+    finished = sum(1 for c in contests if c.get("status") == "ended")
+
+    today_count = week_count = month_count = 0
+    for c in contests:
+        created_raw = c.get("created_at")
+        if not created_raw:
+            continue
+        try:
+            created = datetime.fromisoformat(created_raw)
+        except (ValueError, TypeError):
+            continue
+        if created >= today_start:
+            today_count += 1
+        if created >= week_start:
+            week_count += 1
+        if created >= month_start:
+            month_count += 1
+
+    participant_counts = [count_contest_participants(c["contest_code"]) for c in contests]
+    total_participants = sum(participant_counts)
+    avg_participants = (total_participants / total) if total else 0
+
+    top_contest_code = None
+    top_count = 0
+    for c, cnt in zip(contests, participant_counts):
+        if cnt > top_count:
+            top_count = cnt
+            top_contest_code = c["contest_code"]
+
+    return {
+        "total": total,
+        "active": active,
+        "finished": finished,
+        "total_participants": total_participants,
+        "avg_participants": avg_participants,
+        "today_count": today_count,
+        "week_count": week_count,
+        "month_count": month_count,
+        "top_contest_code": top_contest_code,
+        "top_count": top_count,
+    }
 
 
 def generate_gw_code() -> str:
@@ -5169,7 +5459,7 @@ def build_points_message(user_id: int) -> tuple:
     ]
     latest = get_user_latest_withdraw_request(user_id)
     if latest:
-        status_label = "🟡 قيد الانتظار" if latest["status"] == "pending" else "🟢 مكتمل"
+        status_label = withdraw_status_label(latest.get("status"))
         content.append("\n\n")
         content.append(([
             "📋 آخر طلب سحب لك:\n",
@@ -5292,41 +5582,118 @@ def build_points_text_settings_keyboard() -> InlineKeyboardMarkup:
 
 
 def build_owner_withdraw_section_message() -> tuple:
-    """سجلات مطالبة سحب — قسم المالك: يعرض كل طلبات السحب الحالية «قيد
-    الانتظار» مع يوزر ورقم كل مستخدم، ليتمكن المالك من التواصل معه مباشرة
-    عبر يوزره وإرسال المكافأة يدويًا، ثم تأكيد الاستلام عبر الزر الملحق."""
-    pending = get_pending_withdraw_requests()
+    """سجلات طلبات السحب — قسم المالك: يعرض سجل كامل بكل طلبات السحب (قيد
+    الانتظار/مقبولة/مرفوضة) مع اسم كل مستخدم ومعرّفه والمبلغ وتاريخ ووقت
+    الطلب وحالته، ليتمكن المالك من متابعة كل الطلبات وليس فقط الحالية."""
+    all_requests = get_all_withdraw_requests()
     content = [
         "💳 سجلات طلبات السحب",
         "\n\n",
     ]
-    if not pending:
-        content.append((["📭 لا توجد طلبات سحب قيد الانتظار حاليًا ”"], "blockquote", None))
+    if not all_requests:
+        content.append((["📭 لا توجد أي طلبات سحب حتى الآن ”"], "blockquote", None))
     else:
-        for req in pending:
+        for req in all_requests:
             name = req.get("display_name") or str(req.get("user_id"))
             username = req.get("username")
             contact = f"@{username}" if username else "-"
             content.append(([
                 f"👤 {name} (ID: {req.get('user_id')})\n",
                 f"🔗 يوزر: {contact}\n",
-                f"💎 النقاط: {req.get('points_amount', 0)}\n",
-                f"🕒 وقت الطلب: {req.get('requested_at', '')[:16]}",
+                f"💎 المبلغ: {req.get('points_amount', 0)} نقطة\n",
+                f"🕒 وقت الطلب: {req.get('requested_at', '')[:16]}\n",
+                f"📌 الحالة: {withdraw_status_label(req.get('status'))} ”",
             ], "blockquote", None))
             content.append("\n\n")
     return build_text_with_emojis([(content, "bold", None)])
 
 
 def build_owner_withdraw_section_keyboard() -> InlineKeyboardMarkup:
+    """أزرار «قبول»/«رفض» تظهر فقط للطلبات التي لا تزال قيد الانتظار؛
+    الطلبات المقبولة أو المرفوضة تبقى في السجل أعلاه بدون أزرار إجراء."""
     pending = get_pending_withdraw_requests()
-    rows = [
-        [InlineKeyboardButton(
-            f"✅ تأكيد استلام: {(req.get('display_name') or str(req.get('user_id')))[:20]}",
-            callback_data=f"wd_complete:{req['request_id']}", style="success",
-        )]
-        for req in pending
-    ]
+    rows = []
+    for req in pending:
+        name = (req.get("display_name") or str(req.get("user_id")))[:16]
+        rows.append([
+            InlineKeyboardButton(f"✅ قبول: {name}", callback_data=f"wd_complete:{req['request_id']}", style="success"),
+            InlineKeyboardButton(f"❌ رفض: {name}", callback_data=f"wd_reject:{req['request_id']}", style="danger"),
+        ])
+    rows.append([InlineKeyboardButton("📢 قناة استقبال السحب", callback_data="wd_channel_settings", style="primary")])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_points_section", style="danger",
+                                       **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_withdraw_channel_settings_message() -> tuple:
+    channel = get_withdraw_channel()
+    if channel:
+        label = f"@{channel['username']}" if channel.get("username") else (channel.get("title") or channel["chat_id"])
+        status_line = f"✅ القناة الحالية: {label}"
+    else:
+        status_line = "❌ لم يتم تحديد قناة استقبال بعد"
+    return build_text_with_emojis([
+        ([
+            "📢 قناة استقبال طلبات السحب",
+            "\n\n",
+            ([
+                f"{status_line}\n\n",
+                "عند تحديد قناة، تُرسَل تفاصيل كل طلب سحب جديد إليها تلقائيًا "
+                "مع أزرار «قبول» و«رفض» للتحكم بالطلب مباشرة منها ”",
+            ], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_withdraw_channel_settings_keyboard() -> InlineKeyboardMarkup:
+    channel = get_withdraw_channel()
+    rows = []
+    if channel:
+        rows.append([InlineKeyboardButton("🔄 تغيير القناة", callback_data="wd_channel_set", style="primary")])
+        rows.append([InlineKeyboardButton("🗑️ إلغاء القناة الحالية", callback_data="wd_channel_clear", style="danger")])
+    else:
+        rows.append([InlineKeyboardButton("➕ تعيين القناة", callback_data="wd_channel_set", style="success")])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_withdraw_section", style="danger",
+                                       **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_new_user_notify_section_message() -> tuple:
+    enabled = is_new_user_notify_enabled()
+    channel = get_new_user_notify_channel()
+    status_line = "🟢 مفعّلة" if enabled else "🔴 غير مفعّلة"
+    if channel:
+        label = f"@{channel['username']}" if channel.get("username") else (channel.get("title") or channel["chat_id"])
+        channel_line = f"✅ القناة الحالية: {label}"
+    else:
+        channel_line = "❌ لم يتم تحديد قناة بعد"
+    return build_text_with_emojis([
+        ([
+            "🔔 إشعارات دخول المستخدمين",
+            "\n\n",
+            ([
+                f"الحالة: {status_line}\n",
+                f"{channel_line}\n\n",
+                "عند التفعيل وتحديد قناة، يُرسَل إشعار تلقائي بكل مستخدم جديد "
+                "يدخل البوت لأول مرة، يحتوي على اسمه ويوزره ومعرّفه ووقت "
+                "دخوله ”",
+            ], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_new_user_notify_section_keyboard() -> InlineKeyboardMarkup:
+    enabled = is_new_user_notify_enabled()
+    channel = get_new_user_notify_channel()
+    toggle_text = "🔴 إيقاف الإشعارات" if enabled else "🟢 تفعيل الإشعارات"
+    toggle_style = "danger" if enabled else "success"
+    rows = [[InlineKeyboardButton(toggle_text, callback_data="owner_newuser_toggle", style=toggle_style)]]
+    if channel:
+        rows.append([InlineKeyboardButton("🔄 تغيير القناة", callback_data="owner_newuser_channel_set", style="primary")])
+        rows.append([InlineKeyboardButton("🗑️ إلغاء القناة الحالية", callback_data="owner_newuser_channel_clear", style="danger")])
+    else:
+        rows.append([InlineKeyboardButton("➕ تحديد القناة", callback_data="owner_newuser_channel_set", style="success")])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
                                        **emoji_kwargs("back_section_btn"))])
     return InlineKeyboardMarkup(rows)
 
@@ -5347,6 +5714,7 @@ def build_owner_section_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton("📢 الاشتراك الإجباري", callback_data="owner_sub_section", style="primary"),
         InlineKeyboardButton("👥 إدارة المستخدمين", callback_data="owner_users_section", style="primary"),
         InlineKeyboardButton("🎁 السحوبات", callback_data="owner_draws_section", style="primary"),
+        InlineKeyboardButton("🏁 المسابقات", callback_data="owner_contests_section", style="primary"),
         InlineKeyboardButton("⚡ السحب السريع", callback_data="owner_quick_roulette_section", style="primary"),
         InlineKeyboardButton("📣 الإذاعة", callback_data="owner_broadcast_section", style="primary"),
         InlineKeyboardButton("👨‍💻 إدارة المشرفين", callback_data="owner_admins_section", style="primary"),
@@ -5354,6 +5722,7 @@ def build_owner_section_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton("📊 إحصائيات البوت", callback_data="owner_stats_section", style="primary"),
         InlineKeyboardButton("📜 سجل العمليات", callback_data="owner_logs:1", style="primary"),
         InlineKeyboardButton("🛠️ صيانة البوت", callback_data="owner_maintenance_section", style="primary"),
+        InlineKeyboardButton("🔔 إشعارات دخول المستخدمين", callback_data="owner_new_user_notify_section", style="primary"),
     ]
     rows = pair_buttons(menu_buttons)
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_main_menu", style="danger",
@@ -5529,6 +5898,7 @@ def build_owner_points_section_keyboard() -> InlineKeyboardMarkup:
                              style="primary", **emoji_kwargs("gear")),
         InlineKeyboardButton("💎 إدارة نقاط المستخدمين", callback_data="points_manage_section", style="primary"),
         InlineKeyboardButton("💳 سجلات طلبات السحب", callback_data="owner_withdraw_section", style="primary"),
+        InlineKeyboardButton("📢 قناة استقبال السحب", callback_data="wd_channel_settings", style="primary"),
     ])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
                                       **emoji_kwargs("back_section_btn"))])
@@ -6582,16 +6952,19 @@ def build_admgw_list_keyboard(giveaways: list, filt: str, page: int, total_pages
             page, total_pages, f"admgw_list:{filt}:{{page}}", "admgw_noop",
         ))
 
+    rows.append([InlineKeyboardButton("🔍 بحث عن سحب بالكود", callback_data=f"admgw_search:{filt}:{page}",
+                                      style="primary")])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_draws_section", style="danger",
                                       **emoji_kwargs("back_section_btn"))])
     return InlineKeyboardMarkup(rows)
 
 
-def build_admgw_detail_message(giveaway, index: int, channel_title: str, participants_total: int) -> tuple:
+def build_admgw_detail_message(giveaway, index, channel_title: str, participants_total: int) -> tuple:
     status_line = "🟢 نشط" if giveaway["status"] in ("open", "paused") else "🔴 منتهي"
+    header = f"🎁 السحب #{index}" if index else "🎁 تفاصيل السحب"
     parts = [
         ([
-            f"🎁 السحب #{index}",
+            header,
             "\n\n",
             f"🆔 الكود : {giveaway['gw_code']}\n",
             f"👑 صاحب السحب : {giveaway['owner_id']}\n",
@@ -6605,13 +6978,15 @@ def build_admgw_detail_message(giveaway, index: int, channel_title: str, partici
     return build_text_with_emojis(parts)
 
 
-def build_admgw_detail_keyboard(gw_code: str, filt: str, page: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🗑️ حذف هذا السحب", callback_data=f"admgw_delc:{gw_code}:{filt}:{page}",
-                              style="danger")],
-        [InlineKeyboardButton("🔙 رجوع", callback_data=f"admgw_list:{filt}:{page}", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
-    ])
+def build_admgw_detail_keyboard(gw_code: str, filt: str, page: int, channel_url: str = None) -> InlineKeyboardMarkup:
+    rows = []
+    if channel_url:
+        rows.append([InlineKeyboardButton("🔗 دخول إلى القناة", url=channel_url, style="primary")])
+    rows.append([InlineKeyboardButton("🗑️ حذف هذا السحب", callback_data=f"admgw_delc:{gw_code}:{filt}:{page}",
+                                      style="danger")])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data=f"admgw_list:{filt}:{page}", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_admgw_delete_confirm_message(giveaway) -> tuple:
@@ -6660,6 +7035,195 @@ def build_admgw_stats_message(stats: dict) -> tuple:
 def build_admgw_stats_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 رجوع", callback_data="owner_draws_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+# ---------------------------------------------------------------------------
+# 🏁 المسابقات (قسم المالك) — نفس نظام وتنظيم قسم السحوبات أعلاه (admgw_*)
+# بالضبط، لكن للمسابقات: عرض / نشطة / منتهية / حذف + بحث بالكود + إحصائيات.
+# المسابقات المنتهية لا تُحذف تلقائيًا أبدًا وتبقى محفوظة حتى يحذفها المالك يدويًا.
+# ---------------------------------------------------------------------------
+
+ADMCT_FILTER_LABELS = {
+    "all": "📋 كل المسابقات",
+    "active": "🟢 المسابقات النشطة",
+    "closed": "⏰ المسابقات المنتهية",
+    "delete": "🗑️ حذف أي مسابقة",
+}
+
+
+def _admct_filter_contests(contests: list, filt: str) -> list:
+    if filt == "active":
+        return [c for c in contests if c["status"] in ("open", "paused")]
+    if filt == "closed":
+        return [c for c in contests if c["status"] == "ended"]
+    return list(contests)
+
+
+def build_owner_contests_section_message() -> tuple:
+    return build_text_with_emojis([
+        ([
+            "🏁 المسابقات — إدارة المالك",
+            "\n\n",
+            (["اختر ما تريد فعله من الأزرار أدناه ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_contests_section_keyboard() -> InlineKeyboardMarkup:
+    rows = pair_buttons([
+        InlineKeyboardButton("📋 عرض المسابقات", callback_data="admct_list:all:1", style="primary"),
+        InlineKeyboardButton("🟢 المسابقات النشطة", callback_data="admct_list:active:1", style="success"),
+        InlineKeyboardButton("⏰ المسابقات المنتهية", callback_data="admct_list:closed:1", style="primary"),
+        InlineKeyboardButton("🗑️ حذف أي مسابقة", callback_data="admct_list:delete:1", style="danger"),
+        InlineKeyboardButton("📊 إحصائيات المسابقات", callback_data="admct_stats", style="primary"),
+    ])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_admct_list_message(filt: str, page: int, total_pages: int, count: int) -> tuple:
+    label = ADMCT_FILTER_LABELS.get(filt, "📋 كل المسابقات")
+    if not count:
+        content = [label, "\n\n", (["لا توجد أي مسابقات هنا حاليًا ”"], "blockquote", None)]
+        return build_text_with_emojis([(content, "bold", None)])
+    hint = "اضغط على أي مسابقة لحذفها نهائيًا ”" if filt == "delete" else "اضغط على أي مسابقة لعرض تفاصيلها ”"
+    content = [
+        f"{label} ({count})",
+        "\n\n",
+        ([f"صفحة {page}/{total_pages}", "\n", hint], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_admct_list_keyboard(contests: list, filt: str, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    start = (page - 1) * GW_LIST_PAGE_SIZE
+    page_items = contests[start:start + GW_LIST_PAGE_SIZE]
+
+    rows = []
+    for offset, ct in enumerate(page_items):
+        index = start + offset + 1
+        dot = "🟢" if ct["status"] in ("open", "paused") else "🔴"
+        if filt == "delete":
+            rows.append([InlineKeyboardButton(
+                f"🗑️ {dot} #{index}", callback_data=f"admct_delc:{ct['contest_code']}:{filt}:{page}",
+            )])
+        else:
+            rows.append([InlineKeyboardButton(
+                f"{dot} #{index}", callback_data=f"admct_detail:{ct['contest_code']}:{filt}:{page}",
+            )])
+
+    if total_pages > 1:
+        rows.append(build_pager_nav_row(
+            page, total_pages, f"admct_list:{filt}:{{page}}", "admct_noop",
+        ))
+
+    rows.append([InlineKeyboardButton("🔍 بحث عن مسابقة بالكود", callback_data=f"admct_search:{filt}:{page}",
+                                      style="primary")])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_contests_section", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def _contest_duration_label(contest) -> str:
+    if contest.get("end_type") == "time" and contest.get("time_minutes"):
+        return format_minutes_label(contest["time_minutes"])
+    if contest.get("end_type") == "votes" and contest.get("votes_target"):
+        return f"حتى {contest['votes_target']} صوت لأحد المتسابقين"
+    return "غير محدد"
+
+
+def _contest_prize_snippet(contest) -> str:
+    text = (contest.get("cliche_text") or "").strip()
+    if not text:
+        return "لا يوجد نص مسابقة"
+    if len(text) > 200:
+        text = text[:200].rstrip() + "…"
+    return text
+
+
+def build_admct_detail_message(contest, index, channel_title: str, participants_total: int) -> tuple:
+    status_labels = {"open": "🟢 نشطة", "paused": "🟡 متوقفة", "ended": "🔴 منتهية"}
+    status_line = status_labels.get(contest["status"], contest["status"])
+    header = f"🏁 المسابقة #{index}" if index else "🏁 تفاصيل المسابقة"
+    lines = [
+        header,
+        "\n\n",
+        f"📢 القناة : {channel_title}\n",
+        f"🆔 كود المسابقة : {contest['contest_code']}\n",
+        f"👑 صاحب المسابقة : {contest['owner_id']}\n",
+        f"👥 عدد المتسابقين : {participants_total}\n",
+        f"🏆 عدد الفائزين : {contest['winners_count']}\n",
+        f"⏳ مدة المسابقة : {_contest_duration_label(contest)}\n",
+        f"📊 حالة المسابقة : {status_line}\n",
+        f"🕐 تاريخ الإنشاء : {_format_ts(contest.get('created_at'))}\n",
+    ]
+    if contest["status"] == "ended" and contest.get("ended_at"):
+        lines.append(f"🏁 وقت الانتهاء : {_format_ts(contest.get('ended_at'))}\n")
+    lines.append(f"🎁 تفاصيل المسابقة والجوائز :\n{_contest_prize_snippet(contest)}")
+    parts = [(lines, "blockquote", None)]
+    return build_text_with_emojis(parts)
+
+
+def build_admct_detail_keyboard(contest_code: str, filt: str, page: int, channel_url: str = None) -> InlineKeyboardMarkup:
+    rows = []
+    if channel_url:
+        rows.append([InlineKeyboardButton("🔗 دخول إلى القناة", url=channel_url, style="primary")])
+    rows.append([InlineKeyboardButton("🗑️ حذف هذه المسابقة", callback_data=f"admct_delc:{contest_code}:{filt}:{page}",
+                                      style="danger")])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data=f"admct_list:{filt}:{page}", style="danger",
+                                      **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_admct_delete_confirm_message(contest) -> tuple:
+    content = [
+        "🗑️ تأكيد حذف المسابقة",
+        "\n\n",
+        ([f"هل أنت متأكد من حذف المسابقة {contest['contest_code']} نهائيًا؟ سيتم حذف كل بيانات متسابقيها وأصواتهم أيضًا ”"],
+         "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_admct_delete_confirm_keyboard(contest_code: str, filt: str, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("❌ إلغاء", callback_data=f"admct_detail:{contest_code}:{filt}:{page}", style="primary"),
+            InlineKeyboardButton("🗑️ تأكيد الحذف", callback_data=f"admct_delete_do:{contest_code}:{filt}:{page}",
+                                 style="danger"),
+        ],
+    ])
+
+
+def build_admct_stats_message(stats: dict) -> tuple:
+    top_line = (
+        f"🔥 أكثر مسابقة مشاركةً : {stats['top_contest_code']} ({stats['top_count']} متسابق)"
+        if stats["top_contest_code"] else "🔥 أكثر مسابقة مشاركةً : لا يوجد"
+    )
+    content = [
+        "📊 إحصائيات المسابقات",
+        "\n\n",
+        ([
+            f"🏁 إجمالي المسابقات : {stats['total']}\n",
+            f"🟢 المسابقات النشطة : {stats['active']}\n",
+            f"🔴 المسابقات المنتهية : {stats['finished']}\n",
+            f"👥 إجمالي المتسابقين : {stats['total_participants']}\n",
+            f"📈 متوسط المتسابقين لكل مسابقة : {stats['avg_participants']:.1f}\n",
+            f"🆕 مسابقات اليوم : {stats['today_count']}\n",
+            f"📆 مسابقات آخر 7 أيام : {stats['week_count']}\n",
+            f"🗓️ مسابقات آخر 30 يوم : {stats['month_count']}\n",
+            top_line,
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_admct_stats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_contests_section", style="danger",
                               **emoji_kwargs("back_section_btn"))],
     ])
 
@@ -6743,17 +7307,20 @@ def build_admrr_list_keyboard(roulettes: list, filt: str, page: int, total_pages
             page, total_pages, f"admrr_list:{filt}:{{page}}", "admrr_noop",
         ))
 
+    rows.append([InlineKeyboardButton("🔍 بحث عن سحب سريع بالكود", callback_data=f"admrr_search:{filt}:{page}",
+                                      style="primary")])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_quick_roulette_section", style="danger",
                                       **emoji_kwargs("back_section_btn"))])
     return InlineKeyboardMarkup(rows)
 
 
-def build_admrr_detail_message(roulette, index: int, participants_total: int) -> tuple:
+def build_admrr_detail_message(roulette, index, participants_total: int) -> tuple:
     status_labels = {"open": "🟢 نشط", "waiting_spin": "🟡 بانتظار التدوير", "closed": "🔴 منتهي"}
     status_line = status_labels.get(roulette["status"], roulette["status"])
+    header = f"⚡ السحب السريع #{index}" if index else "⚡ تفاصيل السحب السريع"
     parts = [
         ([
-            f"⚡ السحب السريع #{index}",
+            header,
             "\n\n",
             f"🆔 المعرف : {roulette['roulette_id']}\n",
             f"👑 صاحب السحب : {roulette['owner_id']}\n",
@@ -6820,10 +7387,25 @@ def build_admrr_stats_keyboard() -> InlineKeyboardMarkup:
 
 
 # ---------------------------------------------------------------------------
-# 📣 الإذاعة (قسم المالك) — إرسال رسالة جماعية، إيقافها، وعرض إحصائياتها.
+# 📣 الإذاعة (قسم المالك) — إرسال أي نوع محتوى يدعمه تيليجرام (نص/صورة/فيديو/
+# ملف/صوت/رسالة صوتية/GIF/ملصق/فيديو دائري/استطلاع...) مع أو بدون نص مرفق،
+# عبر copy_message (بلا فقدان تنسيق أو وسائط)، إيقافها، عرض إحصائياتها، ومراجعة
+# سجل الإذاعات السابقة مع إمكانية حذفها فعليًا من عند الجميع أو تعديل أرشيفها.
 # ---------------------------------------------------------------------------
 
-BROADCAST_TYPE_LABELS = {"text": "📝 نص", "photo": "🖼️ صورة", "video": "🎥 فيديو", "document": "📎 ملف"}
+BROADCAST_TYPE_LABELS = {
+    "text": "📝 نص",
+    "photo": "🖼️ صورة",
+    "video": "🎥 فيديو",
+    "document": "📎 ملف",
+    "audio": "🎵 صوت",
+    "voice": "🎙️ رسالة صوتية",
+    "animation": "🎞️ صورة متحركة (GIF)",
+    "video_note": "⭕ فيديو دائري",
+    "sticker": "🧩 ملصق",
+    "poll": "📊 استطلاع",
+    "other": "📦 محتوى آخر",
+}
 BROADCAST_STATUS_LABELS = {
     "idle": "⚪ لا توجد إذاعة بعد",
     "running": "🟡 قيد التنفيذ",
@@ -6847,53 +7429,58 @@ def build_owner_broadcast_section_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton("📢 إرسال لجميع المستخدمين", callback_data="broadcast_send_menu", style="primary"),
         InlineKeyboardButton("⏹️ إيقاف الإذاعة", callback_data="broadcast_stop", style="danger"),
         InlineKeyboardButton("📊 إحصائيات الإرسال", callback_data="broadcast_stats", style="primary"),
+        InlineKeyboardButton("🗒️ سجل الإذاعات", callback_data="broadcast_logs:list:1", style="primary"),
     ])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
                                       **emoji_kwargs("back_section_btn"))])
     return InlineKeyboardMarkup(rows)
 
 
-def build_broadcast_send_menu_message() -> tuple:
+def build_broadcast_universal_prompt_message() -> tuple:
+    """رسالة الطلب الموحّدة لأي نوع محتوى إذاعة — تدعم أي شيء يدعمه تيليجرام
+    (نص، صورة، فيديو، ملف، صوت، رسالة صوتية، GIF، ملصق، فيديو دائري...)، مع
+    أو بدون نص مرفق، دون الحاجة لاختيار النوع يدويًا مسبقًا — يُكتشف تلقائيًا."""
     return build_text_with_emojis([
         ([
             "📢 إرسال لجميع المستخدمين",
             "\n\n",
-            (["اختر نوع المحتوى الذي تريد إرساله ”"], "blockquote", None),
+            ([
+                "أرسل الآن المحتوى الذي تريد إذاعته لكل المستخدمين ”\n\n",
+                "يمكنك إرسال أي نوع من المحتوى: نص فقط، أو صورة/فيديو/ملف/صوت/رسالة صوتية مع نص "
+                "توضيحي أو بدونه، أو ملصق أو GIF أو أي محتوى آخر يدعمه تيليجرام — سيصل للجميع "
+                "تمامًا كما أرسلته دون أي تعديل في التنسيق أو الوسائط ”",
+            ], "blockquote", None),
         ], "bold", None),
     ])
 
 
-def build_broadcast_send_menu_keyboard() -> InlineKeyboardMarkup:
+def build_broadcast_universal_prompt_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📝 نص", callback_data="broadcast_pick:text", style="primary"),
-            InlineKeyboardButton("🖼️ صورة", callback_data="broadcast_pick:photo", style="primary"),
-        ],
-        [
-            InlineKeyboardButton("🎥 فيديو", callback_data="broadcast_pick:video", style="primary"),
-            InlineKeyboardButton("📎 ملف", callback_data="broadcast_pick:document", style="primary"),
-        ],
         [InlineKeyboardButton("🔙 رجوع", callback_data="owner_broadcast_section", style="danger",
                               **emoji_kwargs("back_section_btn"))],
     ])
 
 
-def build_broadcast_prompt_message(content_type: str) -> tuple:
-    prompts = {
-        "text": "✍️ أرسل الآن نص الرسالة التي تريد إذاعتها لكل المستخدمين ”",
-        "photo": "🖼️ أرسل الآن الصورة (مع نص اختياري) التي تريد إذاعتها لكل المستخدمين ”",
-        "video": "🎥 أرسل الآن الفيديو (مع نص اختياري) الذي تريد إذاعته لكل المستخدمين ”",
-        "document": "📎 أرسل الآن الملف (مع نص اختياري) الذي تريد إذاعته لكل المستخدمين ”",
-    }
+def build_broadcast_confirm_message(content_type: str) -> tuple:
+    label = BROADCAST_TYPE_LABELS.get(content_type, content_type)
     return build_text_with_emojis([
-        ([prompts.get(content_type, "✍️ أرسل الآن المحتوى ”")], "blockquote", None),
+        ([
+            "📣 تأكيد الإذاعة",
+            "\n\n",
+            ([
+                f"👆 هذه معاينة رسالة الإذاعة ({label}) كما ستصل لكل المستخدمين.\n",
+                "هل تريد المتابعة وإرسالها فعليًا لجميع المستخدمين، أم إلغاء الأمر؟ ”",
+            ], "blockquote", None),
+        ], "bold", None),
     ])
 
 
-def build_broadcast_prompt_keyboard() -> InlineKeyboardMarkup:
+def build_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 رجوع", callback_data="broadcast_send_menu", style="danger",
-                              **emoji_kwargs("back_section_btn"))],
+        [
+            InlineKeyboardButton("✅ تأكيد الإرسال للجميع", callback_data="broadcast_confirm_send", style="success"),
+            InlineKeyboardButton("❌ إلغاء", callback_data="broadcast_cancel_send", style="danger"),
+        ],
     ])
 
 
@@ -6920,6 +7507,132 @@ def build_broadcast_stats_message(stats: dict) -> tuple:
 def build_broadcast_stats_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 رجوع", callback_data="owner_broadcast_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+BROADCAST_LOGS_PAGE_SIZE = 10
+
+
+def build_broadcast_logs_list_message(rows: list) -> tuple:
+    if not rows:
+        content = [
+            "🗒️ سجل الإذاعات",
+            "\n\n",
+            (["لا توجد أي إذاعات مُرسَلة حتى الآن ”"], "blockquote", None),
+        ]
+    else:
+        content = [
+            f"🗒️ سجل الإذاعات ({len(rows)})",
+            "\n\n",
+            (["اضغط على أي إذاعة لعرض تفاصيلها أو حذفها أو تعديل نصّها المؤرشف ”"], "blockquote", None),
+        ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_broadcast_logs_list_keyboard(rows: list, page: int) -> InlineKeyboardMarkup:
+    total_pages = max(1, (len(rows) + BROADCAST_LOGS_PAGE_SIZE - 1) // BROADCAST_LOGS_PAGE_SIZE)
+    start = (page - 1) * BROADCAST_LOGS_PAGE_SIZE
+    page_items = rows[start:start + BROADCAST_LOGS_PAGE_SIZE]
+
+    item_buttons = []
+    for row in page_items:
+        type_label = BROADCAST_TYPE_LABELS.get(row.get("content_type"), row.get("content_type"))
+        status_dot = {"running": "🟡", "completed": "🟢", "stopped": "⏹️"}.get(row.get("status"), "⚪")
+        date_label = (row.get("started_at") or "")[:10]
+        item_buttons.append(InlineKeyboardButton(
+            f"{status_dot} {type_label} — {date_label}",
+            callback_data=f"broadcast_logs:pick:{row['log_id']}:{page}", style="primary",
+        ))
+    rows_kb = pair_buttons(item_buttons)
+
+    if total_pages > 1:
+        rows_kb.append(build_pager_nav_row(page, total_pages, "broadcast_logs:list:{page}", "broadcast_logs:noop"))
+
+    rows_kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_broadcast_section", style="danger",
+                                          **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows_kb)
+
+
+def build_broadcast_log_detail_message(row: dict) -> tuple:
+    type_label = BROADCAST_TYPE_LABELS.get(row.get("content_type"), row.get("content_type"))
+    preview = row.get("text") if row.get("content_type") == "text" else row.get("caption")
+    preview = (preview or "بدون نص/تعليق")[:300]
+    lines = [
+        f"📦 النوع: {type_label}\n",
+        f"📌 الحالة: {broadcast_status_label(row.get('status'))}\n",
+        f"👥 المستهدفون: {row.get('total', 0)}\n",
+        f"📤 تم الإرسال: {row.get('sent', 0)}\n",
+        f"⚠️ فشل: {row.get('failed', 0)}\n",
+        f"🕐 بدأت: {_format_ts(row.get('started_at'))}\n",
+        f"🕓 انتهت: {_format_ts(row.get('finished_at'))}\n",
+    ]
+    if row.get("actual_deleted"):
+        lines.append(
+            f"🚫 تم حذفها فعليًا من عند المستخدمين — نجح: {row.get('actual_deleted_count', 0)}، "
+            f"تعذّر: {row.get('actual_delete_failed', 0)}\n"
+        )
+    lines.append(f"\n📝 المحتوى المؤرشف:\n{preview}")
+    content = [
+        "🗒️ تفاصيل الإذاعة",
+        "\n\n",
+        (lines, "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_broadcast_log_detail_keyboard(log_id: str, back_page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ تعديل النص المؤرشف", callback_data=f"broadcast_logs:edit:{log_id}:{back_page}", style="primary")],
+        [InlineKeyboardButton("🗑️ حذف السجل فقط", callback_data=f"broadcast_logs:delete:{log_id}:{back_page}", style="danger")],
+        [InlineKeyboardButton("🚫 حذف الإذاعة فعليًا من عند المستخدمين",
+                              callback_data=f"broadcast_logs:delete_actual:{log_id}:{back_page}", style="danger")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"broadcast_logs:list:{back_page}", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_broadcast_log_delete_confirm_message() -> tuple:
+    return build_text_with_emojis([
+        ([
+            "🗑️ تأكيد حذف السجل",
+            "\n\n",
+            (["هل أنت متأكد من حذف هذا السجل من سجل الإذاعات؟ لن يؤثر هذا على الرسائل التي وصلت المستخدمين بالفعل ”"],
+             "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_broadcast_log_delete_confirm_keyboard(log_id: str, back_page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ تأكيد الحذف", callback_data=f"broadcast_logs:delete_confirm:{log_id}:{back_page}",
+                              style="danger")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"broadcast_logs:pick:{log_id}:{back_page}", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_broadcast_log_delete_actual_confirm_message(row: dict) -> tuple:
+    total_refs = len(row.get("message_refs") or [])
+    return build_text_with_emojis([
+        ([
+            "🚫 تأكيد الحذف الفعلي",
+            "\n\n",
+            ([
+                f"هل أنت متأكد من حذف هذه الإذاعة فعليًا من محادثات المستخدمين؟\n"
+                f"سيحاول البوت حذف {total_refs} رسالة مرسَلة فعليًا لدى المستخدمين.\n"
+                "⚠️ قد يتعذّر حذف بعض الرسائل (مستخدم حظر البوت، أو حذف المحادثة، إلخ) — "
+                "هذا الإجراء لا يمكن التراجع عنه ”",
+            ], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_broadcast_log_delete_actual_confirm_keyboard(log_id: str, back_page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚫 تأكيد الحذف الفعلي", callback_data=f"broadcast_logs:delete_actual_confirm:{log_id}:{back_page}",
+                              style="danger")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data=f"broadcast_logs:pick:{log_id}:{back_page}", style="danger",
                               **emoji_kwargs("back_section_btn"))],
     ])
 
@@ -7184,6 +7897,23 @@ async def _subscription_gate_handler(update: Update, context: ContextTypes.DEFAU
         raise ApplicationHandlerStop()
 
 
+async def _global_gates_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """المُجمِّع الفعلي لكل البوابات العامة (حظر ← صيانة ← اشتراك إجباري).
+
+    ملاحظة تنفيذية مهمة: مكتبة python-telegram-bot تُنفّذ معالجًا واحدًا فقط
+    لكل مجموعة (group) لكل تحديث — أول معالج تُطابق شروطه check_update يُنفَّذ
+    ثم تتوقف المكتبة عن فحص بقية معالِجات *نفس* المجموعة وتنتقل مباشرة للمجموعة
+    التالية. تسجيل _ban_gate_handler وَ_maintenance_gate_handler
+    وَ_subscription_gate_handler كثلاثة TypeHandler منفصلة في نفس group=-1 كان
+    يجعل _ban_gate_handler وحده (المسجَّل أولاً) هو من يعمل فعليًا؛ إذ TypeHandler
+    يطابق كل تحديث دائمًا، فإن لم يرفع ApplicationHandlerStop (حالة المستخدم غير
+    المحظور) تنتقل المكتبة مباشرة لمجموعة 0 متجاوزةً بوابتي الصيانة والاشتراك
+    تمامًا — لذا يجب استدعاء الثلاث بوابات يدويًا بالتتابع من داخل معالج واحد."""
+    await _ban_gate_handler(update, context)
+    await _maintenance_gate_handler(update, context)
+    await _subscription_gate_handler(update, context)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if args and args[0].startswith("gwjoin_"):
@@ -7192,6 +7922,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # VORTEX العامة أدناه، حتى لا يمر المستخدم بخطوتين متتاليتين لإتمام
         # نفس الشرط عند فتح البوت عبر زر «اضغط لـ المشاركة».
         is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id, update.effective_user)
+        if is_genuinely_new:
+            await _notify_new_user_join(context, update.effective_user)
         await handle_giveaway_join_entry(
             update, context, args[0][len("gwjoin_"):], is_genuinely_new=is_genuinely_new,
         )
@@ -7213,12 +7945,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id, update.effective_user)
+    if is_genuinely_new:
+        await _notify_new_user_join(context, update.effective_user)
 
     args = context.args
-    if args and args[0].startswith("ref_") and is_genuinely_new:
-        # المستخدم اجتاز بالفعل شرط الاشتراك الإجباري بالقنوات أعلاه (بوابة
-        # الحماية ضد الرشق)، لذا تُحتسب الإحالة هنا لصاحب الرابط إن كان مصرَّحًا
-        # له ومفعّلًا حاليًا.
+    if args and args[0].startswith("ref_"):
+        # لا نشترط هنا أن يكون هذا المستخدم "جديدًا كليًا على البوت" (is_genuinely_new)،
+        # لأن هذا الشرط يقيس أول تواصل مع البوت إطلاقًا وليس أول إحالة له تحديدًا —
+        # لو استخدم شخص البوت من قبل لأي سبب (رابط سحب سابق، فضول، ...) ثم فُتح له
+        # رابط إحالة لأول مرة، كان الشرط القديم يُسقط احتسابه دومًا رغم أنه إحالة
+        # حقيقية وأولى. الحماية الفعلية والدقيقة ضد الاحتساب المكرر موجودة أصلًا
+        # داخل process_referral_signup نفسها (إنشاء ذري في referral_signups يفشل
+        # تلقائيًا لو كان هذا الشخص بالتحديد مُحالًا من قبل)، فهي كافية ودقيقة —
+        # عكس is_genuinely_new التي تقيس شيئًا مختلفًا تمامًا.
         process_referral_signup(args[0][len("ref_"):], update.effective_user.id, update.effective_user)
     if args and await _dispatch_start_arg(update, context, args[0], is_genuinely_new):
         return
@@ -7258,7 +7997,12 @@ async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAUL
     pending_arg = context.user_data.pop("pending_start_arg", None)
     if pending_arg:
         is_genuinely_new = register_bot_user_and_check_new(query.from_user.id, query.from_user)
-        if pending_arg.startswith("ref_") and is_genuinely_new:
+        if is_genuinely_new:
+            await _notify_new_user_join(context, query.from_user)
+        if pending_arg.startswith("ref_"):
+            # نفس المنطق المطبَّق في start(): لا نشترط is_genuinely_new هنا، لأن
+            # الحماية الذرية الدقيقة ضد الاحتساب المكرر موجودة فعلًا داخل
+            # process_referral_signup نفسها (referral_signups.create()).
             process_referral_signup(pending_arg[len("ref_"):], query.from_user.id, query.from_user)
         shim_update = SimpleNamespace(
             effective_user=query.from_user,
@@ -7325,7 +8069,7 @@ async def handle_roulette_entry(update: Update, context: ContextTypes.DEFAULT_TY
 
     if roulette["inline_message_id"]:
         try:
-            body_text, body_entities = build_quick_roulette_channel_message(target, current)
+            body_text, body_entities = build_quick_roulette_channel_message(target, current, roulette_id=roulette_id)
             await context.bot.edit_message_text(
                 inline_message_id=roulette["inline_message_id"],
                 text=body_text,
@@ -7929,7 +8673,8 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = query.from_user
-    register_bot_user_and_check_new(user.id, user)
+    if register_bot_user_and_check_new(user.id, user):
+        await _notify_new_user_join(context, user)
     if is_giveaway_participant(gw_code, user.id):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
         return
@@ -8098,8 +8843,8 @@ async def gw_repost_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if giveaway.get("boost_required") else ""
     )
     post_text, post_entities = build_giveaway_channel_message(
-        giveaway["cliche_text"], cliche_entities, vote_link=vote_link, condition_channels=condition_channels,
-        boost_link=boost_link,
+        giveaway["cliche_text"], cliche_entities, gw_code=gw_code, vote_link=vote_link,
+        condition_channels=condition_channels, boost_link=boost_link,
     )
     post_keyboard = build_giveaway_channel_keyboard(
         gw_code, total, antispam=bool(giveaway["antispam"]), status=giveaway["status"],
@@ -8246,15 +8991,142 @@ def get_broadcast_stats() -> dict:
     return dict(_BROADCAST_STATE)
 
 
+# ---------------------------------------------------------------------------
+# 🗒️ سجل الإذاعات — يحفظ كل عملية إذاعة كسجل مستقل (بخلاف broadcasts/current
+# الذي يعكس آخر حالة فقط)، ليتمكن المالك من مراجعة كل الإذاعات السابقة،
+# حذف أي سجل منها، أو تعديل النص/التعليق المؤرشف لتصحيح خطأ فيه.
+# ---------------------------------------------------------------------------
+
+def broadcast_status_label(status: str) -> str:
+    """يستخدم نفس تسميات BROADCAST_STATUS_LABELS المعرَّفة مع واجهات قسم
+    الإذاعة، مع إضافة قيمة افتراضية لأي حالة غير متوقعة."""
+    return BROADCAST_STATUS_LABELS.get(status, status or "-")
+
+
+def create_broadcast_log(content_type: str, owner_id: int, total: int,
+                          text: str = None, caption: str = None) -> str:
+    ref = fs_db().collection("broadcast_logs").document()
+    ref.set({
+        "log_id": ref.id,
+        "content_type": content_type,
+        "owner_id": owner_id,
+        "text": text,
+        "caption": caption,
+        "total": total,
+        "sent": 0,
+        "failed": 0,
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "message_refs": [],
+        "actual_deleted": False,
+        "actual_deleted_count": 0,
+        "actual_delete_failed": 0,
+    })
+    return ref.id
+
+
+def update_broadcast_log(log_id: str, **fields) -> None:
+    if not log_id:
+        return
+    try:
+        fs_db().collection("broadcast_logs").document(log_id).update(fields)
+    except Exception:
+        pass
+
+
+def get_broadcast_log(log_id: str):
+    doc = fs_db().collection("broadcast_logs").document(log_id).get()
+    if not doc.exists:
+        return None
+    data = doc.to_dict()
+    data["log_id"] = doc.id
+    return data
+
+
+def get_broadcast_logs(limit: int = 50) -> list:
+    """يعيد كل سجلات الإذاعات مرتّبة تنازليًا (الأحدث أولاً)."""
+    docs = fs_db().collection("broadcast_logs").stream()
+    rows = []
+    for d in docs:
+        data = d.to_dict()
+        data["log_id"] = d.id
+        rows.append(data)
+    rows.sort(key=lambda r: r.get("started_at") or "", reverse=True)
+    return rows[:limit]
+
+
+def delete_broadcast_log(log_id: str) -> None:
+    fs_db().collection("broadcast_logs").document(log_id).delete()
+
+
+async def delete_broadcast_actual_messages(context: ContextTypes.DEFAULT_TYPE, log_id: str) -> tuple:
+    """يحذف فعليًا كل الرسائل التي أُرسلت للمستخدمين ضمن إذاعة معيّنة (وليس
+    فقط سجلها المؤرشف)، عبر بيانات message_refs المخزَّنة أثناء run_broadcast.
+    يعيد (عدد المحذوف بنجاح، عدد الذي تعذّر حذفه)."""
+    log = get_broadcast_log(log_id)
+    if not log:
+        return 0, 0
+    refs = log.get("message_refs") or []
+    deleted, failed = 0, 0
+    for ref in refs:
+        chat_id = ref.get("chat_id")
+        message_id = ref.get("message_id")
+        if not chat_id or not message_id:
+            failed += 1
+            continue
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            deleted += 1
+        except RetryAfter as exc:
+            await asyncio.sleep(exc.retry_after)
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                deleted += 1
+            except Exception:
+                failed += 1
+        except (BadRequest, Forbidden):
+            # الرسالة محذوفة مسبقًا، أو المستخدم حظر البوت، أو انقضى وقت
+            # طويل جدًا على الرسالة — تُحتسب كفشل غير حرج.
+            failed += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)
+
+    update_broadcast_log(
+        log_id, actual_deleted=True, actual_deleted_count=deleted, actual_delete_failed=failed,
+    )
+    return deleted, failed
+
+
+def edit_broadcast_log_content(log_id: str, new_text: str) -> bool:
+    """يعدّل النص/التعليق المؤرشف لسجل إذاعة سابقة فقط (تصحيح الأرشيف) —
+    لا يعيد إرسال أي شيء للمستخدمين، فالإذاعة الفعلية تمت بالفعل."""
+    log = get_broadcast_log(log_id)
+    if not log:
+        return False
+    field = "text" if log.get("content_type") == "text" else "caption"
+    fs_db().collection("broadcast_logs").document(log_id).update({field: new_text})
+    return True
+
+
 async def run_broadcast(context: ContextTypes.DEFAULT_TYPE, content_type: str, owner_id: int,
-                         text: str = None, entities=None, file_id: str = None,
-                         caption: str = None, caption_entities=None) -> None:
+                         source_chat_id: int, source_message_id: int,
+                         text: str = None, caption: str = None) -> None:
     """يرسل محتوى الإذاعة لكل المستخدمين المستهدفين واحدًا تلو الآخر، مع احترام
-    حدود تيليجرام (RetryAfter) وإمكانية الإيقاف من زر «⏹️ إيقاف الإذاعة»."""
+    حدود تيليجرام (RetryAfter) وإمكانية الإيقاف من زر «⏹️ إيقاف الإذاعة».
+
+    يعتمد على copy_message بدل send_message/send_photo/... المتخصصة: هذا يجعل
+    الإذاعة تدعم أي نوع محتوى يقبله تيليجرام تلقائيًا (نص، صورة، فيديو، ملف،
+    صوت، رسالة صوتية، GIF، ملصق، فيديو دائري، استطلاع...) دون فقدان أي تنسيق
+    أو وسائط، ودون الحاجة لكتابة فرع send_* منفصل لكل نوع جديد — فالرسالة
+    تُنسخ كما هي حرفيًا من محادثة المالك مع البوت (source_chat_id/source_message_id)
+    إلى كل مستخدم مستهدف."""
     user_ids = get_broadcast_target_user_ids()
     log_admin_action(
         "broadcast", owner_id, details=f"نوع المحتوى: {content_type} — عدد المستهدفين: {len(user_ids)}",
     )
+    log_id = create_broadcast_log(content_type, owner_id, len(user_ids), text=text, caption=caption)
     _BROADCAST_STATE.update({
         "running": True,
         "stop_requested": False,
@@ -8265,29 +9137,26 @@ async def run_broadcast(context: ContextTypes.DEFAULT_TYPE, content_type: str, o
         "started_at": datetime.now(timezone.utc).isoformat(),
         "finished_at": None,
         "status": "running",
+        "log_id": log_id,
     })
     save_broadcast_stats()
+
+    # نخزّن (chat_id, message_id) لكل رسالة أُرسلت فعليًا حتى يمكن لاحقًا حذفها
+    # فعليًا من عند المستخدمين (وليس فقط حذف سجلها من الأرشيف) عبر
+    # delete_broadcast_actual_messages.
+    message_refs = []
 
     for uid in user_ids:
         if _BROADCAST_STATE["stop_requested"]:
             break
         for attempt in range(2):
             try:
-                if content_type == "text":
-                    await context.bot.send_message(chat_id=uid, text=text, entities=entities)
-                elif content_type == "photo":
-                    await context.bot.send_photo(
-                        chat_id=uid, photo=file_id, caption=caption, caption_entities=caption_entities,
-                    )
-                elif content_type == "video":
-                    await context.bot.send_video(
-                        chat_id=uid, video=file_id, caption=caption, caption_entities=caption_entities,
-                    )
-                elif content_type == "document":
-                    await context.bot.send_document(
-                        chat_id=uid, document=file_id, caption=caption, caption_entities=caption_entities,
-                    )
+                sent_msg = await context.bot.copy_message(
+                    chat_id=uid, from_chat_id=source_chat_id, message_id=source_message_id,
+                )
                 _BROADCAST_STATE["sent"] += 1
+                if sent_msg is not None:
+                    message_refs.append({"chat_id": uid, "message_id": sent_msg.message_id})
                 break
             except RetryAfter as exc:
                 if attempt == 0 and exc.retry_after <= 10:
@@ -8301,19 +9170,35 @@ async def run_broadcast(context: ContextTypes.DEFAULT_TYPE, content_type: str, o
         await asyncio.sleep(0.05)
         if (_BROADCAST_STATE["sent"] + _BROADCAST_STATE["failed"]) % 50 == 0:
             save_broadcast_stats()
+            update_broadcast_log(
+                log_id, sent=_BROADCAST_STATE["sent"], failed=_BROADCAST_STATE["failed"],
+                message_refs=message_refs,
+            )
 
     _BROADCAST_STATE["running"] = False
     _BROADCAST_STATE["finished_at"] = datetime.now(timezone.utc).isoformat()
     _BROADCAST_STATE["status"] = "stopped" if _BROADCAST_STATE["stop_requested"] else "completed"
     save_broadcast_stats()
+    update_broadcast_log(
+        log_id, status=_BROADCAST_STATE["status"], sent=_BROADCAST_STATE["sent"],
+        failed=_BROADCAST_STATE["failed"], finished_at=_BROADCAST_STATE["finished_at"],
+        message_refs=message_refs,
+    )
     try:
         summary = (
             "⏹️ تم إيقاف الإذاعة يدويًا." if _BROADCAST_STATE["status"] == "stopped"
             else "✅ اكتملت الإذاعة."
         )
+        # زر سريع لحذف الإذاعة فعليًا من عند الجميع مباشرة من رسالة التلخيص،
+        # دون الحاجة للذهاب إلى «🗒️ سجل الإذاعات» يدويًا.
+        delete_keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🗑️ حذف هذه الإذاعة من الجميع",
+                                  callback_data=f"broadcast_logs:delete_actual:{log_id}:1", style="danger"),
+        ]]) if message_refs else None
         await context.bot.send_message(
             chat_id=owner_id,
             text=f"{summary}\n📤 تم الإرسال: {_BROADCAST_STATE['sent']}\n⚠️ فشل: {_BROADCAST_STATE['failed']}",
+            reply_markup=delete_keyboard,
         )
     except Exception:
         pass
@@ -8477,7 +9362,7 @@ async def giveaway_autospin_countdown_tick(context: ContextTypes.DEFAULT_TYPE):
                 if giveaway.get("boost_required") else ""
             )
             post_text, post_entities = build_giveaway_channel_message(
-                giveaway["cliche_text"], cliche_entities, vote_link=vote_link,
+                giveaway["cliche_text"], cliche_entities, gw_code=gw_code, vote_link=vote_link,
                 condition_channels=giveaway.get("condition_channels") or [],
                 boost_link=boost_link,
                 autospin={"mode": "time", "notice_text": build_giveaway_autospin_notice_text(giveaway)},
@@ -8574,7 +9459,11 @@ async def finish_contest_by_time(bot, contest_code: str):
     if not contest or contest["status"] != "open":
         return
 
-    set_contest_status(contest_code, "ended")
+    fs_db().collection("contests").document(contest_code).update({
+        "status": "ended",
+        "ended_at": datetime.now(timezone.utc).isoformat(),
+    })
+    contest["status"] = "ended"
 
     leaderboard = get_contest_leaderboard(contest_code)
     winners_count = contest["winners_count"] or 1
@@ -8760,7 +9649,8 @@ async def _contest_participation_callback_inner(update: Update, context: Context
     if data.startswith("comp_confirm_join:"):
         contest_code = data.split(":", 1)[1]
         user = query.from_user
-        register_bot_user_and_check_new(user.id, user)
+        if register_bot_user_and_check_new(user.id, user):
+            await _notify_new_user_join(context, user)
 
         contest = get_contest(contest_code)
         if not contest:
@@ -8868,6 +9758,44 @@ async def _contest_participation_callback_inner(update: Update, context: Context
         return
 
 
+async def _notify_contest_owner_new_vote(context: ContextTypes.DEFAULT_TYPE, contest, voter_display_name: str,
+                                          voter_id: int, participant, vote_number: int) -> None:
+    """يرسل لصاحب المسابقة إشعارًا احترافيًا فور احتساب تصويت جديد ومؤكد لأحد
+    متسابقيه، بعد اجتياز المصوّت لكل الشروط (كابتشا + اشتراك + بريميوم إن
+    وُجد). لا يرفع أي استثناء عند فشل الإرسال (مثلاً حظر صاحب المسابقة للبوت
+    أو عدم فتحه له من قبل) حتى لا يتأثر تسجيل التصويت نفسه بفشل الإشعار."""
+    owner_id = contest.get("owner_id") if contest else None
+    if not owner_id:
+        return
+    participant_name = (participant.get("display_name") if participant else None) or "غير معروف"
+    text, entities = build_contest_new_vote_owner_notify_message(
+        voter_display_name, voter_id, participant_name, vote_number,
+    )
+    try:
+        await context.bot.send_message(chat_id=int(owner_id), text=text, entities=entities)
+    except Exception:
+        logger.warning("تعذّر إرسال إشعار تصويت جديد لصاحب المسابقة %s", owner_id)
+
+
+async def _notify_contest_owner_vote_deducted(context: ContextTypes.DEFAULT_TYPE, contest,
+                                               voter_display_name: str, participant_display_name: str,
+                                               current_votes: int) -> None:
+    """يرسل لصاحب المسابقة إشعارًا عند إلغاء تصويت كان مؤكدًا سابقًا بسبب مغادرة
+    المصوّت لإحدى القنوات الإلزامية، مع عدد أصوات المتسابق المحدَّث فورًا بعد
+    الخصم. يُستدعى مرة واحدة فقط لكل تصويت (بواسطة cancel_contest_vote_if_unsubscribed
+    الذي يضمن عدم معالجة نفس التصويت مرتين)، ولا يرفع أي استثناء عند فشل الإرسال."""
+    owner_id = contest.get("owner_id") if contest else None
+    if not owner_id:
+        return
+    text, entities = build_contest_vote_deducted_owner_notify_message(
+        voter_display_name, participant_display_name, current_votes,
+    )
+    try:
+        await context.bot.send_message(chat_id=int(owner_id), text=text, entities=entities)
+    except Exception:
+        logger.warning("تعذّر إرسال إشعار خصم تصويت لصاحب المسابقة %s", owner_id)
+
+
 async def cancel_contest_vote_if_unsubscribed(context: ContextTypes.DEFAULT_TYPE, vote_doc) -> bool:
     """نظام الأمان وإلغاء التصويت: يتحقق من استمرار اشتراك مصوّت واحد في القناة
     الإلزامية. إن غادرها بعد احتساب صوته يُلغي هذا النظام تلقائيًا:
@@ -8875,6 +9803,11 @@ async def cancel_contest_vote_if_unsubscribed(context: ContextTypes.DEFAULT_TYPE
       وهذا يُسقطه فورًا من عدد أصوات المتسابق (get_participant_votes/leaderboard
       لا يحتسبان إلا التصويتات المؤكدة).
     - يُخصم من صاحب المسابقة أي نقاط كانت قد مُنحت مقابل هذا التصويت تحديدًا.
+    - يُرسَل لصاحب المسابقة إشعار بخصم الصوت وبعدد أصوات المتسابق المحدَّث.
+      تحديث الحالة إلى "cancelled_unsubscribed" أعلاه يحدث مرة واحدة فقط لكل
+      تصويت (لأن الدالة تتحقق أولًا أن الحالة الحالية "confirmed")، لذا لا
+      يتكرر الخصم ولا الإشعار أبدًا لنفس التصويت حتى لو استُدعيت الدالة عليه
+      من جديد لاحقًا.
     - يسمح هذا للمصوّت بالتصويت من جديد إذا عاد واشترك لاحقًا (has_voted تعيد
       False لأي تصويت غير مؤكد)، مع خضوعه لنفس كابتشا منع الرشق من جديد.
     يعيد True إذا أُلغي التصويت فعليًا في هذه المرة.
@@ -8891,34 +9824,49 @@ async def cancel_contest_vote_if_unsubscribed(context: ContextTypes.DEFAULT_TYPE
     if subscribed:
         return False
 
-    vote_doc.reference.update({
-        "status": "cancelled_unsubscribed",
-        "cancelled_at": datetime.now(timezone.utc).isoformat(),
-    })
+    # كل عمليات Firestore هنا متزامنة (blocking) بطبيعة المكتبة المستخدمة في
+    # هذا المشروع؛ تُنفَّذ عبر asyncio.to_thread في خيط منفصل حتى لا تُجمِّد
+    # حلقة أحداث البوت (event loop) وتؤخّر باقي المستخدمين أثناء الفحص الدوري،
+    # سواء زاد عدد الأصوات أو تكرر الفحص كل 5 دقائق.
+    await asyncio.to_thread(
+        vote_doc.reference.update,
+        {
+            "status": "cancelled_unsubscribed",
+            "cancelled_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
 
     amount = data.get("points_awarded") or 0
     owner_id = data.get("owner_id")
     if amount and owner_id:
-        reverse_contest_owner_points(owner_id, amount)
+        await asyncio.to_thread(reverse_contest_owner_points, owner_id, amount)
 
     contest_code = data.get("contest_code")
     participant_id = data.get("participant_user_id")
     if contest_code and participant_id:
-        contest = get_contest(contest_code)
-        if contest and contest.get("status") == "open":
-            participant = get_contest_participant(contest_code, participant_id)
-            if participant and participant.get("channel_message_id"):
-                new_votes = get_participant_votes(contest_code, participant_id)
-                try:
-                    await context.bot.edit_message_reply_markup(
-                        chat_id=contest["chat_id"],
-                        message_id=participant["channel_message_id"],
-                        reply_markup=build_contest_vote_keyboard(
-                            contest_code, participant_id, new_votes, participant["participant_code"]
-                        ),
-                    )
-                except Exception:
-                    pass
+        contest = await asyncio.to_thread(get_contest, contest_code)
+        participant = await asyncio.to_thread(get_contest_participant, contest_code, participant_id)
+        new_votes = await asyncio.to_thread(get_participant_votes, contest_code, participant_id)
+
+        if contest and participant and contest.get("status") == "open" and participant.get("channel_message_id"):
+            try:
+                await context.bot.edit_message_reply_markup(
+                    chat_id=contest["chat_id"],
+                    message_id=participant["channel_message_id"],
+                    reply_markup=build_contest_vote_keyboard(
+                        contest_code, participant_id, new_votes, participant["participant_code"]
+                    ),
+                )
+            except Exception:
+                pass
+
+        if contest and participant:
+            voter_display_name = data.get("voter_display_name") or str(voter_id)
+            await _notify_contest_owner_vote_deducted(
+                context, contest, voter_display_name,
+                participant.get("display_name") or str(participant_id),
+                new_votes,
+            )
     return True
 
 
@@ -8926,13 +9874,21 @@ async def contest_votes_subscription_audit(context: ContextTypes.DEFAULT_TYPE):
     """فحص دوري (نظام الأمان): يمرّ على كل التصويتات المؤكدة في المسابقات
     المفتوحة حاليًا، ويتحقق من استمرار اشتراك كل مصوّت في القناة الإلزامية.
     من غادر القناة تُلغى نقطته تلقائيًا (اكتشاف من خرج من القنوات وإلغاء
-    أصواتهم تلقائيًا دون انتظار أن يفتح البوت مجددًا)."""
+    أصواتهم تلقائيًا دون انتظار أن يفتح البوت مجددًا).
+    كل عمليات القراءة من Firestore هنا متزامنة (blocking)، لذا تُنفَّذ داخل
+    خيط منفصل عبر asyncio.to_thread حتى لا تُجمِّد حلقة أحداث البوت (event
+    loop) الرئيسية أثناء الفحص، ولا يتأخر أي مستخدم آخر يتفاعل مع البوت في
+    نفس اللحظة، مهما كان عدد المسابقات أو الأصوات."""
     client = fs_db()
-    try:
-        open_codes = [
+
+    def _fetch_open_codes():
+        return [
             c.to_dict().get("contest_code")
             for c in client.collection("contests").where("status", "==", "open").stream()
         ]
+
+    try:
+        open_codes = await asyncio.to_thread(_fetch_open_codes)
     except Exception:
         logger.exception("contest_votes_subscription_audit: فشل جلب المسابقات المفتوحة")
         return
@@ -8945,7 +9901,11 @@ async def contest_votes_subscription_audit(context: ContextTypes.DEFAULT_TYPE):
         if not contest_code:
             continue
         try:
-            docs = list(client.collection("contest_votes").where("contest_code", "==", contest_code).stream())
+            docs = await asyncio.to_thread(
+                lambda code=contest_code: list(
+                    client.collection("contest_votes").where("contest_code", "==", code).stream()
+                )
+            )
         except Exception:
             logger.exception("contest_votes_subscription_audit: فشل جلب أصوات المسابقة %s", contest_code)
             continue
@@ -9047,7 +10007,11 @@ async def vote_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    registered = register_confirmed_contest_vote(contest_code, voter.id, participant_id, contest["owner_id"])
+    voter_display_name = voter.first_name or voter.username or str(voter.id)
+    registered = register_confirmed_contest_vote(
+        contest_code, voter.id, participant_id, contest["owner_id"],
+        voter_display_name=voter_display_name,
+    )
     if not registered:
         sessions.pop(token, None)
         await query.answer("✅ لقد قمت بالتصويت مسبقًا في هذه المسابقة.", show_alert=True)
@@ -9075,6 +10039,12 @@ async def vote_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception:
             pass
 
+    # إشعار صاحب المسابقة بتصويت جديد مؤكد (بعد اجتياز الكابتشا والاشتراك
+    # وشرط بريميوم إن وُجد)، فور احتساب الصوت مباشرة.
+    await _notify_contest_owner_new_vote(
+        context, contest, voter_display_name, voter.id, participant, new_votes,
+    )
+
     # إنهاء تلقائي للمسابقات المعتمدة على «عدد أصوات محدد» عند وصول أي متسابق
     # لعدد الأصوات المستهدف — بنفس آلية إنهاء المسابقات المعتمدة على الوقت.
     if (
@@ -9091,7 +10061,8 @@ async def vote_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TY
 async def rr_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
-    register_bot_user_and_check_new(user.id, user)
+    if register_bot_user_and_check_new(user.id, user):
+        await _notify_new_user_join(context, user)
     roulette_id = int(query.data.replace("rr_join_", ""))
 
     result = join_roulette(user.id, roulette_id, user.first_name or user.username or str(user.id))
@@ -9115,7 +10086,7 @@ async def rr_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        body_text, body_entities = build_quick_roulette_channel_message(target, current)
+        body_text, body_entities = build_quick_roulette_channel_message(target, current, roulette_id=roulette_id)
         await query.edit_message_text(
             text=body_text,
             entities=body_entities,
@@ -9149,7 +10120,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         ids_map = create_roulettes_batch(owner_id, ROULETTE_COUNTS)
         for n in ROULETTE_COUNTS:
             roulette_id = ids_map[n]
-            body_text, body_entities = build_quick_roulette_channel_message(n, 0)
+            body_text, body_entities = build_quick_roulette_channel_message(n, 0, roulette_id=roulette_id)
             results.append(
                 InlineQueryResultArticle(
                     id=str(roulette_id),
@@ -9364,6 +10335,9 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
 
     if query.data == "my_stats":
+        if get_setting("points_enabled") != "1":
+            await query.answer("🚫 القسم غير متاح حاليًا.", show_alert=True)
+            return
         text, entities = build_points_message(query.from_user.id)
         await query.edit_message_text(
             text=text, entities=entities,
@@ -9526,28 +10500,37 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    if query.data.startswith("wd_complete:"):
+    if query.data.startswith("wd_complete:") or query.data.startswith("wd_reject:"):
         if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
             return
+        is_reject = query.data.startswith("wd_reject:")
         request_id = query.data.split(":", 1)[1]
         req = get_withdraw_request(request_id)
         if not req:
             await query.answer("⚠️ هذا الطلب غير موجود.", show_alert=True)
         elif req.get("status") != "pending":
-            await query.answer("✅ تم تأكيد هذا الطلب مسبقًا.", show_alert=True)
+            await query.answer("✅ تم إغلاق هذا الطلب مسبقًا.", show_alert=True)
         else:
-            mark_withdraw_completed(request_id)
-            await query.answer("✅ تم تعليم الطلب كمكتمل.")
-            try:
-                await context.bot.send_message(
-                    chat_id=req["user_id"],
-                    text=(
-                        "🎉 تم استلام طلب سحبك بنجاح وتحويل مكافأتك!\n\n"
-                        f"💎 عدد النقاط المسحوبة: {req.get('points_amount', 0)}\n"
-                        "📌 الحالة: 🟢 مكتمل"
-                    ),
+            if is_reject:
+                mark_withdraw_rejected(request_id)
+                await query.answer("❌ تم رفض الطلب وإعادة النقاط لرصيد المستخدم.")
+                notify_text = (
+                    "❌ تم رفض طلب سحبك.\n\n"
+                    f"💎 عدد النقاط: {req.get('points_amount', 0)}\n"
+                    "📌 الحالة: 🔴 مرفوض\n"
+                    "↩️ تمت إعادة النقاط إلى رصيدك."
                 )
+            else:
+                mark_withdraw_completed(request_id)
+                await query.answer("✅ تم قبول الطلب وتعليمه كمكتمل.")
+                notify_text = (
+                    "🎉 تم قبول طلب سحبك وتحويل مكافأتك!\n\n"
+                    f"💎 عدد النقاط المسحوبة: {req.get('points_amount', 0)}\n"
+                    "📌 الحالة: 🟢 مقبول"
+                )
+            try:
+                await context.bot.send_message(chat_id=req["user_id"], text=notify_text)
             except Exception:
                 pass
         text, entities = build_owner_withdraw_section_message()
@@ -9558,6 +10541,48 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
         except Exception:
             pass
+        return
+
+    if query.data == "wd_channel_settings":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_withdraw_channel_settings_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_withdraw_channel_settings_keyboard(),
+        )
+        return
+
+    if query.data == "wd_channel_set":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "withdraw_channel_set"
+        await query.edit_message_text(
+            "✍️ أرسل الآن يوزر القناة (مثال: @channel أو رابط t.me/channel).\n"
+            "⚠️ تأكد من إضافة البوت كمشرف (Admin) في القناة أولًا حتى يتمكن من الإرسال إليها ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="wd_channel_settings", style="danger"),
+            ]]),
+        )
+        return
+
+    if query.data == "wd_channel_clear":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        clear_withdraw_channel()
+        log_admin_action(
+            "change_settings", query.from_user.id, details="إلغاء قناة استقبال طلبات السحب",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
+        await query.answer("✅ تم إلغاء قناة استقبال السحب.")
+        text, entities = build_withdraw_channel_settings_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_withdraw_channel_settings_keyboard(),
+        )
         return
 
     if query.data == "withdraw_locked":
@@ -9578,6 +10603,9 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if query.data == "withdraw_start":
         user = query.from_user
+        if get_setting("points_enabled") != "1":
+            await query.answer("🚫 القسم غير متاح حاليًا.", show_alert=True)
+            return
         required = int(get_setting("points_required") or "0")
         pts = get_points(user.id)
         if required <= 0:
@@ -9622,19 +10650,34 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception:
             pass
 
+        wd_request_notify_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ قبول", callback_data=f"wd_complete:{request_id}", style="success"),
+            InlineKeyboardButton("❌ رفض", callback_data=f"wd_reject:{request_id}", style="danger"),
+        ]])
+        wd_request_notify_text = (
+            "💳 طلب سحب جديد\n\n"
+            f"👤 المستخدم: {display_name} (ID: {user.id})\n"
+            f"🔗 يوزر: @{user.username}\n"
+            f"💎 عدد النقاط: {pts}"
+        )
+
         for owner_id in OWNER_IDS:
             try:
                 await context.bot.send_message(
                     chat_id=owner_id,
-                    text=(
-                        "💳 طلب سحب جديد\n\n"
-                        f"👤 المستخدم: {display_name} (ID: {user.id})\n"
-                        f"🔗 يوزر: @{user.username}\n"
-                        f"💎 عدد النقاط: {pts}"
-                    ),
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
-                        "✅ تأكيد الاستلام", callback_data=f"wd_complete:{request_id}", style="success",
-                    )]]),
+                    text=wd_request_notify_text,
+                    reply_markup=wd_request_notify_markup,
+                )
+            except Exception:
+                pass
+
+        withdraw_channel = get_withdraw_channel()
+        if withdraw_channel:
+            try:
+                await context.bot.send_message(
+                    chat_id=withdraw_channel["chat_id"],
+                    text=wd_request_notify_text,
+                    reply_markup=wd_request_notify_markup,
                 )
             except Exception:
                 pass
@@ -10456,6 +11499,82 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
+    if query.data == "owner_new_user_notify_section":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        await query.answer()
+        text, entities = build_new_user_notify_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_new_user_notify_section_keyboard(),
+        )
+        return
+
+    if query.data == "owner_newuser_toggle":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        if not is_new_user_notify_enabled():
+            if not get_new_user_notify_channel():
+                await query.answer("⚠️ حدّد قناة الإشعارات أولًا قبل التفعيل.", show_alert=True)
+                return
+            set_new_user_notify_enabled(True)
+            msg = "🟢 تم تفعيل إشعارات دخول المستخدمين."
+        else:
+            set_new_user_notify_enabled(False)
+            msg = "🔴 تم إيقاف إشعارات دخول المستخدمين."
+        log_admin_action(
+            "change_settings", query.from_user.id, details=msg,
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
+        await query.answer(msg, show_alert=True)
+        text, entities = build_new_user_notify_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_new_user_notify_section_keyboard(),
+        )
+        return
+
+    if query.data == "owner_newuser_channel_set":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "new_user_notify_channel_set"
+        await query.edit_message_text(
+            "✍️ أرسل الآن يوزر القناة (مثال: @channel أو رابط t.me/channel).\n"
+            "⚠️ تأكد من إضافة البوت كمشرف (Admin) في القناة أولًا حتى يتمكن من الإرسال إليها ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="owner_new_user_notify_section", style="danger"),
+            ]]),
+        )
+        return
+
+    if query.data == "owner_newuser_channel_clear":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        clear_new_user_notify_channel()
+        # إجراء ذكي: إن أُلغيت القناة أثناء تفعيل الإشعارات، تُوقَف الإشعارات
+        # تلقائيًا تجنبًا لحالة "مفعّلة بلا قناة" التي لن تُرسِل شيئًا بصمت.
+        was_enabled = is_new_user_notify_enabled()
+        if was_enabled:
+            set_new_user_notify_enabled(False)
+        log_admin_action(
+            "change_settings", query.from_user.id, details="إلغاء قناة إشعارات دخول المستخدمين",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
+        await query.answer(
+            "✅ تم إلغاء قناة الإشعارات." + (" وتم إيقاف الإشعارات تلقائيًا." if was_enabled else ""),
+            show_alert=True,
+        )
+        text, entities = build_new_user_notify_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_new_user_notify_section_keyboard(),
+        )
+        return
+
     if query.data == "owner_draws_section":
         if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
@@ -10497,10 +11616,29 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         index = next((i + 1 for i, g in enumerate(giveaways) if g["gw_code"] == gw_code), 0)
         channel_title = get_chat_title_by_id(giveaway["chat_id"])
         participants_total = count_giveaway_participants(gw_code)
+        channel_url = await build_contest_post_link(context, giveaway["chat_id"], giveaway.get("channel_message_id"))
         text, entities = build_admgw_detail_message(giveaway, index, channel_title, participants_total)
         await query.edit_message_text(
             text=text, entities=entities,
-            reply_markup=build_admgw_detail_keyboard(gw_code, filt, page),
+            reply_markup=build_admgw_detail_keyboard(gw_code, filt, page, channel_url=channel_url),
+        )
+        return
+
+    if query.data.startswith("admgw_search:"):
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, filt, page_str = query.data.split(":", 2)
+        page = int(page_str) if page_str.isdigit() else 1
+        context.user_data["awaiting"] = "admgw_search_lookup"
+        context.user_data["admgw_search_filt"] = filt
+        context.user_data["admgw_search_page"] = page
+        await query.edit_message_text(
+            "🔍 أرسل الآن كود السحب الذي تريد البحث عنه ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data=f"admgw_list:{filt}:{page}", style="danger",
+                                      **emoji_kwargs("back_section_btn")),
+            ]]),
         )
         return
 
@@ -10559,6 +11697,128 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer()
         return
 
+    if query.data == "owner_contests_section":
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_owner_contests_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_contests_section_keyboard(),
+        )
+        return
+
+    if query.data.startswith("admct_list:"):
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, filt, page_str = query.data.split(":", 2)
+        page = int(page_str) if page_str.isdigit() else 1
+        contests = _admct_filter_contests(get_all_contests(), filt)
+        total_pages = max(1, -(-len(contests) // GW_LIST_PAGE_SIZE))
+        page = max(1, min(page, total_pages))
+        text, entities = build_admct_list_message(filt, page, total_pages, len(contests))
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admct_list_keyboard(contests, filt, page, total_pages),
+        )
+        return
+
+    if query.data.startswith("admct_detail:"):
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, contest_code, filt, page_str = query.data.split(":", 3)
+        page = int(page_str) if page_str.isdigit() else 1
+        contest = get_contest(contest_code)
+        if not contest:
+            await query.answer("⚠️ هذه المسابقة لم تعد موجودة.", show_alert=True)
+            return
+        contests = _admct_filter_contests(get_all_contests(), filt)
+        index = next((i + 1 for i, c in enumerate(contests) if c["contest_code"] == contest_code), 0)
+        channel_title = get_chat_title_by_id(contest["chat_id"])
+        participants_total = count_contest_participants(contest_code)
+        channel_url = await build_contest_post_link(context, contest["chat_id"], contest.get("channel_message_id"))
+        text, entities = build_admct_detail_message(contest, index, channel_title, participants_total)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admct_detail_keyboard(contest_code, filt, page, channel_url=channel_url),
+        )
+        return
+
+    if query.data.startswith("admct_search:"):
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, filt, page_str = query.data.split(":", 2)
+        page = int(page_str) if page_str.isdigit() else 1
+        context.user_data["awaiting"] = "admct_search_lookup"
+        context.user_data["admct_search_filt"] = filt
+        context.user_data["admct_search_page"] = page
+        await query.edit_message_text(
+            "🔍 أرسل الآن كود المسابقة الذي تريد البحث عنها ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data=f"admct_list:{filt}:{page}", style="danger",
+                                      **emoji_kwargs("back_section_btn")),
+            ]]),
+        )
+        return
+
+    if query.data.startswith("admct_delc:"):
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, contest_code, filt, page_str = query.data.split(":", 3)
+        page = int(page_str) if page_str.isdigit() else 1
+        contest = get_contest(contest_code)
+        if not contest:
+            await query.answer("⚠️ هذه المسابقة لم تعد موجودة.", show_alert=True)
+            return
+        text, entities = build_admct_delete_confirm_message(contest)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admct_delete_confirm_keyboard(contest_code, filt, page),
+        )
+        return
+
+    if query.data.startswith("admct_delete_do:"):
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, contest_code, filt, page_str = query.data.split(":", 3)
+        page = int(page_str) if page_str.isdigit() else 1
+        delete_contest_admin(contest_code)
+        log_admin_action(
+            "delete_contest", query.from_user.id, details=f"كود المسابقة: {contest_code}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
+        await query.answer("🗑️ تم حذف المسابقة بنجاح")
+        contests = _admct_filter_contests(get_all_contests(), filt)
+        total_pages = max(1, -(-len(contests) // GW_LIST_PAGE_SIZE))
+        page = max(1, min(page, total_pages))
+        text, entities = build_admct_list_message(filt, page, total_pages, len(contests))
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admct_list_keyboard(contests, filt, page, total_pages),
+        )
+        return
+
+    if query.data == "admct_stats":
+        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        stats = get_contests_statistics()
+        text, entities = build_admct_stats_message(stats)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_admct_stats_keyboard(),
+        )
+        return
+
+    if query.data == "admct_noop":
+        await query.answer()
+        return
+
     if query.data == "owner_quick_roulette_section":
         if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
@@ -10604,6 +11864,24 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(
             text=text, entities=entities,
             reply_markup=build_admrr_detail_keyboard(roulette_id, filt, page),
+        )
+        return
+
+    if query.data.startswith("admrr_search:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, filt, page_str = query.data.split(":", 2)
+        page = int(page_str) if page_str.isdigit() else 1
+        context.user_data["awaiting"] = "admrr_search_lookup"
+        context.user_data["admrr_search_filt"] = filt
+        context.user_data["admrr_search_page"] = page
+        await query.edit_message_text(
+            "🔍 أرسل الآن كود السحب السريع الذي تريد البحث عنه ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data=f"admrr_list:{filt}:{page}", style="danger",
+                                      **emoji_kwargs("back_section_btn")),
+            ]]),
         )
         return
 
@@ -10679,33 +11957,61 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
+        # ⚠️ يجب أن تتم كل خطوات إعداد/تعديل الإذاعة من داخل محادثة المالك
+        # الخاصة مع البوت فقط، تجنبًا لأي التباس إذا وصلت هذه الرسالة بطريقة
+        # ما داخل مجموعة (حماية إضافية فوق قيد ChatType.PRIVATE على المعالجات).
+        if query.message and query.message.chat.type != "private":
+            await query.answer("⛔ إعداد الإذاعة متاح فقط من داخل محادثتك الخاصة مع البوت.", show_alert=True)
+            return
         if _BROADCAST_STATE["running"]:
             await query.answer("⚠️ توجد إذاعة قيد التنفيذ بالفعل، أوقفها أولاً إن أردت إرسال إذاعة جديدة.",
                                show_alert=True)
             return
-        text, entities = build_broadcast_send_menu_message()
+        context.user_data["awaiting"] = "broadcast_await_content"
+        text, entities = build_broadcast_universal_prompt_message()
         await query.edit_message_text(
             text=text, entities=entities,
-            reply_markup=build_broadcast_send_menu_keyboard(),
+            reply_markup=build_broadcast_universal_prompt_keyboard(),
         )
         return
 
-    if query.data.startswith("broadcast_pick:"):
+    if query.data == "broadcast_confirm_send":
         if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        if query.message and query.message.chat.type != "private":
+            await query.answer("⛔ إعداد الإذاعة متاح فقط من داخل محادثتك الخاصة مع البوت.", show_alert=True)
+            return
+        pending = context.user_data.get("broadcast_pending")
+        if not pending:
+            await query.answer("⚠️ لا توجد رسالة إذاعة قيد الانتظار (ربما انتهت صلاحيتها).", show_alert=True)
             return
         if _BROADCAST_STATE["running"]:
             await query.answer("⚠️ توجد إذاعة قيد التنفيذ بالفعل.", show_alert=True)
             return
-        content_type = query.data.split(":", 1)[1]
-        if content_type not in BROADCAST_TYPE_LABELS:
+        context.user_data.pop("broadcast_pending", None)
+        await query.answer("📣 بدأت عملية الإذاعة الآن، سيصلك إشعار عند الانتهاء ”", show_alert=True)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        asyncio.create_task(run_broadcast(
+            context, pending["content_type"], query.from_user.id,
+            source_chat_id=pending["source_chat_id"], source_message_id=pending["source_message_id"],
+            text=pending.get("text"), caption=pending.get("caption"),
+        ))
+        return
+
+    if query.data == "broadcast_cancel_send":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
-        context.user_data["awaiting"] = f"broadcast_input_{content_type}"
-        text, entities = build_broadcast_prompt_message(content_type)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_broadcast_prompt_keyboard(),
-        )
+        context.user_data.pop("broadcast_pending", None)
+        await query.answer("❌ تم إلغاء إرسال الإذاعة.")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         return
 
     if query.data == "broadcast_stop":
@@ -10728,6 +12034,145 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(
             text=text, entities=entities,
             reply_markup=build_broadcast_stats_keyboard(),
+        )
+        return
+
+    if query.data == "broadcast_logs:noop":
+        await query.answer()
+        return
+
+    if query.data.startswith("broadcast_logs:list:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        page_str = query.data.split(":", 2)[2]
+        page = int(page_str) if page_str.isdigit() else 1
+        rows = get_broadcast_logs()
+        text, entities = build_broadcast_logs_list_message(rows)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_broadcast_logs_list_keyboard(rows, page),
+        )
+        return
+
+    if query.data.startswith("broadcast_logs:pick:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, _, log_id, page_str = query.data.split(":", 3)
+        back_page = int(page_str) if page_str.isdigit() else 1
+        row = get_broadcast_log(log_id)
+        if not row:
+            await query.answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
+            return
+        text, entities = build_broadcast_log_detail_message(row)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_broadcast_log_detail_keyboard(log_id, back_page),
+        )
+        return
+
+    if query.data.startswith("broadcast_logs:edit:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        if query.message and query.message.chat.type != "private":
+            await query.answer("⛔ تعديل الإذاعة متاح فقط من داخل محادثتك الخاصة مع البوت.", show_alert=True)
+            return
+        _, _, log_id, page_str = query.data.split(":", 3)
+        back_page = int(page_str) if page_str.isdigit() else 1
+        row = get_broadcast_log(log_id)
+        if not row:
+            await query.answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "broadcast_log_edit_text"
+        context.user_data["broadcast_log_edit_id"] = log_id
+        context.user_data["broadcast_log_edit_back_page"] = back_page
+        await query.edit_message_text(
+            "✍️ أرسل الآن النص الجديد الذي سيحل محل النص/التعليق المؤرشف لهذا السجل.\n"
+            "⚠️ هذا يعدّل الأرشيف فقط ولا يعيد إرسال أي رسالة للمستخدمين ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data=f"broadcast_logs:pick:{log_id}:{back_page}", style="danger"),
+            ]]),
+        )
+        return
+
+    if query.data.startswith("broadcast_logs:delete_confirm:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, _, log_id, page_str = query.data.split(":", 3)
+        back_page = int(page_str) if page_str.isdigit() else 1
+        delete_broadcast_log(log_id)
+        log_admin_action(
+            "delete_broadcast_log", query.from_user.id, details=f"معرف السجل: {log_id}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
+        await query.answer("🗑️ تم حذف السجل بنجاح")
+        rows = get_broadcast_logs()
+        text, entities = build_broadcast_logs_list_message(rows)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_broadcast_logs_list_keyboard(rows, back_page),
+        )
+        return
+
+    if query.data.startswith("broadcast_logs:delete:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, _, log_id, page_str = query.data.split(":", 3)
+        back_page = int(page_str) if page_str.isdigit() else 1
+        row = get_broadcast_log(log_id)
+        if not row:
+            await query.answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
+            return
+        text, entities = build_broadcast_log_delete_confirm_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_broadcast_log_delete_confirm_keyboard(log_id, back_page),
+        )
+        return
+
+    if query.data.startswith("broadcast_logs:delete_actual:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, _, log_id, page_str = query.data.split(":", 3)
+        back_page = int(page_str) if page_str.isdigit() else 1
+        row = get_broadcast_log(log_id)
+        if not row:
+            await query.answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
+            return
+        text, entities = build_broadcast_log_delete_actual_confirm_message(row)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_broadcast_log_delete_actual_confirm_keyboard(log_id, back_page),
+        )
+        return
+
+    if query.data.startswith("broadcast_logs:delete_actual_confirm:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        _, _, log_id, page_str = query.data.split(":", 3)
+        back_page = int(page_str) if page_str.isdigit() else 1
+        row = get_broadcast_log(log_id)
+        if not row:
+            await query.answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
+            return
+        await query.answer("🚫 جاري حذف الرسائل من عند المستخدمين، قد يستغرق هذا بعض الوقت ”")
+        deleted, failed = await delete_broadcast_actual_messages(context, log_id)
+        log_admin_action(
+            "delete_broadcast_actual", query.from_user.id,
+            details=f"معرف السجل: {log_id} — نجح: {deleted} — تعذّر: {failed}",
+            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+        )
+        row = get_broadcast_log(log_id)
+        text, entities = build_broadcast_log_detail_message(row)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_broadcast_log_detail_keyboard(log_id, back_page),
         )
         return
 
@@ -11049,6 +12494,27 @@ async def group_activation_handler(update: Update, context: ContextTypes.DEFAULT
     await message.reply_text(text=_bt, entities=_be)
 
 
+_ADMIN_QUERY_INVISIBLE_CHARS = (
+    "\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e\ufeff"
+)
+_ADMIN_QUERY_DIGIT_TRANSLATION = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩" "۰۱۲۳۴۵۶۷۸۹",
+    "01234567890123456789",
+)
+
+
+def _sanitize_admin_query_input(raw: str) -> str:
+    """ينظّف نص الإدخال (معرف/يوزر) من محارف التحكم غير المرئية الشائعة عند
+    اللصق من كيبورد عربي (علامات اتجاه RTL/LTR وما شابه)، ويحوّل الأرقام
+    العربية/الفارسية إلى أرقام إنجليزية عادية — حتى لا يفشل التعرف على معرف
+    رقمي صحيح بصمت لمجرد وجود محارف خفية لا تظهر للمستخدم."""
+    if not raw:
+        return ""
+    cleaned = "".join(ch for ch in raw if ch not in _ADMIN_QUERY_INVISIBLE_CHARS)
+    cleaned = cleaned.translate(_ADMIN_QUERY_DIGIT_TRANSLATION)
+    return cleaned.strip()
+
+
 def _resolve_admin_user_query(raw: str):
     """يحاول تحويل نص أرسله المالك (معرف رقمي أو يوزر) إلى بيانات مستخدم بوت
     معروفة. يعيد (row, user_id):
@@ -11057,7 +12523,7 @@ def _resolve_admin_user_query(raw: str):
       محادثة مع البوت بعد (يسمح هذا بحظر استباقي بالمعرف فقط).
     - (None, None) إن تعذّر التعرف على المدخل إطلاقًا (يوزر غير معروف مثلاً).
     """
-    raw = (raw or "").strip()
+    raw = _sanitize_admin_query_input(raw)
     if not raw:
         return None, None
     if raw.lstrip("-").isdigit():
@@ -11069,27 +12535,54 @@ def _resolve_admin_user_query(raw: str):
     return None, None
 
 
-async def handle_broadcast_media_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يلتقط الصورة/الفيديو/الملف عندما يكون المالك بصدد إرسال إذاعة من هذا النوع."""
+def _detect_broadcast_content(message) -> tuple:
+    """يكتشف تلقائيًا نوع محتوى رسالة المالك (لأغراض العرض/الأرشفة والإحصائيات
+    فقط — الإرسال الفعلي عبر copy_message لا يحتاج معرفة النوع أصلًا). يعيد
+    (content_type, caption_or_text) — يدعم أي نوع رسالة يقبله تيليجرام."""
+    if message.text:
+        return "text", message.text
+    if message.photo:
+        return "photo", message.caption
+    if message.video:
+        return "video", message.caption
+    if message.document:
+        return "document", message.caption
+    if message.audio:
+        return "audio", message.caption
+    if message.voice:
+        return "voice", message.caption
+    if message.animation:
+        return "animation", message.caption
+    if message.video_note:
+        return "video_note", None
+    if message.sticker:
+        return "sticker", None
+    if message.poll:
+        return "poll", None
+    return "other", message.caption
+
+
+async def handle_broadcast_content_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يلتقط أي نوع محتوى (صورة/فيديو/ملف/صوت/رسالة صوتية/GIF/ملصق/فيديو دائري/
+    استطلاع...) عندما يكون المالك بصدد إعداد إذاعة جديدة — بلا حاجة لاختيار
+    النوع مسبقًا. الرسائل النصية الصِرفة يلتقطها text_router بنفس awaiting."""
     awaiting = context.user_data.get("awaiting")
-    if awaiting not in ("broadcast_input_photo", "broadcast_input_video", "broadcast_input_document"):
+    if awaiting != "broadcast_await_content":
         return
     if not is_owner(update.effective_user.id):
         context.user_data.pop("awaiting", None)
         return
+    # ⚠️ حماية إضافية: تجهيز الإذاعة لا يُقبل إلا من داخل محادثة المالك الخاصة
+    # مع البوت، وليس من أي مجموعة، تجنبًا لأي التباس (المعالج أصلًا مسجَّل بقيد
+    # ChatType.PRIVATE فقط، وهذا فحص مضاعف عند مستوى المنطق نفسه).
+    if update.effective_chat.type != "private":
+        return
 
     message = update.message
-    content_type = None
-    file_id = None
-    if awaiting == "broadcast_input_photo" and message.photo:
-        content_type, file_id = "photo", message.photo[-1].file_id
-    elif awaiting == "broadcast_input_video" and message.video:
-        content_type, file_id = "video", message.video.file_id
-    elif awaiting == "broadcast_input_document" and message.document:
-        content_type, file_id = "document", message.document.file_id
-
-    if not content_type:
-        await message.reply_text("⚠️ أرسل النوع الصحيح من المحتوى المطلوب ”")
+    content_type, caption = _detect_broadcast_content(message)
+    if content_type == "text":
+        # الرسائل النصية الصِرفة (بلا وسائط) يعالجها text_router حصرًا، تجنبًا
+        # لالتقاطها مرتين من معالجين مختلفين.
         return
 
     if _BROADCAST_STATE["running"]:
@@ -11097,13 +12590,26 @@ async def handle_broadcast_media_input(update: Update, context: ContextTypes.DEF
         return
 
     context.user_data.pop("awaiting", None)
-    caption = message.caption
-    caption_entities = message.caption_entities
-    await message.reply_text("📣 بدأت عملية الإذاعة الآن، سيصلك إشعار عند الانتهاء ”")
-    asyncio.create_task(run_broadcast(
-        context, content_type, update.effective_user.id,
-        file_id=file_id, caption=caption, caption_entities=caption_entities,
-    ))
+    # لا تبدأ الإرسال فورًا: تُحفظ مرجعية الرسالة (chat_id/message_id) مؤقتًا
+    # وتُعرض معاينة فعلية طبق الأصل عبر copy_message (تدعم أي نوع محتوى دون
+    # أي فرع خاص لكل نوع) مع زرّي «تأكيد» و«إلغاء» قبل إذاعتها للجميع.
+    context.user_data["broadcast_pending"] = {
+        "content_type": content_type,
+        "source_chat_id": message.chat_id,
+        "source_message_id": message.message_id,
+        "caption": caption,
+    }
+    try:
+        await context.bot.copy_message(
+            chat_id=message.chat_id, from_chat_id=message.chat_id, message_id=message.message_id,
+        )
+    except Exception:
+        pass
+    text, entities = build_broadcast_confirm_message(content_type)
+    await message.reply_text(
+        text=text, entities=entities,
+        reply_markup=build_broadcast_confirm_keyboard(),
+    )
 
 
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11116,7 +12622,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_setting_input(update, context)
         return
 
-    if awaiting == "broadcast_input_text":
+    if awaiting == "broadcast_await_content":
         if not is_owner(update.effective_user.id):
             context.user_data.pop("awaiting", None)
             return
@@ -11124,12 +12630,142 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ توجد إذاعة قيد التنفيذ بالفعل، انتظر حتى تنتهي أو أوقفها أولاً.")
             return
         context.user_data.pop("awaiting", None)
-        text = update.message.text
-        entities = update.message.entities
-        await update.message.reply_text("📣 بدأت عملية الإذاعة الآن، سيصلك إشعار عند الانتهاء ”")
-        asyncio.create_task(run_broadcast(
-            context, "text", update.effective_user.id, text=text, entities=entities,
-        ))
+        # لا تبدأ الإرسال فورًا: تُحفظ مرجعية الرسالة (chat_id/message_id) مؤقتًا
+        # وتُعرض للمالك معاينة عبر copy_message مع زرّي «تأكيد» و«إلغاء» —
+        # الإرسال الفعلي لا يبدأ إلا بعد الضغط الصريح على «تأكيد الإرسال للجميع».
+        context.user_data["broadcast_pending"] = {
+            "content_type": "text",
+            "source_chat_id": update.message.chat_id,
+            "source_message_id": update.message.message_id,
+            "text": update.message.text,
+        }
+        try:
+            await context.bot.copy_message(
+                chat_id=update.message.chat_id, from_chat_id=update.message.chat_id,
+                message_id=update.message.message_id,
+            )
+        except Exception:
+            pass
+        text, entities = build_broadcast_confirm_message("text")
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_broadcast_confirm_keyboard(),
+        )
+        return
+
+    if awaiting == "broadcast_log_edit_text":
+        if not is_owner(update.effective_user.id):
+            context.user_data.pop("awaiting", None)
+            return
+        log_id = context.user_data.get("broadcast_log_edit_id")
+        back_page = context.user_data.get("broadcast_log_edit_back_page", 1)
+        context.user_data.pop("awaiting", None)
+        context.user_data.pop("broadcast_log_edit_id", None)
+        context.user_data.pop("broadcast_log_edit_back_page", None)
+        new_text = update.message.text
+        if not log_id or not edit_broadcast_log_content(log_id, new_text):
+            await update.message.reply_text("⚠️ تعذّر تعديل هذا السجل (ربما لم يعد موجودًا).")
+            return
+        row = get_broadcast_log(log_id)
+        await update.message.reply_text("✅ تم تعديل النص المؤرشف بنجاح.")
+        text, entities = build_broadcast_log_detail_message(row)
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_broadcast_log_detail_keyboard(log_id, back_page),
+        )
+        return
+
+    if awaiting == "withdraw_channel_set":
+        if not is_owner(update.effective_user.id):
+            context.user_data.pop("awaiting", None)
+            return
+        username = _normalize_channel_username(update.message.text)
+        if not username:
+            await update.message.reply_text("⚠️ أرسل يوزر صحيح للقناة (مثال: @channel أو رابط t.me/channel) ”")
+            return
+        context.user_data.pop("awaiting", None)
+        try:
+            chat = await context.bot.get_chat(f"@{username}")
+        except Exception as exc:
+            await update.message.reply_text(
+                f"⚠️ تعذّر العثور على القناة @{username} ({exc}). تأكد من صحة اليوزر وأن القناة عامة، ثم حاول مجددًا.",
+            )
+            text, entities = build_withdraw_channel_settings_message()
+            await update.message.reply_text(
+                text=text, entities=entities,
+                reply_markup=build_withdraw_channel_settings_keyboard(),
+            )
+            return
+        warning = ""
+        try:
+            member = await context.bot.get_chat_member(chat.id, context.bot.id)
+            if member.status not in ("administrator", "creator"):
+                warning = (
+                    "⚠️ تنبيه: البوت ليس مشرفًا في هذه القناة، يجب ترقيته إلى مشرف "
+                    "حتى يتمكن من إرسال طلبات السحب إليها."
+                )
+        except Exception as exc:
+            warning = f"⚠️ تنبيه: تعذّر التحقق من صلاحيات البوت في القناة ({exc})."
+        set_withdraw_channel(chat.id, username, chat.title or "")
+        log_admin_action(
+            "change_settings", update.effective_user.id, details=f"تحديد قناة استقبال السحب: @{username}",
+            actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+        )
+        await update.message.reply_text(
+            f"✅ تم تحديد قناة استقبال طلبات السحب: @{username}" + (f"\n\n{warning}" if warning else ""),
+        )
+        text, entities = build_withdraw_channel_settings_message()
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_withdraw_channel_settings_keyboard(),
+        )
+        return
+
+    if awaiting == "new_user_notify_channel_set":
+        if not is_owner(update.effective_user.id):
+            context.user_data.pop("awaiting", None)
+            return
+        username = _normalize_channel_username(update.message.text)
+        if not username:
+            await update.message.reply_text("⚠️ أرسل يوزر صحيح للقناة (مثال: @channel أو رابط t.me/channel) ”")
+            return
+        context.user_data.pop("awaiting", None)
+        try:
+            chat = await context.bot.get_chat(f"@{username}")
+        except Exception as exc:
+            await update.message.reply_text(
+                f"⚠️ تعذّر العثور على القناة @{username} ({exc}). تأكد من صحة اليوزر وأن القناة عامة، ثم حاول مجددًا.",
+            )
+            text, entities = build_new_user_notify_section_message()
+            await update.message.reply_text(
+                text=text, entities=entities,
+                reply_markup=build_new_user_notify_section_keyboard(),
+            )
+            return
+        warning = ""
+        try:
+            member = await context.bot.get_chat_member(chat.id, context.bot.id)
+            if member.status not in ("administrator", "creator"):
+                warning = (
+                    "⚠️ تنبيه: البوت ليس مشرفًا في هذه القناة، يجب ترقيته إلى مشرف "
+                    "حتى يتمكن من إرسال الإشعارات إليها."
+                )
+        except Exception as exc:
+            warning = f"⚠️ تنبيه: تعذّر التحقق من صلاحيات البوت في القناة ({exc})."
+        set_new_user_notify_channel(chat.id, username, chat.title or "")
+        log_admin_action(
+            "change_settings", update.effective_user.id,
+            details=f"تحديد قناة إشعارات دخول المستخدمين: @{username}",
+            actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+        )
+        await update.message.reply_text(
+            f"✅ تم تحديد قناة إشعارات دخول المستخدمين: @{username}" + (f"\n\n{warning}" if warning else ""),
+        )
+        text, entities = build_new_user_notify_section_message()
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_new_user_notify_section_keyboard(),
+        )
         return
 
     if awaiting == "admin_channel_add_username":
@@ -11596,6 +13232,92 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             text=text, entities=entities,
             reply_markup=build_user_profile_keyboard(row),
+        )
+        return
+
+    if awaiting == "admgw_search_lookup":
+        raw_code = (update.message.text or "").strip()
+        # يسمح بلصق الكود مع أو بدون بادئة # أو مسافات زائدة، ويقارن دون حساسية لحالة الأحرف.
+        code = raw_code.lstrip("#").strip()
+        filt = context.user_data.get("admgw_search_filt", "all")
+        page = context.user_data.get("admgw_search_page", 1)
+        context.user_data.pop("awaiting", None)
+        context.user_data.pop("admgw_search_filt", None)
+        context.user_data.pop("admgw_search_page", None)
+        giveaway = get_giveaway(code) or get_giveaway(code.lower())
+        if not giveaway:
+            await update.message.reply_text(
+                "⚠️ لم يتم العثور على أي سحب بهذا الكود ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"admgw_list:{filt}:{page}", style="danger"),
+                ]]),
+            )
+            return
+        gw_code = giveaway["gw_code"]
+        channel_title = get_chat_title_by_id(giveaway["chat_id"])
+        participants_total = count_giveaway_participants(gw_code)
+        channel_url = await build_contest_post_link(context, giveaway["chat_id"], giveaway.get("channel_message_id"))
+        text, entities = build_admgw_detail_message(giveaway, None, channel_title, participants_total)
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_admgw_detail_keyboard(gw_code, filt, page, channel_url=channel_url),
+        )
+        return
+
+    if awaiting == "admct_search_lookup":
+        raw_code = (update.message.text or "").strip()
+        # يسمح بلصق الكود مع أو بدون بادئة # أو مسافات زائدة.
+        code = raw_code.lstrip("#").strip()
+        filt = context.user_data.get("admct_search_filt", "all")
+        page = context.user_data.get("admct_search_page", 1)
+        context.user_data.pop("awaiting", None)
+        context.user_data.pop("admct_search_filt", None)
+        context.user_data.pop("admct_search_page", None)
+        contest = get_contest(code)
+        if not contest:
+            await update.message.reply_text(
+                "⚠️ لم يتم العثور على أي مسابقة بهذا الكود ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"admct_list:{filt}:{page}", style="danger"),
+                ]]),
+            )
+            return
+        contest_code = contest["contest_code"]
+        channel_title = get_chat_title_by_id(contest["chat_id"])
+        participants_total = count_contest_participants(contest_code)
+        channel_url = await build_contest_post_link(context, contest["chat_id"], contest.get("channel_message_id"))
+        text, entities = build_admct_detail_message(contest, None, channel_title, participants_total)
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_admct_detail_keyboard(contest_code, filt, page, channel_url=channel_url),
+        )
+        return
+
+    if awaiting == "admrr_search_lookup":
+        raw_code = (update.message.text or "").strip().lstrip("#").strip()
+        filt = context.user_data.get("admrr_search_filt", "all")
+        page = context.user_data.get("admrr_search_page", 1)
+        context.user_data.pop("awaiting", None)
+        context.user_data.pop("admrr_search_filt", None)
+        context.user_data.pop("admrr_search_page", None)
+        try:
+            roulette_id = int(raw_code)
+        except ValueError:
+            roulette_id = None
+        roulette = get_roulette(roulette_id) if roulette_id is not None else None
+        if not roulette:
+            await update.message.reply_text(
+                "⚠️ لم يتم العثور على أي سحب سريع بهذا الكود ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"admrr_list:{filt}:{page}", style="danger"),
+                ]]),
+            )
+            return
+        participants_total = count_participants(roulette_id)
+        text, entities = build_admrr_detail_message(roulette, None, participants_total)
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_admrr_detail_keyboard(roulette_id, filt, page),
         )
         return
 
@@ -12146,6 +13868,7 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
 
         post_text, post_entities = build_contest_channel_message(
             cliche_text, cliche_entities, target_count, end_type, time_minutes, votes_target,
+            contest_code=contest_code,
         )
         post_keyboard = build_contest_channel_keyboard(contest_code)
         try:
@@ -12241,7 +13964,7 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
 
     post_text, post_entities = build_giveaway_channel_message(
-        cliche_text, cliche_entities, vote_link=vote_link, condition_channels=condition_channels,
+        cliche_text, cliche_entities, gw_code=gw_code, vote_link=vote_link, condition_channels=condition_channels,
         boost_link=boost_link, autospin=autospin_notice,
     )
     post_keyboard = build_giveaway_channel_keyboard(gw_code, 0, antispam=bool(settings.get("gw_antispam", False)))
@@ -12692,27 +14415,20 @@ def main():
             name="giveaway_autospin_countdown_tick",
         )
         app.job_queue.run_repeating(
-            contest_votes_subscription_audit, interval=1800, first=120,
+            contest_votes_subscription_audit, interval=300, first=60,
             name="contest_votes_subscription_audit",
         )
 
     app.add_error_handler(_global_error_handler)
 
-    # بوابة الحظر العامة: تُسجَّل في مجموعة أولوية أعلى (group=-1) فتُنفَّذ
-    # قبل أي معالج آخر لأي تحديث، وتوقف تمريره تمامًا (ApplicationHandlerStop)
-    # إن كان مُرسِله محظورًا من قسم «إدارة المستخدمين».
-    app.add_handler(TypeHandler(Update, _ban_gate_handler), group=-1)
-
-    # بوابة الصيانة العامة: بنفس أولوية بوابة الحظر (group=-1)، تُنفَّذ بعدها
-    # مباشرة وتوقف تمرير التحديث لأي مستخدم عادي إن كان وضع الصيانة مفعّلًا
-    # من قسم «🛠️ صيانة البوت» لدى المالك.
-    app.add_handler(TypeHandler(Update, _maintenance_gate_handler), group=-1)
-
-    # بوابة الاشتراك الإجباري العامة: بنفس أولوية بوابتي الحظر والصيانة
-    # (group=-1)، تُنفَّذ بعدهما مباشرة وتغطي كل أزرار/رسائل المحادثة الخاصة
-    # مع البوت بفحص واحد بدل تكراره داخل كل معالج على حدة (راجع توثيق
-    # _subscription_gate_handler لتفاصيل الاستثناءات).
-    app.add_handler(TypeHandler(Update, _subscription_gate_handler), group=-1)
+    # البوابات العامة الثلاث (حظر ← صيانة ← اشتراك إجباري): تُسجَّل كمعالج
+    # *واحد* فقط في مجموعة أولوية أعلى (group=-1) فيُنفَّذ قبل أي معالج آخر
+    # لأي تحديث. هام: لا يجوز تسجيلها كـ TypeHandler منفصلة في نفس المجموعة —
+    # مكتبة python-telegram-bot تُنفّذ أول معالج مطابق فقط في كل مجموعة ثم
+    # تنتقل للمجموعة التالية، فكانت ثلاث TypeHandler منفصلة هنا تجعل الأولى
+    # فقط (الحظر) تعمل فعليًا وتُعطِّل بوابتي الصيانة والاشتراك بصمت. راجع
+    # توثيق _global_gates_handler لتفاصيل كل بوابة على حدة.
+    app.add_handler(TypeHandler(Update, _global_gates_handler), group=-1)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("getid", get_id_prompt))
@@ -12792,10 +14508,18 @@ def main():
     app.add_handler(MessageHandler(filters.FORWARDED & filters.ChatType.PRIVATE, channel_forward_handler))
     app.add_handler(MessageHandler(filters.Regex("تفعيل روليت") & filters.ChatType.GROUPS, group_activation_handler))
     app.add_handler(MessageHandler(
-        (filters.PHOTO | filters.VIDEO | filters.Document.ALL) & filters.ChatType.PRIVATE,
-        handle_broadcast_media_input,
+        (
+            filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.VOICE
+            | filters.ANIMATION | filters.VIDEO_NOTE | filters.Sticker.ALL | filters.POLL
+        ) & filters.ChatType.PRIVATE,
+        handle_broadcast_content_input,
     ))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+    # ⚠️ يجب أن يبقى هذا المعالج مقيّدًا بالمحادثة الخاصة مع البوت فقط
+    # (ChatType.PRIVATE) — لأنه يحتوي على كل تدفقات «awaiting» الخاصة بالمالك
+    # (الإذاعة، الإعدادات، إلخ). بدون هذا القيد، أي رسالة نصية يرسلها المالك في
+    # أي مجموعة أخرى أثناء وجود حالة «awaiting» عالقة (مثل انتظار نص الإذاعة)
+    # كانت تُفهم خطأً على أنها محتوى الإذاعة وتُرسَل فورًا لكل المستخدمين.
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_router))
     app.add_handler(ChatMemberHandler(bot_chat_status_update, ChatMemberHandler.MY_CHAT_MEMBER))
 
     async def _post_init(app_):
