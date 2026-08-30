@@ -8241,14 +8241,24 @@ async def _global_gates_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
+
+    # يُسجَّل المستخدم ويُرسَل إشعار "مستخدم جديد" (إن كانت الميزة مفعّلة)
+    # فور أوّل تواصل فعلي مع البوت — قبل أي بوابة قد توقف التنفيذ لاحقًا
+    # (كبوابة الاشتراك الإجباري أدناه). سابقًا كان هذا يحدث بعد بوابة
+    # الاشتراك مباشرة، فكان أي مستخدم جديد لم يشترك بعد بالقنوات المطلوبة
+    # (وهي الحالة الأكثر شيوعًا لأي مستخدم جديد حقيقي) يُفلت تمامًا من
+    # التسجيل والإشعار؛ لأن استئناف التنفيذ لاحقًا عبر زر «تحقق من الاشتراك»
+    # (check_sub_status_callback) كان مشروطًا بوجود رابط دخول عميق محفوظ
+    # (pending_start_arg)، وهو غير موجود أصلاً لمن دخل البوت بلا رابط.
+    is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id, update.effective_user)
+    if is_genuinely_new:
+        await _notify_new_user_join(context, update.effective_user)
+
     if args and args[0].startswith("gwjoin_"):
         # حالة خاصة: رابط المشاركة في سحب يُحال إلى بوابته الموحّدة الخاصة به
         # مباشرة (VORTEX + قناة استضافة السحب معًا في شاشة واحدة) بدل بوابة
         # VORTEX العامة أدناه، حتى لا يمر المستخدم بخطوتين متتاليتين لإتمام
         # نفس الشرط عند فتح البوت عبر زر «اضغط لـ المشاركة».
-        is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id, update.effective_user)
-        if is_genuinely_new:
-            await _notify_new_user_join(context, update.effective_user)
         await handle_giveaway_join_entry(
             update, context, args[0][len("gwjoin_"):], is_genuinely_new=is_genuinely_new,
         )
@@ -8266,17 +8276,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # الترحيب العام فقط.
         if context.args:
             context.user_data["pending_start_arg"] = context.args[0]
+        # تُحفَظ أيضًا نتيجة is_genuinely_new (حُسبت أعلاه عند أول تواصل فعلي
+        # مع البوت) لاستخدامها لاحقًا في check_sub_status_callback بدل إعادة
+        # حسابها هناك — فالمستخدم صار مسجَّلاً بالفعل في known_bot_users الآن،
+        # فإعادة استدعاء register_bot_user_and_check_new ستُعيد False خطأً.
+        context.user_data["pending_is_genuinely_new"] = is_genuinely_new
         text, entities = build_subscription_required_message(missing_channels, channels_status=channels_status)
         await update.message.reply_text(
             text, entities=entities, reply_markup=build_subscription_required_keyboard(missing_channels)
         )
         return
 
-    is_genuinely_new = register_bot_user_and_check_new(update.effective_user.id, update.effective_user)
-    if is_genuinely_new:
-        await _notify_new_user_join(context, update.effective_user)
-
-    args = context.args
     if args and args[0].startswith("ref_"):
         # لا نشترط هنا أن يكون هذا المستخدم "جديدًا كليًا على البوت" (is_genuinely_new)،
         # لأن هذا الشرط يقيس أول تواصل مع البوت إطلاقًا وليس أول إحالة له تحديدًا —
@@ -8323,10 +8333,13 @@ async def check_sub_status_callback(update: Update, context: ContextTypes.DEFAUL
     await query.answer()
 
     pending_arg = context.user_data.pop("pending_start_arg", None)
+    # التسجيل وإشعار "مستخدم جديد" يحدثان الآن عند أوّل تواصل فعلي داخل
+    # start() نفسها (قبل بوابة الاشتراك)، فقط تُستعاد القيمة المحفوظة هناك
+    # بدل إعادة تسجيل المستخدم هنا (كان هذا يُعيد False دومًا لأنه سبق تسجيله،
+    # فلا يصل أي إشعار أبدًا لمن دخل البوت بلا رابط دخول عميق — وهي الحالة
+    # الأكثر شيوعًا لمستخدم جديد حقيقي).
+    is_genuinely_new = context.user_data.pop("pending_is_genuinely_new", False)
     if pending_arg:
-        is_genuinely_new = register_bot_user_and_check_new(query.from_user.id, query.from_user)
-        if is_genuinely_new:
-            await _notify_new_user_join(context, query.from_user)
         if pending_arg.startswith("ref_"):
             # نفس المنطق المطبَّق في start(): لا نشترط is_genuinely_new هنا، لأن
             # الحماية الذرية الدقيقة ضد الاحتساب المكرر موجودة فعلًا داخل
