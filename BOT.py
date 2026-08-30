@@ -3444,7 +3444,7 @@ def build_giveaway_channel_message(cliche_text: str, cliche_entities, gw_code: s
     if boost_link:
         condition_items.append(("تعزيز", boost_link))
     if condition_items:
-        quote_content = ["• الشرط ", ("⬇️", EMOJI["arrow_down"])]
+        quote_content = ["• الشرط ", ("⏬", EMOJI["arrow_down"])]
         for idx, (label, link) in enumerate(condition_items):
             circle = GW_CONDITION_CIRCLE_NUMS[idx] if idx < len(GW_CONDITION_CIRCLE_NUMS) else f"{idx + 1}."
             quote_content += [
@@ -3457,7 +3457,7 @@ def build_giveaway_channel_message(cliche_text: str, cliche_entities, gw_code: s
     if vote_link:
         quote_content = [
             "شرط تصويت", "\n\n",
-            "• الشرط ", ("⬇️", EMOJI["arrow_down"]), "\n",
+            "• الشرط ", ("⏬", EMOJI["arrow_down"]), "\n",
             (["تصويت"], "bold", None),
             " ›› ",
             (["هـــنـــا"], "link", vote_link),
@@ -8585,11 +8585,14 @@ async def compjoin_button_callback(update: Update, context: ContextTypes.DEFAULT
     مباشرة (compjoinbtn:{contest_code}) — بدل التحويل الفوري غير المشروط للبوت
     الذي كان يحدث سابقًا عبر زر رابط (url).
 
-    يتحقق أولاً من اشتراك المستخدم في قنوات VORTEX الإجبارية العامة، ثم في قناة
-    نشر هذه المسابقة تحديدًا؛ فإن كان غير مشترك في أيٍّ منهما يظهر له تنبيه فوري
-    (show_alert) بذلك فقط، دون أي تحويل لمحادثة البوت إطلاقًا. لا يُفتح البوت
-    (عبر query.answer(url=...)) إلا بعد اجتياز شرط الاشتراك فعليًا، لإكمال خطوة
-    تأكيد المشاركة المعتادة هناك (نفس مسار compjoin_ الحالي دون أي تعديل عليه)."""
+    الأولوية دائمًا لشرط قناة *هذه* المسابقة تحديدًا: تُفحص أولاً وتُعرض كتنبيه
+    فوري (show_alert) باسم قناة واحدة محددة فقط عند عدم الاشتراك فيها — دون أي
+    خلط مع قنوات VORTEX الإجبارية العامة في نفس التنبيه. شرط VORTEX العام لا
+    يُفحص هنا إطلاقًا؛ فور اجتياز شرط قناة المسابقة يُفتح البوت (عبر
+    query.answer(url=...)) عبر نفس رابط compjoin_ الحالي دون أي تعديل عليه،
+    وهناك start() نفسها هي من تتحقق من VORTEX وتعرض بوابتها الموحّدة الجاهزة
+    (بزر لكل قناة ناقصة) إن كان لا يزال غير مشترك فيها — بدل تكرار نفس الفحص
+    بتنبيه نصي بسيط هنا."""
     query = update.callback_query
     try:
         contest_code = query.data.split(":", 1)[1]
@@ -8622,11 +8625,6 @@ async def compjoin_button_callback(update: Update, context: ContextTypes.DEFAULT
         await query.answer("⚠️ اكتمل عدد المشاركين المسموح في هذه المسابقة.", show_alert=True)
         return
 
-    need_vortex = await get_missing_required_channels(context, user.id)
-    if need_vortex:
-        await query.answer(build_contest_vortex_subscribe_alert(need_vortex), show_alert=True)
-        return
-
     if not await check_contest_channel_subscription(context, user.id, contest):
         title = await get_chat_title_cached(context, contest["chat_id"])
         await query.answer(build_contest_channel_subscribe_alert(title), show_alert=True)
@@ -8640,11 +8638,12 @@ async def compvote_button_callback(update: Update, context: ContextTypes.DEFAULT
     (compvotebtn:{contest_code}:{participant_id}) — بدل التحويل الفوري غير
     المشروط للبوت الذي كان يحدث سابقًا عبر زر رابط (url).
 
-    بنفس منطق compjoin_button_callback أعلاه: يتحقق من الاشتراك في قنوات VORTEX
-    الإجبارية العامة ثم في قناة نشر هذه المسابقة أولاً، ويظهر تنبيهًا فوريًا دون
-    أي تحويل عند عدم الاشتراك. لا يُحوَّل المستخدم إلى البوت (لعرض كابتشا «منع
-    الرشق» ثم احتساب صوته عبر مسار compvote_ الحالي دون أي تعديل عليه) إلا بعد
-    اجتياز شرط الاشتراك فعليًا — بصرف النظر عن وجود خطوة الكابتشا لاحقًا."""
+    بنفس منطق compjoin_button_callback أعلاه: يُفحص شرط قناة *هذه* المسابقة
+    تحديدًا فقط هنا (تنبيه فوري باسم قناة واحدة عند عدم الاشتراك)، دون فحص
+    قنوات VORTEX العامة في هذا التنبيه. فور اجتياز شرط قناة المسابقة يُفتح
+    البوت (لعرض كابتشا «منع الرشق» ثم احتساب التصويت عبر مسار compvote_
+    الحالي دون أي تعديل عليه)، وهناك start() تتحقق من VORTEX وتعرض بوابتها
+    الموحّدة إن كان لا يزال غير مشترك فيها."""
     query = update.callback_query
     try:
         _, contest_code, participant_id_raw = query.data.split(":", 2)
@@ -8676,11 +8675,6 @@ async def compvote_button_callback(update: Update, context: ContextTypes.DEFAULT
         return
     if contest.get("premium_only") and not user.is_premium:
         await query.answer("💎 هذه المسابقة للتصويت لمستخدمي بريميوم فقط.", show_alert=True)
-        return
-
-    need_vortex = await get_missing_required_channels(context, user.id)
-    if need_vortex:
-        await query.answer(build_contest_vortex_subscribe_alert(need_vortex), show_alert=True)
         return
 
     if not await check_contest_channel_subscription(context, user.id, contest):
@@ -9136,23 +9130,23 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
         return
 
-    # فحص خلفي تلقائي: يجب أن يكون المستخدم مشتركًا في قناة/قنوات البوت
-    # الإلزامية (VORTEX) قبل إكمال أي مشاركة في أي سحب. لا يوجد أي تحويل
-    # لمحادثة البوت هنا — يظهر تنبيه فوري (show_alert) بالنص فقط يسمّي
-    # القناة/القنوات الناقصة، بنفس أسلوب بقية شروط السحب أدناه، لأن أزرار
-    # الاشتراك نفسها موجودة بشكل دائم أسفل منشور السحب.
-    need_vortex = await get_missing_required_channels(context, user.id)
-    if need_vortex:
-        await query.answer(build_giveaway_vortex_subscribe_alert(need_vortex), show_alert=True)
-        return
-
-    # هنا المستخدم مشترك في VORTEX بالفعل؛ إن كان غير مشترك في قناة استضافة
-    # السحب نفسها (أو أي شرط إضافي آخر)، يظهر له تنبيه فوري (show_alert) يسمّي
-    # الشرط الناقص صراحةً دون تحويله إلى البوت — تمييزًا واضحًا عن حالة عدم
-    # الاشتراك في VORTEX أعلاه.
+    # 🎯 الأولوية دائمًا لشرط قناة *هذا* السحب تحديدًا وشروطه الإضافية (تعزيز/
+    # تصويت/قنوات شرط يدوية) — تُفحص أولاً عبر check_giveaway_requirements التي
+    # تعرض تنبيهًا فوريًا (show_alert) باسم قناة واحدة محددة فقط عند عدم
+    # الاشتراك فيها، دون أي خلط مع قنوات VORTEX الإجبارية العامة في نفس التنبيه.
     ok, alert_text = await check_giveaway_requirements(context, user, giveaway)
     if not ok:
         await query.answer(alert_text, show_alert=True)
+        return
+
+    # فقط بعد اجتياز شرط قناة السحب نفسها: إن كان المستخدم لا يزال غير مشترك في
+    # قناة/قنوات VORTEX الإجبارية العامة، يُفتح له البوت الآن عبر رابط gwjoin_
+    # المخصص أصلاً لهذه الحالة (راجع الحالة الخاصة أعلى start())، حيث تُعرض له
+    # بوابة الاشتراك الإجبارية الموحّدة الجاهزة (بزر لكل قناة ناقصة) بدل تنبيه
+    # نصي بسيط هنا يسرد كل القنوات الناقصة معًا.
+    need_vortex = await get_missing_required_channels(context, user.id)
+    if need_vortex:
+        await query.answer(url=f"https://t.me/{BOT_USERNAME}?start=gwjoin_{gw_code}")
         return
 
     vote_contest_code = giveaway.get("vote_contest_code")
@@ -10639,6 +10633,17 @@ async def rr_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if register_bot_user_and_check_new(user.id, user):
         await _notify_new_user_join(context, user)
     roulette_id = int(query.data.replace("rr_join_", ""))
+
+    # لا يوجد "قناة استضافة" خاصة بالروليت السريع (يُنشر عبر الوضع الخطّي inline
+    # في أي محادثة)، لذا الشرط الوحيد المطلوب هنا هو قنوات VORTEX الإجبارية
+    # العامة. إن كان المستخدم غير مشترك فيها، يُفتح له البوت مباشرة عبر رابط
+    # ?start=rr_{roulette_id} الحالي (handle_roulette_entry) بدل إكمال مشاركته
+    # فورًا؛ start() نفسها تتحقق من VORTEX وتعرض بوابتها الموحّدة الجاهزة (بزر
+    # لكل قناة ناقصة)، وتُكمل نفس طلب الانضمام تلقائيًا بعد نجاح الاشتراك.
+    need_vortex = await get_missing_required_channels(context, user.id)
+    if need_vortex:
+        await query.answer(url=f"https://t.me/{BOT_USERNAME}?start=rr_{roulette_id}")
+        return
 
     result = join_roulette(user.id, roulette_id, user.first_name or user.username or str(user.id))
 
