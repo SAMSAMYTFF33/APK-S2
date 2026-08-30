@@ -830,6 +830,61 @@ SUBSCRIPTION_CACHE_TTL = 60
 SUBSCRIPTION_NEGATIVE_CACHE_TTL = 3
 
 
+_CHANNEL_TARGET_CHECK_THROTTLE = {}
+CHANNEL_TARGET_CHECK_THROTTLE_TTL = 30  # ثانية
+
+
+async def _opportunistic_autodelete_reached_channels(
+    context: ContextTypes.DEFAULT_TYPE, channels: list,
+) -> list:
+    """يحذف تلقائيًا أي قناة اشتراك إجباري وصلت إلى هدف عدد أعضائها، فور
+    حدوث فحص اشتراك إجباري حي (وليس عبر انتظار المهمة الدورية المنفصلة
+    check_required_channels_targets فقط) — بناءً على طلب أن يتم الحذف
+    «عند تحقق من اشتراك إجباري» تحديدًا، لا فقط اعتمادًا على JobQueue التي
+    قد لا تعمل أصلاً إن تعذّر تثبيت مكتبتها في بيئة الاستضافة.
+
+    نظرًا لأن get_required_channels_status تُستدعى مع كل تفاعل لأي مستخدم
+    (كل زر/رسالة الآن، بعد تفعيل الفحص الحي)، لا داعٍ لفحص عدد أعضاء كل
+    قناة مع كل استدعاء — throttle قصير (30 ثانية) لكل قناة يمنع تكرار
+    get_chat_member_count عشرات المرات في الدقيقة دون أي فائدة إضافية،
+    فيبقى الحذف لحظيًا فعليًا من منظور المستخدمين (يحدث خلال أول دقائق من
+    وصول الهدف، مع أول مستخدم يتفاعل مع البوت) بدون أي بطء ملموس."""
+    now = time.time()
+    eligible = [
+        ch for ch in channels
+        if ch.get("target_count") and ch.get("auto_delete_on_target")
+        and now - _CHANNEL_TARGET_CHECK_THROTTLE.get(ch["channel_id"], 0) >= CHANNEL_TARGET_CHECK_THROTTLE_TTL
+    ]
+    if not eligible:
+        return channels
+    for ch in eligible:
+        _CHANNEL_TARGET_CHECK_THROTTLE[ch["channel_id"]] = now
+    results = await asyncio.gather(
+        *[_check_and_maybe_delete_channel_target(context, ch) for ch in eligible],
+        return_exceptions=True,
+    )
+    deleted_ids = set()
+    for ch, result in zip(eligible, results):
+        if isinstance(result, Exception) or result[0] != "deleted":
+            continue
+        deleted_ids.add(ch["channel_id"])
+        count = result[1]
+        for owner_id in OWNER_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=owner_id,
+                    text=(
+                        f"🔄 تم حذف قناة الاشتراك الإجباري @{ch.get('username')} تلقائيًا من القائمة\n"
+                        f"(وصلت إلى {count} مشترك، وكان الهدف {ch.get('target_count')})"
+                    ),
+                )
+            except Exception:
+                pass
+    if not deleted_ids:
+        return channels
+    return [ch for ch in channels if ch["channel_id"] not in deleted_ids]
+
+
 async def get_required_channels_status(
     context: ContextTypes.DEFAULT_TYPE, user_id: int, force_refresh: bool = False
 ) -> list:
@@ -837,21 +892,30 @@ async def get_required_channels_status(
     الإجباري المفعّلة حاليًا — وليس الناقصة منها فقط — ويعيد قائمة أزواج
     (channel, subscribed: bool) بنفس ترتيب القنوات. تُستخدم لعرض حالة كل
     قناة على حدة في واجهة الاشتراك الإجباري. يعتمد داخليًا على
-    is_user_subscribed_to_chat لكل قناة (فحص حي عبر get_chat_member، مع كاش
-    قصير جدًا فقط لتفادي إبطاء استجابة الأزرار عند الضغطات المتكررة —
-    60 ثانية للحالة "مشترك" و3 ثوانٍ فقط للحالة "غير مشترك"، بلا أي تخزين
-    دائم لنتيجة قديمة)."""
-    channels = get_required_channels(enabled_only=True)
-    status = []
-    for channel in channels:
-        username = channel.get("username")
-        if not username:
-            continue
-        subscribed = await is_user_subscribed_to_chat(
-            context, user_id, f"@{username}", force_refresh=force_refresh,
-        )
-        status.append((channel, subscribed))
-    return status
+    is_user_subscribed_to_chat لكل قناة (فحص حي عبر get_chat_member).
+
+    قبل بناء حالة الاشتراك، تُستدعى _opportunistic_autodelete_reached_channels
+    لحذف أي قناة وصلت لهدفها فورًا (بشكل مُنظَّم/throttled) بدل الاعتماد فقط
+    على المهمة الدورية المنفصلة — فتُطبَّق قنوات «حذف تلقائي عند الهدف»
+    فعليًا في نفس لحظة تحقق أي مستخدم من الاشتراك الإجباري.
+
+    ⚡ الفحص لكل القنوات يتم بالتوازي (asyncio.gather) بدل حلقة for متتابعة —
+    بحيث يبقى زمن الاستجابة قريبًا من طلب شبكة واحد فقط بصرف النظر عن عدد
+    قنوات الاشتراك الإجباري (قناتين، ثلاث، ...)، بدل أن يتضاعف الزمن مع كل
+    قناة إضافية كما كان الحال في الحلقة المتتابعة السابقة. هذا هو ما يجعل
+    الفحص الحي (force_refresh=True) في enforce_mandatory_subscription_gate
+    سريعًا رغم أنه يفحص أكثر من قناة في كل ضغطة زر."""
+    channels = [ch for ch in get_required_channels(enabled_only=True) if ch.get("username")]
+    if not channels:
+        return []
+    channels = await _opportunistic_autodelete_reached_channels(context, channels)
+    if not channels:
+        return []
+    results = await asyncio.gather(*[
+        is_user_subscribed_to_chat(context, user_id, f"@{ch['username']}", force_refresh=force_refresh)
+        for ch in channels
+    ])
+    return list(zip(channels, results))
 
 
 async def get_missing_required_channels(
@@ -887,13 +951,21 @@ async def enforce_mandatory_subscription_gate(update: Update, context: ContextTy
     حجب الطلب وعرض بوابة الاشتراك الإجباري بدلاً منه (وعندها يجب على
     المستدعي التوقف فورًا وعدم متابعة تنفيذ الطلب الأصلي).
 
+    force_refresh=True دائمًا هنا تحديدًا (بعكس بقية استخدامات
+    get_required_channels_status في البوت): هذه هي البوابة التي تُنفَّذ قبل
+    أي زر أو رسالة في المحادثة الخاصة، فأي كاش هنا يعني أن مستخدمًا خرج من
+    القناة يبقى قادرًا على استخدام البوت لبضع ثوانٍ إضافية إلى أن تنتهي
+    صلاحية الكاش. الفحص الحي مقبول أداءً هنا رغم تنفيذه في كل ضغطة زر لأن
+    get_required_channels_status تفحص كل القنوات بالتوازي (asyncio.gather)
+    لا بالتتابع، فزمن الفحص لا يتضاعف مع عدد القنوات.
+
     ملاحظة: مالكو البوت (OWNER_IDS) مستثنون دائمًا من هذا الشرط، حتى لا
     يُحجب وصولهم إلى قسم الإدارة (مثلاً لإضافة/تعديل قنوات الاشتراك نفسها)."""
     user = update.effective_user
     if not user or is_owner(user.id) or is_moderator(user.id):
         return True
 
-    channels_status = await get_required_channels_status(context, user.id)
+    channels_status = await get_required_channels_status(context, user.id, force_refresh=True)
     if not channels_status:
         return True
     missing_channels = [ch for ch, ok in channels_status if not ok]
@@ -1164,6 +1236,32 @@ async def _check_bot_can_verify_channel(context: ContextTypes.DEFAULT_TYPE, user
     return ""
 
 
+async def _check_and_maybe_delete_channel_target(context: ContextTypes.DEFAULT_TYPE, channel: dict):
+    """يفحص قناة اشتراك إجباري واحدة مقابل هدفها، ويحذفها تلقائيًا إن كانت
+    مؤهلة ووصلت للهدف. تعيد ("deleted", count) / ("not_reached", count) /
+    ("error", exc) / ("skipped", None) حتى يمكن استخدامها من المهمة الدورية
+    ومن زر «تحقق الآن» اليدوي معًا بنفس المنطق تمامًا دون تكرار الكود."""
+    target = channel.get("target_count")
+    username = channel.get("username")
+    if not target or not channel.get("auto_delete_on_target") or not username:
+        return "skipped", None
+    try:
+        count = await context.bot.get_chat_member_count(chat_id=f"@{username}")
+    except Exception as exc:
+        logger.exception(
+            "تعذّر جلب عدد مشتركي قناة الاشتراك الإجباري @%s للتحقق من الهدف", username,
+        )
+        return "error", exc
+    if count >= int(target):
+        delete_required_channel(channel["channel_id"])
+        logger.info(
+            "تم حذف قناة الاشتراك الإجباري @%s تلقائيًا بعد وصولها إلى %s مشترك (الهدف: %s)",
+            username, count, target,
+        )
+        return "deleted", count
+    return "not_reached", count
+
+
 async def check_required_channels_targets(context: ContextTypes.DEFAULT_TYPE):
     """
     مهمة دورية: تفحص كل قنوات الاشتراك الإجباري المفعّلة التي حدّد لها المالك
@@ -1172,41 +1270,45 @@ async def check_required_channels_targets(context: ContextTypes.DEFAULT_TYPE):
     الاشتراك الإجباري، ويُرسَل إشعار بذلك لكل مالك. القنوات المضبوطة على
     «إبقاء دائم» (♾️ auto_delete_on_target=False) أو بلا هدف محدد لا تُفحص
     أصلاً.
-    """
+
+    ⚠️ السبب الشائع لعدم الحذف رغم الوصول للهدف: فشل صامت في جلب عدد
+    الأعضاء (غالبًا لأن البوت ليس مشرفًا/عضوًا في القناة) كان يُسجَّل في
+    اللوق فقط دون أي إشعار — فيبدو للمالك أن الميزة لا تعمل إطلاقًا دون أي
+    تفسير. الآن يُرسَل تحذير فوري للمالك عند الفشل، بدل الاكتفاء باللوق
+    الصامت. كما أُضيف زر «🎯 تحقق من الهدف الآن» يدوي (owner_sub_check_target_now)
+    لكل قناة، بنفس منطق هذه الدالة تمامًا (عبر _check_and_maybe_delete_channel_target)،
+    حتى لا ينتظر المالك دورة الفحص الدورية (كل دقيقتين) عند الاختبار."""
     channels = get_required_channels(enabled_only=True)
     for channel in channels:
-        target = channel.get("target_count")
-        if not target or not channel.get("auto_delete_on_target"):
-            continue
+        status, info = await _check_and_maybe_delete_channel_target(context, channel)
         username = channel.get("username")
-        if not username:
-            continue
-        try:
-            count = await context.bot.get_chat_member_count(chat_id=f"@{username}")
-        except Exception:
-            logger.exception(
-                "تعذّر جلب عدد مشتركي قناة الاشتراك الإجباري @%s للتحقق من الحذف التلقائي",
-                username,
-            )
-            continue
-        if count < target:
-            continue
-        delete_required_channel(channel["channel_id"])
-        logger.info(
-            "تم حذف قناة الاشتراك الإجباري @%s تلقائيًا بعد وصولها إلى %s مشترك (الهدف: %s)",
-            username, count, target,
-        )
-        for owner_id in OWNER_IDS:
-            try:
-                await context.bot.send_message(
-                    chat_id=owner_id,
-                    text=(
-                        f"🔄 تم حذف قناة الاشتراك الإجباري @{username} تلقائيًا من القائمة\n"
-                        f"(وصلت إلى {count} مشترك، وكان الهدف {target})"
-                    ),
-                )
-            except Exception:
-                pass
+        target = channel.get("target_count")
+        if status == "error":
+            for owner_id in OWNER_IDS:
+                try:
+                    await context.bot.send_message(
+                        chat_id=owner_id,
+                        text=(
+                            f"⚠️ تعذّر التحقق من هدف القناة @{username} تلقائيًا ({info}).\n"
+                            f"غالبًا البوت غير مضاف كمشرف في هذه القناة — أضِفه كمشرف "
+                            f"وإلا فلن يُحذف الهدف تلقائيًا أبدًا حتى لو تحقق فعلاً."
+                        ),
+                    )
+                except Exception:
+                    pass
+        elif status == "deleted":
+            count = info
+            for owner_id in OWNER_IDS:
+                try:
+                    await context.bot.send_message(
+                        chat_id=owner_id,
+                        text=(
+                            f"🔄 تم حذف قناة الاشتراك الإجباري @{username} تلقائيًا من القائمة\n"
+                            f"(وصلت إلى {count} مشترك، وكان الهدف {target})"
+                        ),
+                    )
+                except Exception:
+                    pass
 
 
 def build_contest_section_message() -> tuple:
@@ -1901,8 +2003,10 @@ def build_contest_channel_message(cliche_text: str, cliche_entities, target_coun
             f"ستنتهي المسابقة عند وصول أحد المتسابقين إلى {votes_target} صوت  ”",
         ], "blockquote", None))
 
-    if contest_code:
-        extra_parts += ["\n\n", "🆔 كود المسابقة : ", (contest_code, "code", None)]
+    # 🚫 لم يعد كود المسابقة يُعرض داخل منشور القناة/القروب العام — أصبح مقصورًا
+    # على قسم إدارة المسابقات الخاص بالمالك، حيث يظهر بصيغة monospace قابلة
+    # للنسخ بضغطة واحدة. الوسيط contest_code ما زال يُمرَّر لهذه الدالة لأنه قد
+    # يُستخدم في مواضع الاستدعاء الأخرى، لكنه لم يعد يُدرَج ضمن نص المنشور نفسه.
 
     extra_text, extra_entities = build_text_with_emojis(extra_parts)
     footer_text, footer_entities = build_brand_footer()
@@ -2239,44 +2343,54 @@ def build_vote_captcha_wrong_alert() -> str:
     return "❌ رمز غير صحيح، حاول اختيار الرمز الصحيح مرة أخرى."
 
 
-def build_contest_new_vote_owner_notify_message(voter_display_name: str, voter_id: int,
-                                                  participant_display_name: str, vote_number: int) -> tuple:
+# معرّف الإيموجي المميز (custom emoji) المستخدم في إشعار خصم الصوت، كما هو
+# مطلوب في المواصفة (يظهر بدل الرمز الافتراضي "➖").
+VOTE_DEDUCTED_EMOJI_ID = "5215635927224820367"
+
+
+def format_arabic_vote_time(dt: datetime = None) -> str:
+    """يبني نص الوقت والتاريخ بصيغة "HH:MM DD/MM/YYYY ص/م" المستخدمة في
+    إشعارات التصويت لصاحب المسابقة."""
+    dt = dt or datetime.now(timezone.utc)
+    hour_12 = dt.strftime("%I:%M")
+    date_part = dt.strftime("%d/%m/%Y")
+    period = "م" if dt.hour >= 12 else "ص"
+    return f"{hour_12} {date_part} {period}"
+
+
+def build_contest_new_vote_owner_notify_message(participant_display_name: str, voter_display_name: str,
+                                                  voter_username: str, current_votes: int,
+                                                  vote_time: datetime = None) -> tuple:
     """إشعار احترافي يُرسل لصاحب المسابقة فور احتساب تصويت جديد ومؤكد لأحد
     متسابقيه (بعد اجتياز المصوّت كل الشروط: كابتشا + اشتراك + بريميوم إن
-    وُجد). يتضمن اسم المصوّت ومعرفه، اسم من صوّت له، ورقم هذا الصوت ضمن
-    إجمالي أصوات المتسابق."""
+    وُجد). يتضمن اسم المصوّت ويوزره، وقت التصويت، وإجمالي أصوات المتسابق
+    بعد احتساب هذا الصوت."""
+    username_display = f"@{voter_username}" if voter_username else "لا يوجد"
     parts = [
-        ("🗳️ تم تسجيل تصويت جديد", "bold", None),
+        ([("💗", EMOJI["gw_vote_icon"]), f" تصويت جديد لـ {participant_display_name}"], "bold", None),
         "\n\n",
-        ([
-            f"👤 المصوّت: {voter_display_name}\n",
-            f"🆔 المعرّف: {voter_id}\n",
-            f"🎯 صوّت لـ: {participant_display_name}\n",
-            f"🔢 رقم التصويت: {vote_number}",
-        ], "blockquote", None),
-        "\n\n",
-        ("✅ تم احتساب التصويت بنجاح.", "bold", None),
+        f"اسم المصوت : {voter_display_name}\n",
+        f"يوزر المصوت : {username_display}\n",
+        f"وقت التصويت : {format_arabic_vote_time(vote_time)}\n",
+        f"عدد الأصوات الكلي : {current_votes}",
     ]
     return build_text_with_emojis(parts)
 
 
-def build_contest_vote_deducted_owner_notify_message(voter_display_name: str,
-                                                        participant_display_name: str,
+def build_contest_vote_deducted_owner_notify_message(participant_display_name: str,
+                                                        voter_display_name: str,
+                                                        voter_id: int,
                                                         current_votes: int) -> tuple:
     """إشعار احترافي يُرسل لصاحب المسابقة عند إلغاء تصويت كان مؤكدًا سابقًا،
     بسبب مغادرة المصوّت لإحدى القنوات الإلزامية، مع عدد أصوات المتسابق
     المحدّث فور الخصم مباشرة."""
     parts = [
-        ("⚠️ تم خصم تصويت", "bold", None),
+        ([("➖", VOTE_DEDUCTED_EMOJI_ID), f" خصم صوت على {participant_display_name}"], "bold", None),
         "\n\n",
-        ([
-            f"👤 المصوّت: {voter_display_name}\n",
-            f"🎯 المشارك: {participant_display_name}\n",
-            "❌ سبب الخصم: مغادرة إحدى القنوات المطلوبة.",
-        ], "blockquote", None),
-        "\n\n",
-        "📉 تم خصم صوت واحد من إجمالي أصوات المشارك.\n\n",
-        f"🔢 عدد الأصوات الحالي: {current_votes}",
+        "• السبب : غادر قناة المسابقة\n",
+        f"• الاسم : {voter_display_name}\n",
+        f"• الايدي : {voter_id}\n",
+        f"• عدد الاصوات الكلي : {current_votes}",
     ]
     return build_text_with_emojis(parts)
 
@@ -2320,8 +2434,11 @@ def build_quick_roulette_channel_message(target: int, current: int, roulette_id=
             bar,
         ], "blockquote", None),
     ]
-    if roulette_id is not None:
-        parts += ["\n\n", "🆔 كود السحب السريع : ", (str(roulette_id), "code", None)]
+    # 🚫 لم يعد كود السحب السريع يُعرض داخل منشور القناة/القروب العام — أصبح
+    # مقصورًا على قسم إدارة السحب السريع الخاص بالمالك، حيث يظهر بصيغة
+    # monospace قابلة للنسخ بضغطة واحدة. الوسيط roulette_id ما زال يُمرَّر
+    # لهذه الدالة لاستخدامه المحتمل في مواضع الاستدعاء الأخرى، لكنه لم يعد
+    # يُدرَج ضمن نص المنشور نفسه.
     base_text, base_entities = build_text_with_emojis(parts)
     footer_text, footer_entities = build_brand_footer()
     shift = utf16_len(base_text)
@@ -6171,10 +6288,13 @@ async def build_owner_sub_channel_message(context: ContextTypes.DEFAULT_TYPE, ch
     except Exception:
         count_line = "تعذّر الجلب"
 
+    display_name_line = channel.get("button_text") or "غير محدد (يظهر اليوزر الخام @{})".format(username)
+
     content = [
         f"📢 إدارة القناة @{username}",
         "\n\n",
         ([
+            f"🪪 الاسم المعروض في الزر: {display_name_line}\n",
             f"🔗 الرابط: {url}\n",
             f"👥 عدد الأعضاء الحالي: {count_line}\n",
             f"🎯 الهدف: {target_line}\n",
@@ -6192,14 +6312,28 @@ def build_owner_sub_channel_keyboard(channel: dict) -> InlineKeyboardMarkup:
     cid = channel["channel_id"]
     enabled = channel.get("enabled", True)
     autodel = bool(channel.get("auto_delete_on_target"))
+    has_target = bool(channel.get("target_count"))
     autodel_label = (
         "⚙️ عند الهدف: 🔄 حذف تلقائي" if autodel else "⚙️ عند الهدف: ♾️ إبقاء دائم"
     )
-    return InlineKeyboardMarkup([
+    rows = [
+        [InlineKeyboardButton("🪪 تعديل الاسم المعروض في الزر", callback_data=f"owner_sub_edit_button_text:{cid}", style="primary")],
         [InlineKeyboardButton("✏️ تعديل يوزر القناة", callback_data=f"owner_sub_edit_username:{cid}", style="primary")],
         [InlineKeyboardButton("🔗 تعديل رابط القناة", callback_data=f"owner_sub_edit_link:{cid}", style="primary")],
         [InlineKeyboardButton("🎯 تحديد عدد الأعضاء المستهدف", callback_data=f"owner_sub_edit_target:{cid}", style="primary")],
         [InlineKeyboardButton(autodel_label, callback_data=f"owner_sub_toggle_autodel:{cid}", style="primary")],
+    ]
+    if has_target and autodel:
+        # يظهر فقط عندما يكون هناك هدف فعلي مع حذف تلقائي مفعّل — يفحص هذه
+        # القناة تحديدًا فورًا (بنفس منطق المهمة الدورية بالضبط عبر
+        # _check_and_maybe_delete_channel_target) بدل انتظار دورة الفحص
+        # القادمة (كل دقيقتين)، وأهم من ذلك: يُظهر سبب الفشل مباشرة كتنبيه
+        # منبثق إن كان البوت غير مضاف كمشرف في القناة — وهو السبب الأشيع
+        # لعدم الحذف رغم بلوغ الهدف.
+        rows.append([InlineKeyboardButton(
+            "🎯 تحقق من الهدف الآن", callback_data=f"owner_sub_check_target_now:{cid}", style="success",
+        )])
+    rows += [
         [InlineKeyboardButton(
             "🔘 الحالة: مفعّلة 🟢" if enabled else "🔘 الحالة: معطّلة 🔴",
             callback_data=f"owner_sub_toggle_enabled:{cid}", style="success" if enabled else "danger",
@@ -6208,7 +6342,8 @@ def build_owner_sub_channel_keyboard(channel: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🗑️ حذف القناة", callback_data=f"owner_sub_delete:{cid}", style="danger")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_list:1", style="danger",
                               **emoji_kwargs("back_section_btn"))],
-    ])
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
 def build_owner_sub_delete_confirm_message(channel: dict) -> tuple:
@@ -7939,7 +8074,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    channels_status = await get_required_channels_status(context, update.effective_user.id)
+    # force_refresh=True لنفس سبب enforce_mandatory_subscription_gate: أول
+    # تفاعل للمستخدم مع البوت (أمر /start) يجب أن يعكس حالة اشتراكه الفعلية
+    # اللحظية دائمًا، لا نتيجة كاش قديمة.
+    channels_status = await get_required_channels_status(context, update.effective_user.id, force_refresh=True)
     missing_channels = [ch for ch, ok in channels_status if not ok]
     if missing_channels:
         # يُحفظ معامل الرابط العميق (إن وُجد) مؤقتًا لهذا المستخدم، حتى إن
@@ -9769,7 +9907,7 @@ async def _contest_participation_callback_inner(update: Update, context: Context
 
 
 async def _notify_contest_owner_new_vote(context: ContextTypes.DEFAULT_TYPE, contest, voter_display_name: str,
-                                          voter_id: int, participant, vote_number: int) -> None:
+                                          voter_username: str, participant, vote_number: int) -> None:
     """يرسل لصاحب المسابقة إشعارًا احترافيًا فور احتساب تصويت جديد ومؤكد لأحد
     متسابقيه، بعد اجتياز المصوّت لكل الشروط (كابتشا + اشتراك + بريميوم إن
     وُجد). لا يرفع أي استثناء عند فشل الإرسال (مثلاً حظر صاحب المسابقة للبوت
@@ -9779,7 +9917,7 @@ async def _notify_contest_owner_new_vote(context: ContextTypes.DEFAULT_TYPE, con
         return
     participant_name = (participant.get("display_name") if participant else None) or "غير معروف"
     text, entities = build_contest_new_vote_owner_notify_message(
-        voter_display_name, voter_id, participant_name, vote_number,
+        participant_name, voter_display_name, voter_username, vote_number,
     )
     try:
         await context.bot.send_message(chat_id=int(owner_id), text=text, entities=entities)
@@ -9788,7 +9926,8 @@ async def _notify_contest_owner_new_vote(context: ContextTypes.DEFAULT_TYPE, con
 
 
 async def _notify_contest_owner_vote_deducted(context: ContextTypes.DEFAULT_TYPE, contest,
-                                               voter_display_name: str, participant_display_name: str,
+                                               voter_display_name: str, voter_id: int,
+                                               participant_display_name: str,
                                                current_votes: int) -> None:
     """يرسل لصاحب المسابقة إشعارًا عند إلغاء تصويت كان مؤكدًا سابقًا بسبب مغادرة
     المصوّت لإحدى القنوات الإلزامية، مع عدد أصوات المتسابق المحدَّث فورًا بعد
@@ -9798,7 +9937,7 @@ async def _notify_contest_owner_vote_deducted(context: ContextTypes.DEFAULT_TYPE
     if not owner_id:
         return
     text, entities = build_contest_vote_deducted_owner_notify_message(
-        voter_display_name, participant_display_name, current_votes,
+        participant_display_name, voter_display_name, voter_id, current_votes,
     )
     try:
         await context.bot.send_message(chat_id=int(owner_id), text=text, entities=entities)
@@ -9873,7 +10012,7 @@ async def cancel_contest_vote_if_unsubscribed(context: ContextTypes.DEFAULT_TYPE
         if contest and participant:
             voter_display_name = data.get("voter_display_name") or str(voter_id)
             await _notify_contest_owner_vote_deducted(
-                context, contest, voter_display_name,
+                context, contest, voter_display_name, voter_id,
                 participant.get("display_name") or str(participant_id),
                 new_votes,
             )
@@ -10052,7 +10191,7 @@ async def vote_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TY
     # إشعار صاحب المسابقة بتصويت جديد مؤكد (بعد اجتياز الكابتشا والاشتراك
     # وشرط بريميوم إن وُجد)، فور احتساب الصوت مباشرة.
     await _notify_contest_owner_new_vote(
-        context, contest, voter_display_name, voter.id, participant, new_votes,
+        context, contest, voter_display_name, voter.username, participant, new_votes,
     )
 
     # إنهاء تلقائي للمسابقات المعتمدة على «عدد أصوات محدد» عند وصول أي متسابق
@@ -10760,6 +10899,56 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(
             text=text, entities=entities,
             reply_markup=build_owner_sub_list_keyboard(channels, page),
+        )
+        return
+
+    if query.data.startswith("owner_sub_check_target_now:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        channel_id = int(query.data.split(":", 1)[1])
+        channel = get_required_channel(channel_id)
+        if not channel:
+            await query.answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
+            return
+        status, info = await _check_and_maybe_delete_channel_target(context, channel)
+        if status == "error":
+            await query.answer(
+                f"⚠️ تعذّر التحقق ({info}). الأرجح أن البوت غير مضاف كمشرف في هذه القناة.",
+                show_alert=True,
+            )
+            return
+        if status == "skipped":
+            await query.answer("⚠️ لا يوجد هدف محدد أو الحذف التلقائي غير مفعّل لهذه القناة.", show_alert=True)
+            return
+        if status == "not_reached":
+            await query.answer(
+                f"📊 لم يصل الهدف بعد ({info}/{channel.get('target_count')} عضو).",
+                show_alert=True,
+            )
+            return
+        # status == "deleted"
+        await query.answer(f"✅ تم بلوغ الهدف ({info} عضو) — حُذفت القناة من الاشتراك الإجباري.", show_alert=True)
+        text, entities = build_owner_sub_section_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_section_keyboard(),
+        )
+        return
+
+    if query.data.startswith("owner_sub_edit_button_text:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        channel_id = int(query.data.split(":", 1)[1])
+        context.user_data["awaiting"] = "admin_channel_edit_button_text"
+        context.user_data["admin_channel_id"] = channel_id
+        await query.edit_message_text(
+            "✍️ أرسل الآن الاسم الذي تريد أن يظهر في زر هذه القناة بدل اليوزر الخام "
+            "(مثال: 𝐑𝐎𝐔𝐋𝐄𝐓𝐓𝐄 𝐕𝐎𝐑𝐓𝐄𝐗)، أو أرسل - لحذف الاسم المخصص والعودة لعرض اليوزر ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_sub_channel:{channel_id}", style="danger")
+            ]]),
         )
         return
 
@@ -12835,6 +13024,28 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if awaiting == "admin_channel_edit_button_text":
+        channel_id = context.user_data.get("admin_channel_id")
+        channel = get_required_channel(channel_id) if channel_id else None
+        raw = (update.message.text or "").strip()
+        context.user_data.pop("awaiting", None)
+        context.user_data.pop("admin_channel_id", None)
+        if not channel:
+            return
+        new_button_text = "" if raw == "-" else raw
+        update_required_channel(channel_id, button_text=new_button_text)
+        channel = get_required_channel(channel_id)
+        text, entities = await build_owner_sub_channel_message(context, channel)
+        await update.message.reply_text(
+            "✅ تم حذف الاسم المخصص، سيظهر اليوزر الخام في الزر." if not new_button_text
+            else f"✅ تم تحديث الاسم المعروض إلى: {new_button_text}",
+        )
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_sub_channel_keyboard(channel),
+        )
+        return
+
     if awaiting == "admin_channel_edit_username":
         channel_id = context.user_data.get("admin_channel_id")
         channel = get_required_channel(channel_id) if channel_id else None
@@ -14417,7 +14628,7 @@ def main():
     else:
         logger.info("JobQueue مفعّلة بنجاح.")
         app.job_queue.run_repeating(
-            check_required_channels_targets, interval=600, first=30,
+            check_required_channels_targets, interval=120, first=15,
             name="required_channels_targets",
         )
         app.job_queue.run_repeating(
