@@ -9130,28 +9130,39 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
         return
 
-    # 🎯 الأولوية دائمًا لشرط قناة *هذا* السحب تحديدًا وشروطه الإضافية (تعزيز/
-    # تصويت/قنوات شرط يدوية) — تُفحص أولاً عبر check_giveaway_requirements التي
-    # تعرض تنبيهًا فوريًا (show_alert) باسم قناة واحدة محددة فقط عند عدم
-    # الاشتراك فيها، دون أي خلط مع قنوات VORTEX الإجبارية العامة في نفس التنبيه.
-    ok, alert_text = await check_giveaway_requirements(context, user, giveaway)
-    if not ok:
-        await query.answer(alert_text, show_alert=True)
+    # 🎯 شرط بريميوم وشرط قناة *هذا* السحب تحديدًا (القناة التي نُشر فيها
+    # المنشور) لهما الأولوية دائمًا، ويُعرضان كتنبيه فوري صغير (show_alert)
+    # فقط — لا يجوز أبدًا فتح البوت أو تحويل المستخدم بسبب أيٍّ منهما مهما
+    # كانت الحالة.
+    if giveaway.get("premium_only") and not user.is_premium:
+        await query.answer("💎 هذا السحب للأشخاص المفعلين مميز فقط!", show_alert=True)
         return
 
-    # فقط بعد اجتياز شرط قناة السحب نفسها: إن كان المستخدم لا يزال غير مشترك في
-    # قناة/قنوات VORTEX الإجبارية العامة، يُفتح له البوت الآن عبر رابط gwjoin_
-    # المخصص أصلاً لهذه الحالة (راجع الحالة الخاصة أعلى start())، حيث تُعرض له
-    # بوابة الاشتراك الإجبارية الموحّدة الجاهزة (بزر لكل قناة ناقصة) بدل تنبيه
-    # نصي بسيط هنا يسرد كل القنوات الناقصة معًا.
+    if not await check_giveaway_host_channel_subscription(context, user.id, giveaway):
+        host_title = await get_chat_title_cached(context, giveaway["chat_id"])
+        await query.answer(build_giveaway_host_channel_subscribe_alert(host_title), show_alert=True)
+        return
+
+    # ✅ فقط بعد اجتياز شرط قناة السحب نفسها: أي شرط آخر ناقص من هنا فصاعدًا
+    # (قناة/قنوات VORTEX الإجبارية العامة، أو قنوات شرط السحب الإضافية اليدوية
+    # التي يضيفها المالك (حتى GW_CONDITION_CHANNELS_MAX قناة)، أو التعزيز، أو
+    # التصويت لمتسابق) يُفتح له البوت الآن عبر رابط gwjoin_ الحالي (بدل تنبيه
+    # نصي بسيط هنا)، حيث تُعرض له بوابة موحّدة بزر حقيقي لكل شرط ناقص فعليًا +
+    # زر «تحقق ✅» أسفلها (نفس آلية build_giveaway_gate_message/keyboard
+    # المستخدمة أصلاً داخل handle_giveaway_join_entry).
     need_vortex = await get_missing_required_channels(context, user.id)
-    if need_vortex:
-        await query.answer(url=f"https://t.me/{BOT_USERNAME}?start=gwjoin_{gw_code}")
-        return
-
+    condition_ok = await check_giveaway_condition_channels(context, user.id, giveaway)
+    boost_ok = (not giveaway.get("boost_required")) or await check_giveaway_boost(
+        context, user.id, giveaway["chat_id"],
+    )
     vote_contest_code = giveaway.get("vote_contest_code")
     vote_participant_id = giveaway.get("vote_participant_id")
     vote_required = bool(vote_contest_code and vote_participant_id)
+    vote_ok = not vote_required or has_voted_for(vote_contest_code, user.id, vote_participant_id)
+
+    if need_vortex or not condition_ok or not boost_ok or not vote_ok:
+        await query.answer(url=f"https://t.me/{BOT_USERNAME}?start=gwjoin_{gw_code}")
+        return
 
     if giveaway["antispam"]:
         await query.answer(
