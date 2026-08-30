@@ -4278,11 +4278,29 @@ def get_bot_users_stats() -> dict:
     }
 
 
-def get_full_bot_statistics() -> dict:
+_FULL_BOT_STATS_CACHE = {"data": None, "ts": 0.0}
+FULL_BOT_STATS_CACHE_TTL = 120  # ثانية — يمنع إعادة قراءة كل مستخدمي/قنوات
+# البوت من Firestore عند كل ضغطة على «📊 إحصائيات البوت»، مع بقاء الأرقام
+# قريبة جدًا من اللحظية (كحد أقصى دقيقتان قديمة). زر «🔄 تحديث» نفسه يستفيد
+# من الكاش أيضًا خلال هذه المدة القصيرة، وهو فرق غير محسوس عمليًا.
+
+
+def get_full_bot_statistics(force_refresh: bool = False) -> dict:
     """إحصائيات شاملة عن البوت: المستخدمون، القنوات، المجموعات — تُستخدم في
     قسم «📊 إحصائيات البوت» لدى المالك. تعتمد على last_seen_at لتحديد النشاط
     الفعلي (أي استخدام حقيقي للبوت: /start، مشاركة في سحب/مسابقة/روليت سريع)
-    وليس مجرد الضغط على شرط التحقق من الاشتراك."""
+    وليس مجرد الضغط على شرط التحقق من الاشتراك.
+
+    تُخزَّن النتيجة مؤقتًا (كاش) لمدة FULL_BOT_STATS_CACHE_TTL ثانية، لأن هذه
+    الدالة تقرأ كل وثائق known_bot_users وكل الشات المسجّلة من Firestore —
+    عملية ثقيلة يجب ألا تتكرر عند كل ضغطة. يجب استدعاؤها دائمًا عبر
+    asyncio.to_thread من أي async handler حتى لو كانت النتيجة ستأتي من
+    الكاش، لتفادي أي حظر لحلقة الأحداث في حال انتهت صلاحية الكاش أثناء ذلك."""
+    now_ts = time.time()
+    cached = _FULL_BOT_STATS_CACHE["data"]
+    if not force_refresh and cached is not None and now_ts - _FULL_BOT_STATS_CACHE["ts"] < FULL_BOT_STATS_CACHE_TTL:
+        return cached
+
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
@@ -4365,7 +4383,7 @@ def get_full_bot_statistics() -> dict:
 
     required_channels = get_required_channels()
 
-    return {
+    result = {
         "users": {
             "total": total_users,
             "active_today": active_today,
@@ -4393,6 +4411,9 @@ def get_full_bot_statistics() -> dict:
             "new_month": new_groups_month,
         },
     }
+    _FULL_BOT_STATS_CACHE["data"] = result
+    _FULL_BOT_STATS_CACHE["ts"] = now_ts
+    return result
 
 
 async def get_required_channels_total_members(context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -12200,7 +12221,11 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
         await query.answer()
-        stats = get_full_bot_statistics()
+        # يُنفَّذ عبر asyncio.to_thread في خيط منفصل حتى لا تُجمِّد قراءة كل
+        # مستخدمي/قنوات البوت من Firestore حلقة أحداث البوت (event loop)
+        # وتُعلِّق باقي المستخدمين لحين انتهائها — نفس النمط المتّبع أصلًا
+        # في هذا المشروع لأي عملية Firestore ثقيلة داخل async handler.
+        stats = await asyncio.to_thread(get_full_bot_statistics)
         required_members = await get_required_channels_total_members(context)
         text, entities = build_owner_stats_message(stats, required_members)
         await query.edit_message_text(
