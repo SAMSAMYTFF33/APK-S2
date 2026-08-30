@@ -1078,6 +1078,49 @@ async def check_contest_channel_subscription(
     return await is_user_subscribed_to_chat(context, user_id, chat_id, force_refresh=force_refresh)
 
 
+async def _build_contest_channel_pseudo_entry(context: ContextTypes.DEFAULT_TYPE, contest) -> dict:
+    """يبني عنصر قناة (بنفس شكل قنوات الاشتراك الإجباري القابلة للعرض عبر
+    build_required_channels_rows) يمثّل قناة نشر هذه المسابقة تحديدًا،
+    ليُعرض ضمن نفس بوابة شروط التصويت الموحّدة عند اكتشاف أن المصوّت غير
+    مشترك فيها، تمامًا كما تُعرض قنوات الاشتراك الإجباري العامة."""
+    chat_id = contest.get("chat_id") if hasattr(contest, "get") else contest["chat_id"]
+    join_url = await build_contest_channel_join_link(context, chat_id)
+    if not join_url:
+        # تعذّر بناء أي رابط انضمام (حالة نادرة جدًا) — لا نعرض زرًا معطوبًا
+        # برابط فارغ؛ نفس الحذر المتّبع في build_contest_channel_gate_keyboard.
+        return None
+    title = await get_chat_title_cached(context, chat_id) or "قناة المسابقة"
+    return {
+        "username": "",
+        "url": join_url,
+        "button_text": title,
+        "title": title,
+        "channel_id": f"contest_channel_{chat_id}",
+    }
+
+
+async def get_missing_contest_vote_channels(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, contest, force_refresh: bool = False,
+) -> list:
+    """يجمع كل القنوات التي يجب أن يكون المصوّت مشتركًا فيها فعليًا قبل
+    احتساب تصويته: قنوات الاشتراك الإجباري العامة (VORTEX) + قناة نشر هذه
+    المسابقة تحديدًا (contest['chat_id']).
+
+    مهم جدًا: قبل هذه الدالة كان فحص التصويت يقتصر على قنوات الاشتراك
+    الإجباري العامة فقط عبر get_missing_required_channels، بينما فحص شرط
+    الانضمام للمسابقة (check_contest_channel_subscription) لم يكن يُستدعى
+    إطلاقًا في مسار التصويت — فكان بإمكان أي مستخدم مشترك في القنوات العامة
+    (أو حتى دون أي قناة إجبارية عامة مُفعّلة أصلاً) أن يصوّت لمتسابق دون أي
+    اشتراك فعلي في قناة المسابقة نفسها. هذه الدالة توحّد الفحصين معًا حتى لا
+    يُحتسب أي تصويت قبل اجتيازهما كليهما فعليًا."""
+    missing = list(await get_missing_required_channels(context, user_id, force_refresh=force_refresh))
+    if not await check_contest_channel_subscription(context, user_id, contest, force_refresh=force_refresh):
+        entry = await _build_contest_channel_pseudo_entry(context, contest)
+        if entry:
+            missing.append(entry)
+    return missing
+
+
 async def build_contest_channel_join_link(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str:
     """يبني رابط انضمام لقناة المسابقة: يوزر عام إن وُجد، وإلا رابط دعوة لقناة
     خاصة. يُستخدم في زر «انضم إلى القناة» ببوابة شرط قناة المسابقة."""
@@ -2413,6 +2456,46 @@ def build_contest_vote_deducted_owner_notify_message(participant_display_name: s
         f"• الاسم : {voter_display_name}\n",
         f"• الايدي : {voter_id}\n",
         f"• عدد الاصوات الكلي : {current_votes}",
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_contest_participant_left_owner_notify_message(
+    display_name: str, user_id: int, contest_name: str, remaining_count: int,
+) -> tuple:
+    """إشعار احترافي يُرسل لصاحب المسابقة فور اكتشاف خروج أحد المتسابقين
+    فعليًا من قناة المسابقة نفسها — يوضّح أنه استُبعد تلقائيًا (حُذف منشوره
+    من القناة وحُذفت كل الأصوات التي حصل عليها)، مع عدد المتسابقين
+    المتبقين حاليًا في المسابقة."""
+    parts = [
+        ([("➖", VOTE_DEDUCTED_EMOJI_ID), " تم استبعاد متسابق تلقائيًا"], "bold", None),
+        "\n\n",
+        "• السبب : غادر قناة المسابقة\n",
+        f"• الاسم : {display_name}\n",
+        f"• الايدي : {user_id}\n",
+        f"• المسابقة : {contest_name}\n",
+        f"• عدد المتسابقين المتبقين : {remaining_count}",
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_giveaway_participant_left_owner_notify_message(
+    display_name: str, username: str, user_id: int, gw_code: str, remaining_count: int,
+) -> tuple:
+    """نظير build_contest_participant_left_owner_notify_message لكن للسحوبات
+    — لا يوجد منشور مستقل لكل مشارك في السحوبات (منشور واحد مشترك يُحدَّث
+    فيه العدد فقط)، لذا لا يُذكر هنا حذف أي منشور، بل فقط خصم المشارك من
+    العدد الإجمالي المعروض في منشور السحب."""
+    username_display = f"@{username}" if username else "لا يوجد"
+    parts = [
+        ([("➖", VOTE_DEDUCTED_EMOJI_ID), " تم استبعاد مشارك تلقائيًا"], "bold", None),
+        "\n\n",
+        "• السبب : غادر قناة السحب\n",
+        f"• الاسم : {display_name}\n",
+        f"• اليوزر : {username_display}\n",
+        f"• الايدي : {user_id}\n",
+        f"• رقم السحب : #{gw_code}\n",
+        f"• إجمالي المشاركين الآن : {remaining_count}",
     ]
     return build_text_with_emojis(parts)
 
@@ -4930,6 +5013,20 @@ def get_contest(contest_code: str):
     return _fs_row_or_none(doc)
 
 
+def get_open_contests_by_chat(chat_id: int) -> list:
+    """يعيد كل المسابقات المفتوحة حاليًا والمستضافة في قناة/قروب معيّن —
+    تُستخدم فور اكتشاف خروج مستخدم من قناة لمعرفة أي مسابقات مستضافة هناك
+    يلزم فحص مشاركته فيها تحديدًا (بدل المرور على كل المسابقات المفتوحة في
+    البوت)."""
+    docs = (
+        fs_db().collection("contests")
+        .where("chat_id", "==", chat_id)
+        .where("status", "==", "open")
+        .stream()
+    )
+    return [FSRow(d.to_dict()) for d in docs]
+
+
 def get_contests_by_owner(owner_id: int):
     """يعيد المسابقات الجارية (غير المنتهية) الخاصة بالمالك، الأحدث أولًا."""
     docs = fs_db().collection("contests").where("owner_id", "==", owner_id).stream()
@@ -5382,6 +5479,18 @@ def get_giveaway_participants(gw_code: str):
     rows = [d.to_dict() for d in docs]
     rows.sort(key=lambda r: r.get("joined_at") or "")
     return [(r["user_id"], r.get("display_name") or str(r["user_id"])) for r in rows]
+
+
+def get_open_giveaways_by_chat(chat_id: int) -> list:
+    """نظير get_open_contests_by_chat لكن للسحوبات — يعيد كل السحوبات
+    المفتوحة حاليًا والمستضافة في قناة/قروب معيّن."""
+    docs = (
+        fs_db().collection("giveaways")
+        .where("chat_id", "==", chat_id)
+        .where("status", "==", "open")
+        .stream()
+    )
+    return [FSRow(d.to_dict()) for d in docs]
 
 
 def get_giveaways_by_owner(owner_id: int):
@@ -8484,9 +8593,10 @@ async def handle_contest_vote_entry(update: Update, context: ContextTypes.DEFAUL
         return
 
     # بوابة الاشتراك الإجباري: لا تُعرض الكابتشا مباشرة إن لم يكن المستخدم
-    # مشتركًا فعليًا في القناة الإلزامية؛ بل تُعرض له بوابة اشتراك + زر
-    # «تحقق» صريح، ولا يُحتسب أي تصويت قبل اجتياز هذا الفحص فعليًا.
-    missing_channels = await get_missing_required_channels(context, user.id)
+    # مشتركًا فعليًا في القناة الإلزامية العامة + قناة نشر هذه المسابقة
+    # تحديدًا؛ بل تُعرض له بوابة اشتراك + زر «تحقق» صريح، ولا يُحتسب أي
+    # تصويت قبل اجتياز هذا الفحص فعليًا.
+    missing_channels = await get_missing_contest_vote_channels(context, user.id, contest)
     if missing_channels:
         gate_text, gate_entities = build_contest_vote_gate_message()
         await update.message.reply_text(
@@ -8559,11 +8669,24 @@ async def contest_vote_gate_check_callback(update: Update, context: ContextTypes
         await query.answer("💎 هذه المسابقة للتصويت لمستخدمي بريميوم فقط.", show_alert=True)
         return
 
-    if not await is_user_subscribed(context, user.id, force_refresh=True):
+    # فحص حي وشامل (بدون كاش): القنوات الإجبارية العامة + قناة نشر هذه
+    # المسابقة تحديدًا معًا، بنفس منطق الدخول الأول لمسار التصويت.
+    missing_channels = await get_missing_contest_vote_channels(context, user.id, contest, force_refresh=True)
+    if missing_channels:
         await query.answer(
-            "⚠️ لم يتم العثور على اشتراكك، اشترك في القناة ثم اضغط تحقق مجددًا.",
+            "⚠️ ما زلت غير مشترك في بعض القنوات، يرجى الاشتراك أولاً ثم إعادة المحاولة.",
             show_alert=True,
         )
+        # تُحدَّث نفس الرسالة لتعكس القنوات الناقصة فعليًا الآن (فقد تكون
+        # إحدى القنوات السابقة أُنجزت بالفعل)، بدل ترك المستخدم بلا مؤشر واضح.
+        gate_text, gate_entities = build_contest_vote_gate_message()
+        try:
+            await query.edit_message_text(
+                text=gate_text, entities=gate_entities,
+                reply_markup=build_contest_vote_gate_keyboard(contest_code, participant_id, missing_channels),
+            )
+        except Exception:
+            pass
         return
 
     await query.answer("✅ تم التحقق من الاشتراك، أكمل التحقق أدناه.")
@@ -9944,6 +10067,122 @@ async def _contest_participation_callback_inner(update: Update, context: Context
         return
 
 
+async def remove_contest_participant_for_channel_leave(
+    context: ContextTypes.DEFAULT_TYPE, contest, participant, user,
+) -> None:
+    """يُنفَّذ فور اكتشاف خروج متسابق فعليًا (حدث تيليجرام مباشر) من قناة
+    مسابقته: يحذف منشوره الخاص في القناة (بطاقة زر 🤍 وكود المتسابق —
+    بنفس ما يفعله «سحب اسمي من المسابقة» يدويًا)، يحذف تسجيله وكل الأصوات
+    التي حصل عليها مع عكس نقاط صاحب المسابقة المرتبطة بها (عبر
+    remove_contest_participant الموجودة أصلًا)، ثم يُشعر صاحب المسابقة
+    بخصم هذا المتسابق تلقائيًا."""
+    contest_code = contest["contest_code"]
+    message_id = participant.get("channel_message_id")
+    if message_id:
+        try:
+            await context.bot.delete_message(chat_id=contest["chat_id"], message_id=message_id)
+        except Exception:
+            pass
+
+    remove_contest_participant(contest_code, user.id)
+    remaining = count_contest_participants(contest_code)
+
+    display_name = participant.get("display_name") or user.first_name or user.username or str(user.id)
+    text, entities = build_contest_participant_left_owner_notify_message(
+        display_name, user.id, contest_display_name(contest), remaining,
+    )
+    try:
+        await context.bot.send_message(chat_id=int(contest["owner_id"]), text=text, entities=entities)
+    except Exception:
+        logger.warning("تعذّر إرسال إشعار خصم متسابق لصاحب المسابقة %s", contest["owner_id"])
+
+
+async def remove_giveaway_participant_for_channel_leave(
+    context: ContextTypes.DEFAULT_TYPE, giveaway, user,
+) -> None:
+    """نظير remove_contest_participant_for_channel_leave لكن للسحوبات: لا
+    يوجد منشور مستقل لكل مشارك هنا (منشور واحد مشترك للسحب يُحدَّث فيه
+    العدد فقط، كما في gw_kick_callback عند الاستبعاد اليدوي)، لذا يُكتفى
+    بحذف تسجيله وتحديث عدد المشاركين في نفس منشور السحب، ثم إشعار المالك."""
+    gw_code = giveaway["gw_code"]
+    remove_giveaway_participant(gw_code, user.id)
+    total = count_giveaway_participants(gw_code)
+
+    if giveaway.get("channel_message_id"):
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=giveaway["chat_id"],
+                message_id=giveaway["channel_message_id"],
+                reply_markup=build_giveaway_channel_keyboard(
+                    gw_code, total, antispam=bool(giveaway.get("antispam")), status=giveaway["status"],
+                ),
+            )
+        except Exception:
+            pass
+
+    display_name = user.first_name or user.username or str(user.id)
+    text, entities = build_giveaway_participant_left_owner_notify_message(
+        display_name, user.username, user.id, gw_code, total,
+    )
+    try:
+        await context.bot.send_message(chat_id=int(giveaway["owner_id"]), text=text, entities=entities)
+    except Exception:
+        logger.warning("تعذّر إرسال إشعار خصم مشارك لصاحب السحب %s", giveaway["owner_id"])
+
+
+async def handle_user_left_hosting_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user) -> None:
+    """يُستدعى فور اكتشاف خروج فعلي لمستخدم من أي قناة/قروب البوت مشرف
+    فيه (عبر _chat_member_leave_handler أدناه) — يفحص إن كانت هذه القناة
+    تستضيف حاليًا مسابقة أو سحبًا مفتوحًا وكان هذا المستخدم مسجَّلًا فيه
+    (كمتسابق أو كمشارك)، وعندها يُطبَّق الخصم فورًا في نفس اللحظة، بدل أي
+    فحص دوري لاحق. لا يمس هذا نظام الاشتراك الإجباري العام أو تصويتات
+    المسابقات (لهما آلياتهما الخاصة المستقلة)."""
+    for contest in get_open_contests_by_chat(chat_id):
+        participant = get_contest_participant(contest["contest_code"], user.id)
+        if participant:
+            await remove_contest_participant_for_channel_leave(context, contest, participant, user)
+
+    for giveaway in get_open_giveaways_by_chat(chat_id):
+        if is_giveaway_participant(giveaway["gw_code"], user.id):
+            await remove_giveaway_participant_for_channel_leave(context, giveaway, user)
+
+
+def _chat_member_actually_in(member) -> bool:
+    """يحدّد إن كانت حالة عضوية معيّنة (ChatMember) تعني أن صاحبها لا يزال
+    فعليًا داخل القناة/القروب — بنفس المعيار المستخدم في is_user_subscribed_to_chat
+    (member/administrator/creator، أو restricted مع is_member=True)."""
+    return member.status in ("member", "administrator", "creator") or (
+        member.status == "restricted" and bool(getattr(member, "is_member", False))
+    )
+
+
+async def _chat_member_leave_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """معالج حدث chat_member المباشر من تيليجرام (يصل فقط للقنوات/القروبات
+    التي البوت مشرف فيها) — يُستخدم هنا حصرًا لاكتشاف لحظة خروج فعلي لعضو
+    (وليس أي تغيير حالة آخر كالترقية لمشرف أو الحظر المؤقت)، للتحقق الفوري
+    مما إذا كان هذا الخروج يمس مشاركته في مسابقة أو سحب مستضاف في نفس هذه
+    القناة تحديدًا."""
+    cmu = update.chat_member
+    if not cmu:
+        return
+    was_in = _chat_member_actually_in(cmu.old_chat_member)
+    still_in = _chat_member_actually_in(cmu.new_chat_member)
+    if not (was_in and not still_in):
+        return
+
+    user = cmu.new_chat_member.user
+    if user.is_bot:
+        return
+
+    try:
+        await handle_user_left_hosting_chat(context, cmu.chat.id, user)
+    except Exception:
+        logger.exception(
+            "تعذّر معالجة خروج المستخدم %s من القناة %s (فحص المسابقات/السحوبات المستضافة)",
+            user.id, cmu.chat.id,
+        )
+
+
 async def _notify_contest_owner_new_vote(context: ContextTypes.DEFAULT_TYPE, contest, voter_display_name: str,
                                           voter_username: str, participant, vote_number: int) -> None:
     """يرسل لصاحب المسابقة إشعارًا احترافيًا فور احتساب تصويت جديد ومؤكد لأحد
@@ -10186,10 +10425,11 @@ async def vote_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     # نظام الأمان: لا يُحتسب أي تصويت إلا بعد التأكد من أن المصوّت لا يزال
-    # مشتركًا فعليًا في القناة الإلزامية لحظة التحقق (وليس فقط لحظة فتح البوت).
-    if not await is_user_subscribed(context, voter.id, force_refresh=True):
+    # مشتركًا فعليًا في القناة الإلزامية العامة + قناة نشر هذه المسابقة
+    # تحديدًا لحظة التحقق (وليس فقط لحظة فتح البوت).
+    if await get_missing_contest_vote_channels(context, voter.id, contest, force_refresh=True):
         await query.answer(
-            "⚠️ يجب الاشتراك في القناة الإلزامية أولاً، اشترك ثم اضغط نفس الزر مجددًا للتحقق.",
+            "⚠️ يجب الاشتراك في القناة أولاً، اشترك ثم اضغط نفس الزر مجددًا للتحقق.",
             show_alert=True,
         )
         return
@@ -14822,6 +15062,10 @@ def main():
     # كانت تُفهم خطأً على أنها محتوى الإذاعة وتُرسَل فورًا لكل المستخدمين.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_router))
     app.add_handler(ChatMemberHandler(bot_chat_status_update, ChatMemberHandler.MY_CHAT_MEMBER))
+    # اكتشاف فوري لخروج أي مستخدم من أي قناة/قروب البوت مشرف فيه، لتطبيق
+    # خصم المتسابقين/المشاركين في المسابقات والسحوبات المستضافة هناك لحظة
+    # الخروج مباشرة (بدل انتظار أي فحص دوري لاحق).
+    app.add_handler(ChatMemberHandler(_chat_member_leave_handler, ChatMemberHandler.CHAT_MEMBER))
 
     async def _post_init(app_):
         await app_.bot.set_my_commands([
