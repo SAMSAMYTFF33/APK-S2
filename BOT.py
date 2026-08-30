@@ -2091,10 +2091,16 @@ def build_contest_channel_message(cliche_text: str, cliche_entities, target_coun
 
 
 def build_contest_channel_keyboard(contest_code: str) -> InlineKeyboardMarkup:
+    # 🔒 كان هذا الزر رابط (url) يفتح محادثة البوت مباشرة وبلا شرط، حتى لو لم يكن
+    # المستخدم مشتركًا في قناة المسابقة أو في قنوات VORTEX الإجبارية — فيجد نفسه
+    # داخل محادثة البوت دون أي تنبيه، أو حتى بلا أي رد إن تعثّرت معالجة /start.
+    # أصبح الآن زر callback_data يمر أولاً عبر compjoin_button_callback الذي يتحقق
+    # من الاشتراك ويعرض تنبيهًا فوريًا (show_alert) دون أي تحويل عند عدم الاشتراك،
+    # ولا يفتح البوت (query.answer(url=...)) إلا بعد اجتياز هذا الشرط فعليًا.
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
             "✅ المشاركة في المسابقة",
-            url=f"https://t.me/{BOT_USERNAME}?start=compjoin_{contest_code}",
+            callback_data=f"compjoinbtn:{contest_code}",
             style="success",
         )],
     ])
@@ -2311,10 +2317,15 @@ def build_contest_vote_keyboard(contest_code: str, participant_id: int, votes: i
         )
     except Exception:
         copy_btn = InlineKeyboardButton("🎟 كود المتسابق: " + participant_code, callback_data="noop")
+    # 🔒 نفس منطق build_contest_channel_keyboard أعلاه: كان زر التصويت رابط (url)
+    # يفتح محادثة البوت مباشرة وبلا أي شرط اشتراك. أصبح الآن زر callback_data يمر
+    # عبر compvote_button_callback الذي يتحقق من الاشتراك أولاً ويعرض تنبيهًا فوريًا
+    # عند عدم الاشتراك دون أي تحويل، ولا يفتح البوت (لعرض كابتشا «منع الرشق») إلا
+    # بعد اجتياز شرط الاشتراك فعليًا.
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
             f"🤍 {votes}",
-            url=f"https://t.me/{BOT_USERNAME}?start=compvote_{contest_code}_{participant_id}",
+            callback_data=f"compvotebtn:{contest_code}:{participant_id}",
             style="primary",
         )],
         [copy_btn],
@@ -3252,6 +3263,30 @@ def build_giveaway_vortex_subscribe_alert(missing_channels: list) -> str:
         return f"❌ يجب عليك الاشتراك في «{label}» أولاً للمشاركة في هذا السحب"
     labels = "، ".join(_required_channel_label(ch) for ch in missing_channels)
     return f"❌ يجب عليك الاشتراك في القنوات التالية أولاً للمشاركة: {labels}"
+
+
+def build_contest_vortex_subscribe_alert(missing_channels: list) -> str:
+    """نص تنبيه فوري (show_alert) يظهر عند الضغط على زر «المشاركة» أو زر
+    التصويت 🤍 أسفل منشور المسابقة في القناة/القروب مباشرة، حين يكون المستخدم
+    غير مشترك في قناة/قنوات VORTEX الإجبارية العامة — دون أي تحويل إلى البوت،
+    بنفس أسلوب build_giveaway_vortex_subscribe_alert."""
+    if not missing_channels:
+        return "❌ يجب عليك الاشتراك في قناة البوت الإجبارية أولاً للمتابعة"
+    if len(missing_channels) == 1:
+        label = _required_channel_label(missing_channels[0])
+        return f"❌ يجب عليك الاشتراك في «{label}» أولاً للمتابعة"
+    labels = "، ".join(_required_channel_label(ch) for ch in missing_channels)
+    return f"❌ يجب عليك الاشتراك في القنوات التالية أولاً: {labels}"
+
+
+def build_contest_channel_subscribe_alert(channel_title: str = "") -> str:
+    """نص تنبيه فوري (show_alert) يظهر عند عدم اشتراك المستخدم في قناة نشر
+    هذه المسابقة نفسها تحديدًا (عند الضغط على زر المشاركة أو التصويت مباشرة من
+    القناة/القروب) — دون أي تحويل إلى البوت، بنفس أسلوب
+    build_giveaway_host_channel_subscribe_alert."""
+    if channel_title:
+        return f"🔔 يجب عليك الاشتراك في «{channel_title}» أولاً للمتابعة في هذه المسابقة"
+    return "🔔 يجب عليك الاشتراك في قناة المسابقة أولاً للمتابعة"
 
 
 def build_giveaway_host_channel_subscribe_alert(host_channel_title: str = "") -> str:
@@ -8543,6 +8578,119 @@ async def contest_channel_gate_check_callback(update: Update, context: ContextTy
             text=text, entities=entities,
             reply_markup=build_contest_join_confirm_keyboard(contest_code),
         )
+
+
+async def compjoin_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج ضغط زر «✅ المشاركة في المسابقة» أسفل منشور المسابقة في القناة/القروب
+    مباشرة (compjoinbtn:{contest_code}) — بدل التحويل الفوري غير المشروط للبوت
+    الذي كان يحدث سابقًا عبر زر رابط (url).
+
+    يتحقق أولاً من اشتراك المستخدم في قنوات VORTEX الإجبارية العامة، ثم في قناة
+    نشر هذه المسابقة تحديدًا؛ فإن كان غير مشترك في أيٍّ منهما يظهر له تنبيه فوري
+    (show_alert) بذلك فقط، دون أي تحويل لمحادثة البوت إطلاقًا. لا يُفتح البوت
+    (عبر query.answer(url=...)) إلا بعد اجتياز شرط الاشتراك فعليًا، لإكمال خطوة
+    تأكيد المشاركة المعتادة هناك (نفس مسار compjoin_ الحالي دون أي تعديل عليه)."""
+    query = update.callback_query
+    try:
+        contest_code = query.data.split(":", 1)[1]
+    except (ValueError, IndexError):
+        await query.answer("⚠️ طلب غير صالح.", show_alert=True)
+        return
+
+    contest = get_contest(contest_code)
+    if not contest:
+        await query.answer("⚠️ هذه المسابقة غير موجودة أو انتهت.", show_alert=True)
+        return
+    if contest["status"] != "open":
+        await query.answer("⚠️ انتهت هذه المسابقة بالفعل.", show_alert=True)
+        return
+
+    user = query.from_user
+    if register_bot_user_and_check_new(user.id, user):
+        await _notify_new_user_join(context, user)
+
+    existing = get_contest_participant(contest_code, user.id)
+    if existing:
+        await query.answer(
+            f"✅ أنت مسجّل بالفعل في هذه المسابقة بإسم: {existing['display_name']}",
+            show_alert=True,
+        )
+        return
+
+    current = count_contest_participants(contest_code)
+    if current >= contest["target_count"]:
+        await query.answer("⚠️ اكتمل عدد المشاركين المسموح في هذه المسابقة.", show_alert=True)
+        return
+
+    need_vortex = await get_missing_required_channels(context, user.id)
+    if need_vortex:
+        await query.answer(build_contest_vortex_subscribe_alert(need_vortex), show_alert=True)
+        return
+
+    if not await check_contest_channel_subscription(context, user.id, contest):
+        title = await get_chat_title_cached(context, contest["chat_id"])
+        await query.answer(build_contest_channel_subscribe_alert(title), show_alert=True)
+        return
+
+    await query.answer(url=f"https://t.me/{BOT_USERNAME}?start=compjoin_{contest_code}")
+
+
+async def compvote_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج ضغط زر التصويت 🤍 أسفل منشور المتسابق في القناة/القروب مباشرة
+    (compvotebtn:{contest_code}:{participant_id}) — بدل التحويل الفوري غير
+    المشروط للبوت الذي كان يحدث سابقًا عبر زر رابط (url).
+
+    بنفس منطق compjoin_button_callback أعلاه: يتحقق من الاشتراك في قنوات VORTEX
+    الإجبارية العامة ثم في قناة نشر هذه المسابقة أولاً، ويظهر تنبيهًا فوريًا دون
+    أي تحويل عند عدم الاشتراك. لا يُحوَّل المستخدم إلى البوت (لعرض كابتشا «منع
+    الرشق» ثم احتساب صوته عبر مسار compvote_ الحالي دون أي تعديل عليه) إلا بعد
+    اجتياز شرط الاشتراك فعليًا — بصرف النظر عن وجود خطوة الكابتشا لاحقًا."""
+    query = update.callback_query
+    try:
+        _, contest_code, participant_id_raw = query.data.split(":", 2)
+        participant_id = int(participant_id_raw)
+    except (ValueError, IndexError):
+        await query.answer("⚠️ طلب غير صالح.", show_alert=True)
+        return
+
+    contest = get_contest(contest_code)
+    if not contest:
+        await query.answer("⚠️ هذه المسابقة غير موجودة أو انتهت.", show_alert=True)
+        return
+    if contest["status"] != "open":
+        await query.answer("⚠️ انتهت هذه المسابقة بالفعل.", show_alert=True)
+        return
+
+    user = query.from_user
+    if register_bot_user_and_check_new(user.id, user):
+        await _notify_new_user_join(context, user)
+
+    if user.id == participant_id:
+        await query.answer("🚫 لا يمكنك التصويت لنفسك.", show_alert=True)
+        return
+    if has_voted(contest_code, user.id):
+        await query.answer("✅ لقد قمت بالتصويت مسبقًا في هذه المسابقة.", show_alert=True)
+        return
+    if not get_contest_participant(contest_code, participant_id):
+        await query.answer("⚠️ هذا المتسابق لم يعد مسجّلًا في المسابقة.", show_alert=True)
+        return
+    if contest.get("premium_only") and not user.is_premium:
+        await query.answer("💎 هذه المسابقة للتصويت لمستخدمي بريميوم فقط.", show_alert=True)
+        return
+
+    need_vortex = await get_missing_required_channels(context, user.id)
+    if need_vortex:
+        await query.answer(build_contest_vortex_subscribe_alert(need_vortex), show_alert=True)
+        return
+
+    if not await check_contest_channel_subscription(context, user.id, contest):
+        title = await get_chat_title_cached(context, contest["chat_id"])
+        await query.answer(build_contest_channel_subscribe_alert(title), show_alert=True)
+        return
+
+    await query.answer(
+        url=f"https://t.me/{BOT_USERNAME}?start=compvote_{contest_code}_{participant_id}",
+    )
 
 
 async def handle_contest_vote_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_payload: str):
@@ -15016,6 +15164,8 @@ def main():
     app.add_handler(CallbackQueryHandler(vote_captcha_callback, pattern=r"^compcap:"))
     app.add_handler(CallbackQueryHandler(contest_vote_gate_check_callback, pattern=r"^compcond:"))
     app.add_handler(CallbackQueryHandler(contest_channel_gate_check_callback, pattern=r"^compjoinchk:"))
+    app.add_handler(CallbackQueryHandler(compjoin_button_callback, pattern=r"^compjoinbtn:"))
+    app.add_handler(CallbackQueryHandler(compvote_button_callback, pattern=r"^compvotebtn:"))
     app.add_handler(CallbackQueryHandler(contest_results_callback, pattern=r"^comp_view_results:"))
 
     app.add_handler(CallbackQueryHandler(
