@@ -3498,9 +3498,14 @@ def build_giveaway_channel_keyboard(gw_code: str, current_count: int,
                                      status: str = "open") -> InlineKeyboardMarkup:
     """يبني كيبورد منشور السحب في القناة/القروب (Image 5)، بنفس تنسيق/ألوان بقية أزرار البوت.
 
-    عند تفعيل «منع الرشق» يتحوّل زر المشاركة إلى زر رابط (url) يفتح البوت مباشرة عبر
-    ?start=gwcap_{gw_code} — بنفس آلية زر التصويت 🤍 في المسابقات — بدل إرسال أي رسالة
-    خاصة وسيطة تحتوي على الرابط.
+    زر المشاركة دائمًا زر callback_data (gw_join:{gw_code}) بصرف النظر عن تفعيل
+    «منع الرشق» من عدمه — ولو كان زر رابط (url) مباشر، لكان يفتح البوت فورًا
+    حتى لو كان المستخدم غير مشترك إطلاقًا في قناة استضافة هذا السحب نفسها (أزرار
+    الروابط تُفتح مباشرة من طرف تيليجرام دون أي فرصة لفحص أو تنبيه قبلها). بجعله
+    callback_data دائمًا، يمر أولاً عبر gw_join_callback الذي يتحقق من شرط قناة
+    السحب ويعرض تنبيهًا فوريًا (show_alert) دون تحويل عند عدم الاشتراك، ولا يفتح
+    البوت (عبر gwcap_ عند «منع الرشق» أو gwjoin_ لبقية الشروط) إلا بعد اجتياز هذا
+    الشرط فعليًا.
 
     الصف الثالث (أسفل الكيبورد) يتغيّر حسب حالة السحب (status):
     - "open"   : «ايقاف وسحب» (أحمر) لإيقاف استقبال المشاركات مؤقتًا، و
@@ -3510,17 +3515,10 @@ def build_giveaway_channel_keyboard(gw_code: str, current_count: int,
                  «ابدا السحب» (أحمر) الذي يقوم فعليًا باختيار الفائزين عشوائيًا.
     """
     join_text = f"• اضغط لـ المشاركة ({current_count})"
-    if antispam:
-        join_button = InlineKeyboardButton(
-            join_text,
-            url=f"https://t.me/{BOT_USERNAME}?start=gwcap_{gw_code}",
-            style="primary",
-        )
-    else:
-        join_button = InlineKeyboardButton(
-            join_text, callback_data=f"gw_join:{gw_code}",
-            style="primary",
-        )
+    join_button = InlineKeyboardButton(
+        join_text, callback_data=f"gw_join:{gw_code}",
+        style="primary",
+    )
 
     if status == "paused":
         row3 = [
