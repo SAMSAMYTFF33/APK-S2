@@ -4034,9 +4034,24 @@ def get_points(owner_id: int) -> int:
     return doc.to_dict().get("points", 0) or 0
 
 def get_top_channel_points(limit: int = 5):
-    """يعيد أعلى القنوات التي حصلت على نقاط فعلية من سحوبات منع الرشق."""
+    """يعيد أعلى القنوات التي حصلت على نقاط فعلية من سحوبات منع الرشق.
+
+    (محسّنة أكثر: تجلب مباشرة من Firestore أعلى القنوات نقاطًا فقط عبر
+    order_by + limit، بدل قراءة كل قناة سجّلت نقاطًا على الإطلاق مهما كان
+    عددها — الفكرة: معرفة إحصائيات أعلى 5 قنوات فقط، لا كل القنوات. تُستخدم
+    دفعة (buffer) أكبر قليلاً من العدد المطلوب لتعويض أي قناة من ضمن الأعلى
+    نقاطًا قد تكون غير نشطة أو ليست من نوع «قناة» فتُستبعد، مع التوقف فور
+    الوصول للعدد المطلوب من القنوات الصالحة فعليًا — فيقل عدد قراءات
+    registered_chats أيضًا إلى ما يُقارب 5 بدل قراءتها جميعًا.)"""
     client = fs_db()
-    docs = client.collection("channel_points").stream()
+    wanted = max(1, min(int(limit), 5))
+    buffer_size = max(wanted * 6, 30)
+    docs = (
+        client.collection("channel_points")
+        .order_by("points", direction=firestore.Query.DESCENDING)
+        .limit(buffer_size)
+        .stream()
+    )
     candidates = []
     for d in docs:
         data = d.to_dict()
@@ -4058,6 +4073,8 @@ def get_top_channel_points(limit: int = 5):
             "updated_at": data.get("updated_at"),
             "chat_title": rc.get("chat_title") or f"قناة {chat_id}",
         }))
+        if len(candidates) >= wanted:
+            break
     candidates.sort(key=lambda r: (r.get("points") or 0, r.get("updated_at") or ""), reverse=True)
     return candidates[:max(1, min(int(limit), 5))]
 
@@ -4089,25 +4106,48 @@ def get_channel_roulette_counts() -> dict:
     return counts
 
 
-def get_channel_new_users_counts() -> dict:
+_CHANNEL_NEW_USERS_CACHE = {"data": None, "ts": 0.0}
+STATS_SCREEN_CACHE_TTL = 120  # ثانية — نفس فكرة الكاش المطبَّقة على إحصائيات
+# المالك: تفادي إعادة قراءة مجموعات كاملة من Firestore عند كل ضغطة على شاشة
+# «📊 الإحصائيات» العامة (يستخدمها كل المستخدمين وليس المالك فقط).
+
+
+def get_channel_new_users_counts(force_refresh: bool = False) -> dict:
     """يعيد عدد المستخدمين الجدد المسجَّلين فعليًا لكل قناة (chat_id) من
-    مجموعة channel_new_users."""
+    مجموعة channel_new_users. مُخزَّنة مؤقتًا (كاش) لأنها تُستدعى أكثر من
+    مرة لكل ضغطة على شاشة الإحصائيات العامة."""
+    now_ts = time.time()
+    cached = _CHANNEL_NEW_USERS_CACHE["data"]
+    if not force_refresh and cached is not None and now_ts - _CHANNEL_NEW_USERS_CACHE["ts"] < STATS_SCREEN_CACHE_TTL:
+        return cached
     counts = {}
     for doc in fs_db().collection("channel_new_users").stream():
         data = doc.to_dict()
         chat_id = data.get("chat_id")
         if chat_id:
             counts[chat_id] = data.get("new_users", 0) or 0
+    _CHANNEL_NEW_USERS_CACHE["data"] = counts
+    _CHANNEL_NEW_USERS_CACHE["ts"] = now_ts
     return counts
 
 
-def get_top_channels_full_stats(limit: int = 5) -> list:
+_TOP_CHANNELS_STATS_CACHE = {"data": None, "ts": 0.0}
+
+
+def get_top_channels_full_stats(limit: int = 5, force_refresh: bool = False) -> list:
     """يجمع لكل قناة من أعلى القنوات نقاطًا: عدد عمليات الروليت (سحوبات +
     مسابقات) المستضافة فيها، وعدد المستخدمين الجدد القادمين للبوت عبرها،
-    إضافة للنقاط المكتسبة منها — تُستخدم في شاشة «📊 الإحصائيات» العامة."""
+    إضافة للنقاط المكتسبة منها — تُستخدم في شاشة «📊 الإحصائيات» العامة.
+    مُخزَّنة مؤقتًا (كاش) لتفادي إعادة قراءة channel_points وgiveaways
+    وcontests كاملة عند كل ضغطة، وهذه العملية هي السبب الرئيسي في بطء هذه
+    الشاشة عند وجود عدد كبير من القنوات/السحوبات/المسابقات السابقة."""
+    now_ts = time.time()
+    cached = _TOP_CHANNELS_STATS_CACHE["data"]
+    if not force_refresh and cached is not None and now_ts - _TOP_CHANNELS_STATS_CACHE["ts"] < STATS_SCREEN_CACHE_TTL:
+        return cached
     top_points = get_top_channel_points(limit)
     roulette_counts = get_channel_roulette_counts()
-    new_user_counts = get_channel_new_users_counts()
+    new_user_counts = get_channel_new_users_counts(force_refresh=force_refresh)
     result = []
     for row in top_points:
         chat_id = row["chat_id"]
@@ -4118,6 +4158,8 @@ def get_top_channels_full_stats(limit: int = 5) -> list:
             "roulette_count": roulette_counts.get(chat_id, 0),
             "new_users": new_user_counts.get(chat_id, 0),
         })
+    _TOP_CHANNELS_STATS_CACHE["data"] = result
+    _TOP_CHANNELS_STATS_CACHE["ts"] = now_ts
     return result
 
 
@@ -5442,9 +5484,21 @@ def delete_contest_admin(contest_code: str) -> None:
     delete_contest_completely(contest_code)
 
 
-def get_contests_statistics() -> dict:
+_CONTESTS_STATS_CACHE = {"data": None, "ts": 0.0}
+
+
+def get_contests_statistics(force_refresh: bool = False) -> dict:
     """إحصائيات شاملة عن كل مسابقات البوت — تُستخدم في «📊 إحصائيات المسابقات»
-    ضمن قسم إدارة المسابقات لدى المالك."""
+    ضمن قسم إدارة المسابقات لدى المالك، وفي شاشة «📊 الإحصائيات» العامة.
+
+    (محسّنة: تحسب عدد المشاركين لكل المسابقات بقراءة واحدة شاملة لمجموعة
+    contest_participants وتجميعها في الذاكرة حسب contest_code، بدل استعلام
+    منفصل لكل مسابقة — نفس الأرقام تمامًا، بقراءة واحدة بدل مئات القراءات.
+    ومُخزَّنة مؤقتًا (كاش) لتفادي إعادة هذه القراءة عند كل ضغطة.)"""
+    now_ts = time.time()
+    cached = _CONTESTS_STATS_CACHE["data"]
+    if not force_refresh and cached is not None and now_ts - _CONTESTS_STATS_CACHE["ts"] < STATS_SCREEN_CACHE_TTL:
+        return cached
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
@@ -5471,7 +5525,12 @@ def get_contests_statistics() -> dict:
         if created >= month_start:
             month_count += 1
 
-    participant_counts = [count_contest_participants(c["contest_code"]) for c in contests]
+    participants_by_code = {}
+    for doc in fs_db().collection("contest_participants").stream():
+        code = doc.to_dict().get("contest_code")
+        if code:
+            participants_by_code[code] = participants_by_code.get(code, 0) + 1
+    participant_counts = [participants_by_code.get(c["contest_code"], 0) for c in contests]
     total_participants = sum(participant_counts)
     avg_participants = (total_participants / total) if total else 0
 
@@ -5482,7 +5541,7 @@ def get_contests_statistics() -> dict:
             top_count = cnt
             top_contest_code = c["contest_code"]
 
-    return {
+    result = {
         "total": total,
         "active": active,
         "finished": finished,
@@ -5494,6 +5553,9 @@ def get_contests_statistics() -> dict:
         "top_contest_code": top_contest_code,
         "top_count": top_count,
     }
+    _CONTESTS_STATS_CACHE["data"] = result
+    _CONTESTS_STATS_CACHE["ts"] = now_ts
+    return result
 
 
 def generate_gw_code() -> str:
@@ -5658,10 +5720,21 @@ def delete_giveaway_admin(gw_code: str) -> None:
     fs_db().collection("giveaways").document(gw_code).delete()
 
 
-def get_giveaways_statistics() -> dict:
+_GIVEAWAYS_STATS_CACHE = {"data": None, "ts": 0.0}
+
+
+def get_giveaways_statistics(force_refresh: bool = False) -> dict:
     """إحصائيات شاملة عن كل سحوبات البوت — تُستخدم في «📊 إحصائيات السحوبات»
-    ضمن قسم إدارة السحوبات لدى المالك. تعتمد على count_giveaway_participants
-    الموجودة مسبقًا لحساب عدد المشاركين لكل سحب."""
+    ضمن قسم إدارة السحوبات لدى المالك، وفي شاشة «📊 الإحصائيات» العامة.
+
+    (محسّنة: تحسب عدد المشاركين لكل السحوبات بقراءة واحدة شاملة لمجموعة
+    giveaway_participants وتجميعها في الذاكرة حسب gw_code، بدل استعلام منفصل
+    لكل سحب — نفس الأرقام تمامًا، بقراءة واحدة بدل مئات القراءات. ومُخزَّنة
+    مؤقتًا (كاش) لتفادي إعادة هذه القراءة عند كل ضغطة.)"""
+    now_ts = time.time()
+    cached = _GIVEAWAYS_STATS_CACHE["data"]
+    if not force_refresh and cached is not None and now_ts - _GIVEAWAYS_STATS_CACHE["ts"] < STATS_SCREEN_CACHE_TTL:
+        return cached
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
@@ -5688,7 +5761,12 @@ def get_giveaways_statistics() -> dict:
         if created >= month_start:
             month_count += 1
 
-    participant_counts = [count_giveaway_participants(g["gw_code"]) for g in giveaways]
+    participants_by_code = {}
+    for doc in fs_db().collection("giveaway_participants").stream():
+        code = doc.to_dict().get("gw_code")
+        if code:
+            participants_by_code[code] = participants_by_code.get(code, 0) + 1
+    participant_counts = [participants_by_code.get(g["gw_code"], 0) for g in giveaways]
     total_participants = sum(participant_counts)
     avg_participants = (total_participants / total) if total else 0
 
@@ -5699,7 +5777,7 @@ def get_giveaways_statistics() -> dict:
             top_count = cnt
             top_gw_code = g["gw_code"]
 
-    return {
+    result = {
         "total": total,
         "active": active,
         "finished": finished,
@@ -5711,6 +5789,9 @@ def get_giveaways_statistics() -> dict:
         "top_gw_code": top_gw_code,
         "top_count": top_count,
     }
+    _GIVEAWAYS_STATS_CACHE["data"] = result
+    _GIVEAWAYS_STATS_CACHE["ts"] = now_ts
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -5738,9 +5819,17 @@ def delete_quick_roulette_admin(roulette_id: int) -> None:
     fs_db().collection("roulettes").document(str(roulette_id)).delete()
 
 
-def get_quick_roulette_statistics() -> dict:
+_QUICK_ROULETTE_STATS_CACHE = {"data": None, "ts": 0.0}
+
+
+def get_quick_roulette_statistics(force_refresh: bool = False) -> dict:
     """إحصائيات شاملة عن كل عمليات السحب السريع — تعتمد على count_participants
-    الموجودة مسبقًا لحساب عدد المشاركين لكل عملية سحب."""
+    الموجودة مسبقًا لحساب عدد المشاركين لكل عملية سحب. مُخزَّنة مؤقتًا (كاش)
+    لتفادي إعادة قراءة كل السجلات عند كل ضغطة."""
+    now_ts = time.time()
+    cached = _QUICK_ROULETTE_STATS_CACHE["data"]
+    if not force_refresh and cached is not None and now_ts - _QUICK_ROULETTE_STATS_CACHE["ts"] < STATS_SCREEN_CACHE_TTL:
+        return cached
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
@@ -5767,11 +5856,18 @@ def get_quick_roulette_statistics() -> dict:
         if created >= month_start:
             month_count += 1
 
-    participant_counts = [count_participants(r["roulette_id"]) for r in roulettes]
+    # محسّنة: قراءة واحدة شاملة لمجموعة counted_users وتجميعها حسب roulette_id
+    # بدل استعلام منفصل لكل عملية سحب سريع — نفس الأرقام تمامًا.
+    participants_by_id = {}
+    for doc in fs_db().collection("counted_users").stream():
+        rid = doc.to_dict().get("roulette_id")
+        if rid:
+            participants_by_id[rid] = participants_by_id.get(rid, 0) + 1
+    participant_counts = [participants_by_id.get(r["roulette_id"], 0) for r in roulettes]
     total_participants = sum(participant_counts)
     avg_participants = (total_participants / total) if total else 0
 
-    return {
+    result = {
         "total": total,
         "active": active,
         "finished": finished,
@@ -5781,6 +5877,9 @@ def get_quick_roulette_statistics() -> dict:
         "week_count": week_count,
         "month_count": month_count,
     }
+    _QUICK_ROULETTE_STATS_CACHE["data"] = result
+    _QUICK_ROULETTE_STATS_CACHE["ts"] = now_ts
+    return result
 
 
 async def bot_chat_status_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5882,13 +5981,18 @@ async def build_points_statistics_message(context: ContextTypes.DEFAULT_TYPE) ->
     المسجَّلة فعليًا)، ولكل قناة اسمها كرابط قابل للضغط، وعدد عمليات «الروليت»
     التي استضافتها (سحوبات + مسابقات)، وعدد المستخدمين الجدد الذين دخلوا
     البوت عبرها، ونقاطها. تُذيَّل بملخّص عام يشمل الروليت السريع أيضًا."""
-    rows = get_top_channels_full_stats(5)
-    quick_stats = get_quick_roulette_statistics()
-    gw_stats = get_giveaways_statistics()
-    ct_stats = get_contests_statistics()
+    # كل هذه الاستدعاءات تقرأ من Firestore بشكل متزامن (blocking)؛ تُنفَّذ عبر
+    # asyncio.to_thread في خيط منفصل حتى لا تُجمِّد حلقة أحداث البوت وتُعلِّق
+    # باقي المستخدمين — خصوصًا أن هذه الشاشة يفتحها كل مستخدمي البوت وليس
+    # المالك فقط. النتائج مخزَّنة مؤقتًا (كاش) داخل كل دالة، فحتى عند إخفاق
+    # الكاش تبقى العملية معزولة في خيطها الخاص.
+    rows = await asyncio.to_thread(get_top_channels_full_stats, 5)
+    quick_stats = await asyncio.to_thread(get_quick_roulette_statistics)
+    gw_stats = await asyncio.to_thread(get_giveaways_statistics)
+    ct_stats = await asyncio.to_thread(get_contests_statistics)
 
     total_roulette_ops = gw_stats["total"] + ct_stats["total"] + quick_stats["total"]
-    grand_new_users = get_channel_new_users_counts()
+    grand_new_users = await asyncio.to_thread(get_channel_new_users_counts)
     total_new_via_channels = sum(grand_new_users.values()) if grand_new_users else 0
 
     content = [
@@ -12517,7 +12621,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
-        stats = get_giveaways_statistics()
+        stats = await asyncio.to_thread(get_giveaways_statistics)
         text, entities = build_admgw_stats_message(stats)
         await query.edit_message_text(
             text=text, entities=entities,
@@ -12639,7 +12743,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
-        stats = get_contests_statistics()
+        stats = await asyncio.to_thread(get_contests_statistics)
         text, entities = build_admct_stats_message(stats)
         await query.edit_message_text(
             text=text, entities=entities,
@@ -12762,7 +12866,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
-        stats = get_quick_roulette_statistics()
+        stats = await asyncio.to_thread(get_quick_roulette_statistics)
         text, entities = build_admrr_stats_message(stats)
         await query.edit_message_text(
             text=text, entities=entities,
