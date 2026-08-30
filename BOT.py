@@ -102,6 +102,15 @@ REQUIRED_CHANNEL_URL = "https://t.me/w33lv"
 REQUIRED_CHANNEL_BUTTON_TEXT = "VORTEX  𓏺"
 REQUIRED_CHANNEL_DEFAULT_TARGET = "1000"
 
+# أسماء افتراضية احترافية تُعرض على أزرار قنوات الاشتراك الإجباري عندما لا
+# يكون قد تم تعيين اسم مخصّص (button_text) لها بعد من قسم إدارة الاشتراك
+# الإجباري. تُستخدم كبديل عن عرض "الاشتراك في @username" الخام (غير احترافي).
+# يمكن إضافة أي قناة أخرى هنا بنفس الطريقة: "username": "الاسم المطلوب".
+REQUIRED_CHANNEL_DEFAULT_LABELS = {
+    "w33lv": REQUIRED_CHANNEL_BUTTON_TEXT,
+    "e_ggf": "𝐑𝐎𝐔𝐋𝐄𝐓𝐓𝐄 𝐕𝐎𝐑𝐓𝐄𝐗",
+}
+
 FIREBASE_PROJECT_ID = "wep-app-1771a"
 FIREBASE_PRIVATE_KEY_ID = "4e6f499aee9cf5a54366a87c45b3760782f43b41"
 FIREBASE_CLIENT_EMAIL = "firebase-adminsdk-fbsvc@wep-app-1771a.iam.gserviceaccount.com"
@@ -755,8 +764,16 @@ def _migrate_legacy_required_channel() -> None:
 
 
 def _required_channel_label(ch) -> str:
-    """اسم القناة المعروض للمستخدم: العنوان/النص المخصّص إن وُجد، وإلا يوزرها."""
-    return ch.get("button_text") or ch.get("title") or ("@" + ch.get("username", ""))
+    """اسم القناة المعروض للمستخدم: العنوان/النص المخصّص إن وُجد، وإلا اسم
+    افتراضي احترافي معروف لهذه القناة (REQUIRED_CHANNEL_DEFAULT_LABELS) إن
+    وُجد، وإلا يوزرها الخام كحل أخير."""
+    username = ch.get("username", "")
+    return (
+        ch.get("button_text")
+        or ch.get("title")
+        or REQUIRED_CHANNEL_DEFAULT_LABELS.get(username)
+        or ("@" + username)
+    )
 
 
 def build_required_channels_rows(channels: list) -> list:
@@ -765,9 +782,14 @@ def build_required_channels_rows(channels: list) -> list:
     وبوابة شروط السحب) بنفس المنطق بدل تكراره في كل واحدة."""
     rows = []
     for ch in channels:
-        custom_label = ch.get("button_text") or ch.get("title")
-        title = f"📢 {custom_label}" if custom_label else f"📢 الاشتراك في @{ch.get('username', '')}"
-        url = ch.get("url") or f"https://t.me/{ch.get('username', '')}"
+        username = ch.get("username", "")
+        custom_label = (
+            ch.get("button_text")
+            or ch.get("title")
+            or REQUIRED_CHANNEL_DEFAULT_LABELS.get(username)
+        )
+        title = f"📢 {custom_label}" if custom_label else f"📢 الاشتراك في @{username}"
+        url = ch.get("url") or f"https://t.me/{username}"
         rows.append([InlineKeyboardButton(title, url=url, style="primary")])
     return rows
 
@@ -2003,8 +2025,10 @@ def build_contest_channel_message(cliche_text: str, cliche_entities, target_coun
             f"ستنتهي المسابقة عند وصول أحد المتسابقين إلى {votes_target} صوت  ”",
         ], "blockquote", None))
 
-    if contest_code:
-        extra_parts += ["\n\n", "🆔 كود المسابقة : ", (contest_code, "code", None)]
+    # 🚫 لم يعد كود المسابقة يُعرض داخل منشور القناة/القروب العام — أصبح مقصورًا
+    # على قسم إدارة المسابقات الخاص بالمالك، حيث يظهر بصيغة monospace قابلة
+    # للنسخ بضغطة واحدة. الوسيط contest_code ما زال يُمرَّر لهذه الدالة لأنه قد
+    # يُستخدم في مواضع الاستدعاء الأخرى، لكنه لم يعد يُدرَج ضمن نص المنشور نفسه.
 
     extra_text, extra_entities = build_text_with_emojis(extra_parts)
     footer_text, footer_entities = build_brand_footer()
@@ -2341,44 +2365,54 @@ def build_vote_captcha_wrong_alert() -> str:
     return "❌ رمز غير صحيح، حاول اختيار الرمز الصحيح مرة أخرى."
 
 
-def build_contest_new_vote_owner_notify_message(voter_display_name: str, voter_id: int,
-                                                  participant_display_name: str, vote_number: int) -> tuple:
+# معرّف الإيموجي المميز (custom emoji) المستخدم في إشعار خصم الصوت، كما هو
+# مطلوب في المواصفة (يظهر بدل الرمز الافتراضي "➖").
+VOTE_DEDUCTED_EMOJI_ID = "5215635927224820367"
+
+
+def format_arabic_vote_time(dt: datetime = None) -> str:
+    """يبني نص الوقت والتاريخ بصيغة "HH:MM DD/MM/YYYY ص/م" المستخدمة في
+    إشعارات التصويت لصاحب المسابقة."""
+    dt = dt or datetime.now(timezone.utc)
+    hour_12 = dt.strftime("%I:%M")
+    date_part = dt.strftime("%d/%m/%Y")
+    period = "م" if dt.hour >= 12 else "ص"
+    return f"{hour_12} {date_part} {period}"
+
+
+def build_contest_new_vote_owner_notify_message(participant_display_name: str, voter_display_name: str,
+                                                  voter_username: str, current_votes: int,
+                                                  vote_time: datetime = None) -> tuple:
     """إشعار احترافي يُرسل لصاحب المسابقة فور احتساب تصويت جديد ومؤكد لأحد
     متسابقيه (بعد اجتياز المصوّت كل الشروط: كابتشا + اشتراك + بريميوم إن
-    وُجد). يتضمن اسم المصوّت ومعرفه، اسم من صوّت له، ورقم هذا الصوت ضمن
-    إجمالي أصوات المتسابق."""
+    وُجد). يتضمن اسم المصوّت ويوزره، وقت التصويت، وإجمالي أصوات المتسابق
+    بعد احتساب هذا الصوت."""
+    username_display = f"@{voter_username}" if voter_username else "لا يوجد"
     parts = [
-        ("🗳️ تم تسجيل تصويت جديد", "bold", None),
+        ([("💗", EMOJI["gw_vote_icon"]), f" تصويت جديد لـ {participant_display_name}"], "bold", None),
         "\n\n",
-        ([
-            f"👤 المصوّت: {voter_display_name}\n",
-            f"🆔 المعرّف: {voter_id}\n",
-            f"🎯 صوّت لـ: {participant_display_name}\n",
-            f"🔢 رقم التصويت: {vote_number}",
-        ], "blockquote", None),
-        "\n\n",
-        ("✅ تم احتساب التصويت بنجاح.", "bold", None),
+        f"اسم المصوت : {voter_display_name}\n",
+        f"يوزر المصوت : {username_display}\n",
+        f"وقت التصويت : {format_arabic_vote_time(vote_time)}\n",
+        f"عدد الأصوات الكلي : {current_votes}",
     ]
     return build_text_with_emojis(parts)
 
 
-def build_contest_vote_deducted_owner_notify_message(voter_display_name: str,
-                                                        participant_display_name: str,
+def build_contest_vote_deducted_owner_notify_message(participant_display_name: str,
+                                                        voter_display_name: str,
+                                                        voter_id: int,
                                                         current_votes: int) -> tuple:
     """إشعار احترافي يُرسل لصاحب المسابقة عند إلغاء تصويت كان مؤكدًا سابقًا،
     بسبب مغادرة المصوّت لإحدى القنوات الإلزامية، مع عدد أصوات المتسابق
     المحدّث فور الخصم مباشرة."""
     parts = [
-        ("⚠️ تم خصم تصويت", "bold", None),
+        ([("➖", VOTE_DEDUCTED_EMOJI_ID), f" خصم صوت على {participant_display_name}"], "bold", None),
         "\n\n",
-        ([
-            f"👤 المصوّت: {voter_display_name}\n",
-            f"🎯 المشارك: {participant_display_name}\n",
-            "❌ سبب الخصم: مغادرة إحدى القنوات المطلوبة.",
-        ], "blockquote", None),
-        "\n\n",
-        "📉 تم خصم صوت واحد من إجمالي أصوات المشارك.\n\n",
-        f"🔢 عدد الأصوات الحالي: {current_votes}",
+        "• السبب : غادر قناة المسابقة\n",
+        f"• الاسم : {voter_display_name}\n",
+        f"• الايدي : {voter_id}\n",
+        f"• عدد الاصوات الكلي : {current_votes}",
     ]
     return build_text_with_emojis(parts)
 
@@ -2422,8 +2456,11 @@ def build_quick_roulette_channel_message(target: int, current: int, roulette_id=
             bar,
         ], "blockquote", None),
     ]
-    if roulette_id is not None:
-        parts += ["\n\n", "🆔 كود السحب السريع : ", (str(roulette_id), "code", None)]
+    # 🚫 لم يعد كود السحب السريع يُعرض داخل منشور القناة/القروب العام — أصبح
+    # مقصورًا على قسم إدارة السحب السريع الخاص بالمالك، حيث يظهر بصيغة
+    # monospace قابلة للنسخ بضغطة واحدة. الوسيط roulette_id ما زال يُمرَّر
+    # لهذه الدالة لاستخدامه المحتمل في مواضع الاستدعاء الأخرى، لكنه لم يعد
+    # يُدرَج ضمن نص المنشور نفسه.
     base_text, base_entities = build_text_with_emojis(parts)
     footer_text, footer_entities = build_brand_footer()
     shift = utf16_len(base_text)
@@ -9892,7 +9929,7 @@ async def _contest_participation_callback_inner(update: Update, context: Context
 
 
 async def _notify_contest_owner_new_vote(context: ContextTypes.DEFAULT_TYPE, contest, voter_display_name: str,
-                                          voter_id: int, participant, vote_number: int) -> None:
+                                          voter_username: str, participant, vote_number: int) -> None:
     """يرسل لصاحب المسابقة إشعارًا احترافيًا فور احتساب تصويت جديد ومؤكد لأحد
     متسابقيه، بعد اجتياز المصوّت لكل الشروط (كابتشا + اشتراك + بريميوم إن
     وُجد). لا يرفع أي استثناء عند فشل الإرسال (مثلاً حظر صاحب المسابقة للبوت
@@ -9902,7 +9939,7 @@ async def _notify_contest_owner_new_vote(context: ContextTypes.DEFAULT_TYPE, con
         return
     participant_name = (participant.get("display_name") if participant else None) or "غير معروف"
     text, entities = build_contest_new_vote_owner_notify_message(
-        voter_display_name, voter_id, participant_name, vote_number,
+        participant_name, voter_display_name, voter_username, vote_number,
     )
     try:
         await context.bot.send_message(chat_id=int(owner_id), text=text, entities=entities)
@@ -9911,7 +9948,8 @@ async def _notify_contest_owner_new_vote(context: ContextTypes.DEFAULT_TYPE, con
 
 
 async def _notify_contest_owner_vote_deducted(context: ContextTypes.DEFAULT_TYPE, contest,
-                                               voter_display_name: str, participant_display_name: str,
+                                               voter_display_name: str, voter_id: int,
+                                               participant_display_name: str,
                                                current_votes: int) -> None:
     """يرسل لصاحب المسابقة إشعارًا عند إلغاء تصويت كان مؤكدًا سابقًا بسبب مغادرة
     المصوّت لإحدى القنوات الإلزامية، مع عدد أصوات المتسابق المحدَّث فورًا بعد
@@ -9921,7 +9959,7 @@ async def _notify_contest_owner_vote_deducted(context: ContextTypes.DEFAULT_TYPE
     if not owner_id:
         return
     text, entities = build_contest_vote_deducted_owner_notify_message(
-        voter_display_name, participant_display_name, current_votes,
+        participant_display_name, voter_display_name, voter_id, current_votes,
     )
     try:
         await context.bot.send_message(chat_id=int(owner_id), text=text, entities=entities)
@@ -9996,7 +10034,7 @@ async def cancel_contest_vote_if_unsubscribed(context: ContextTypes.DEFAULT_TYPE
         if contest and participant:
             voter_display_name = data.get("voter_display_name") or str(voter_id)
             await _notify_contest_owner_vote_deducted(
-                context, contest, voter_display_name,
+                context, contest, voter_display_name, voter_id,
                 participant.get("display_name") or str(participant_id),
                 new_votes,
             )
@@ -10175,7 +10213,7 @@ async def vote_captcha_callback(update: Update, context: ContextTypes.DEFAULT_TY
     # إشعار صاحب المسابقة بتصويت جديد مؤكد (بعد اجتياز الكابتشا والاشتراك
     # وشرط بريميوم إن وُجد)، فور احتساب الصوت مباشرة.
     await _notify_contest_owner_new_vote(
-        context, contest, voter_display_name, voter.id, participant, new_votes,
+        context, contest, voter_display_name, voter.username, participant, new_votes,
     )
 
     # إنهاء تلقائي للمسابقات المعتمدة على «عدد أصوات محدد» عند وصول أي متسابق
