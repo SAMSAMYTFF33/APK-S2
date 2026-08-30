@@ -4993,6 +4993,10 @@ async def announce_new_post(context: ContextTypes.DEFAULT_TYPE, source_chat_id: 
     الإعلانات العامة (ANNOUNCE_CHANNEL_CHAT_ID) يحتوي على زر أخضر يفتح المنشور الأصلي
     مباشرة، لتوسيع دائرة انتشار السحوبات والمسابقات. لا يرفع أي استثناء أبدًا حتى لا
     يؤثر فشل الإعلان على نجاح النشر الأساسي في قناة المستخدم.
+
+    إعلان قناة السحوبات هذا (بخلاف المنشور العام في قناة/قروب المستخدم) هو المكان
+    المخصَّص لعرض كود المسابقة/السحب (extra["code"])، مرفقًا بزر نسخ تلقائي بضغطة
+    واحدة (CopyTextButton) — احترافي وبلا حاجة لتحديد النص يدويًا.
     """
     try:
         chat = await context.bot.get_chat(source_chat_id)
@@ -5009,6 +5013,8 @@ async def announce_new_post(context: ContextTypes.DEFAULT_TYPE, source_chat_id: 
     if not post_link:
         return
 
+    code = (extra or {}).get("code")
+
     if kind == "contest":
         text = f"🏁 مسابقة جديدة في قناة - {label}"
         button_text = "المشاركة في المسابقة"
@@ -5017,9 +5023,19 @@ async def announce_new_post(context: ContextTypes.DEFAULT_TYPE, source_chat_id: 
         text = f"🎉 سحب جديد في قناة: {label}\n🏆 عدد الفائزين: {winners_count}"
         button_text = "رؤية السحب"
 
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(button_text, url=post_link, style="success"),
-    ]])
+    if code:
+        text += f"\n🆔 الكود : {code}"
+
+    rows = [[InlineKeyboardButton(button_text, url=post_link, style="success")]]
+    if code:
+        try:
+            copy_btn = InlineKeyboardButton(
+                "📋 نسخ الكود", copy_text=CopyTextButton(text=code), style="primary",
+            )
+        except Exception:
+            copy_btn = InlineKeyboardButton(f"📋 الكود: {code}", callback_data="noop")
+        rows.append([copy_btn])
+    keyboard = InlineKeyboardMarkup(rows)
     try:
         await context.bot.send_message(
             chat_id=ANNOUNCE_CHANNEL_CHAT_ID,
@@ -10310,6 +10326,40 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         print(f"Inline Query Error: {e}")
 
+async def announce_new_roulette(context: ContextTypes.DEFAULT_TYPE, roulette_id: int, target_count: int) -> None:
+    """ينشر إعلانًا في قناة السحوبات (ANNOUNCE_CHANNEL_CHAT_ID) عند مشاركة «روليت
+    سريع» فعليًا في أي محادثة — أي لحظة اختيار المستخدم لنتيجة الاستعلام
+    المضمّن (chosen_inline_result)، وهي اللحظة الوحيدة التي يصبح فيها الروليت
+    منشورًا حقيقيًا. يتضمن كود الروليت مع زر نسخ تلقائي بضغطة واحدة.
+
+    ملاحظة مهمة: لا يوجد هنا زر «عرض» يفتح المنشور مباشرة (خلافًا لإعلانات
+    المسابقات والسحوبات) لأن تيليجرام لا يزوّد البوت بأي رابط عام أو حتى
+    بمعرّف المحادثة التي شارك فيها المستخدم نتيجة الوضع المضمّن (inline mode)
+    — فقط بـ inline_message_id، وهو معرّف يصلح فقط لتعديل الرسالة عبر
+    البوت، ولا يمكن بناء رابط t.me منه. لا يرفع أي استثناء أبدًا حتى لا يؤثر
+    فشل الإعلان على نجاح المشاركة الأساسية."""
+    text = (
+        "🎡 روليت سريع جديد\n"
+        f"👥 عدد المشاركين المطلوب: {target_count}\n"
+        f"🆔 الكود : {roulette_id}"
+    )
+    try:
+        copy_btn = InlineKeyboardButton(
+            "📋 نسخ الكود", copy_text=CopyTextButton(text=str(roulette_id)), style="primary",
+        )
+    except Exception:
+        copy_btn = InlineKeyboardButton(f"📋 الكود: {roulette_id}", callback_data="noop")
+    keyboard = InlineKeyboardMarkup([[copy_btn]])
+    try:
+        await context.bot.send_message(
+            chat_id=ANNOUNCE_CHANNEL_CHAT_ID,
+            text=text,
+            reply_markup=keyboard,
+        )
+    except Exception:
+        logger.warning("تعذر نشر إعلان روليت سريع في قناة الإعلانات (%s)", ANNOUNCE_CHANNEL_CHAT_ID)
+
+
 async def chosen_result_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chosen = update.chosen_inline_result
     if not chosen.inline_message_id:
@@ -10319,6 +10369,11 @@ async def chosen_result_handler(update: Update, context: ContextTypes.DEFAULT_TY
     except ValueError:
         return
     set_inline_message_id(roulette_id, chosen.inline_message_id)
+    roulette = get_roulette(roulette_id)
+    if roulette:
+        asyncio.create_task(
+            announce_new_roulette(context, roulette_id, roulette.get("target_count"))
+        )
 
 async def rr_spin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -14123,7 +14178,7 @@ async def contest_section_callback(update: Update, context: ContextTypes.DEFAULT
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
             set_contest_channel_message(contest_code, sent.message_id)
-            asyncio.create_task(announce_new_post(context, chat_id, sent.message_id, "contest"))
+            asyncio.create_task(announce_new_post(context, chat_id, sent.message_id, "contest", {"code": contest_code}))
         except Exception:
             await query.message.reply_text(
                 "⚠️ تعذر نشر المسابقة في القناة/القروب المحدد، تأكد من أن البوت مايزال مشرفًا هناك."
@@ -14220,7 +14275,10 @@ async def publish_giveaway(update: Update, context: ContextTypes.DEFAULT_TYPE):
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         set_giveaway_channel_message(gw_code, sent.message_id)
-        asyncio.create_task(announce_new_post(context, chat_id, sent.message_id, "giveaway", {"winners_count": winners_count}))
+        asyncio.create_task(announce_new_post(
+            context, chat_id, sent.message_id, "giveaway",
+            {"winners_count": winners_count, "code": gw_code},
+        ))
         if autospin_mode == "time" and settings.get("gw_autospin_minutes"):
             schedule_giveaway_autospin_time(
                 context.job_queue, gw_code, settings["gw_autospin_minutes"] * 60,
