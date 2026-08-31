@@ -1188,24 +1188,31 @@ async def get_missing_contest_vote_channels(
     return missing
 
 
-async def build_contest_channel_join_link(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str:
-    """يبني رابط انضمام لقناة المسابقة: يوزر عام إن وُجد، وإلا رابط دعوة لقناة
-    خاصة. يُستخدم في زر «انضم إلى القناة» ببوابة شرط قناة المسابقة."""
+async def build_channel_join_link(bot, chat_id: int) -> str:
+    """يبني رابط انضمام لأي قناة عبر كائن bot مباشرة (دون الحاجة لـ context):
+    يوزر عام إن وُجد، وإلا رابط دعوة لقناة خاصة. يُستخدم لإنشاء اسم قناة قابل
+    للضغط في رسائل الفوز (سحب/مسابقة) حتى يدخل الفائز للقناة مباشرة."""
     try:
-        chat = await context.bot.get_chat(chat_id)
+        chat = await bot.get_chat(chat_id)
         if chat.username:
             return f"https://t.me/{chat.username}"
     except Exception:
-        logger.exception("تعذّر جلب معلومات قناة المسابقة %s لبناء رابط الانضمام", chat_id)
+        logger.exception("تعذّر جلب معلومات القناة %s لبناء رابط الانضمام", chat_id)
     try:
-        invite_link = await context.bot.create_chat_invite_link(chat_id)
+        invite_link = await bot.create_chat_invite_link(chat_id)
         return invite_link.invite_link
     except Exception:
         try:
-            return await context.bot.export_chat_invite_link(chat_id)
+            return await bot.export_chat_invite_link(chat_id)
         except Exception:
-            logger.exception("تعذّر بناء رابط دعوة لقناة المسابقة %s", chat_id)
+            logger.exception("تعذّر بناء رابط دعوة للقناة %s", chat_id)
             return ""
+
+
+async def build_contest_channel_join_link(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str:
+    """يبني رابط انضمام لقناة المسابقة: يوزر عام إن وُجد، وإلا رابط دعوة لقناة
+    خاصة. يُستخدم في زر «انضم إلى القناة» ببوابة شرط قناة المسابقة."""
+    return await build_channel_join_link(context.bot, chat_id)
 
 
 _CHAT_TITLE_CACHE = {}
@@ -1924,7 +1931,7 @@ def build_contest_winners_confirm_message() -> tuple:
 CONTEST_SETTINGS_DEFAULTS = {
     "contest_notify_win": False,
     "contest_announce_results": False,
-    "contest_approve_participants": True,
+    "contest_approve_participants": False,
     "contest_premium_only": False,
 }
 
@@ -2285,6 +2292,60 @@ def build_contest_join_confirm_keyboard(contest_code: str) -> InlineKeyboardMark
             ),
         ],
     ])
+
+
+def build_contest_join_pending_message() -> tuple:
+    """رسالة «⏳ تم إرسال طلب المشاركة للمراجعة» — تظهر للمستخدم فور ضغطه
+    «قبول» في شاشة تأكيد المشاركة، وذلك فقط عندما تكون خاصية «موافقة
+    المشاركات» مفعّلة في المسابقة."""
+    parts = [
+        ([("⏳", EMOJI["alarm_clock"]), " تم إرسال طلب المشاركة للمراجعة!"], "bold", None),
+        "\n\n",
+        "سيتم إشعارك فور موافقة صاحب المسابقة على طلبك.",
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_contest_join_request_owner_message(display_name: str, username: str, user_id: int) -> tuple:
+    """رسالة «• طلب مشاركة جديد» تُرسل إلى صاحب المسابقة فقط، تحتوي بيانات
+    مقدّم الطلب مع زرّي قبول/رفض — تُرسل فقط عند تفعيل «موافقة المشاركات»."""
+    username_line = f"@{username}" if username else "—"
+    parts = [
+        ([("🎯", EMOJI["target_pin"]), " طلب مشاركة جديد :"], "bold", None),
+        "\n\n",
+        (["الاسم"], "bold", None), f" : {display_name}", "\n",
+        (["الأيدي"], "bold", None), f" : {user_id}", "\n",
+        (["اليوزر"], "bold", None), f" : {username_line}",
+    ]
+    return build_text_with_emojis(parts)
+
+
+def build_contest_join_request_owner_keyboard(contest_code: str, user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "رفض", callback_data=f"comp_appjoin_no:{contest_code}:{user_id}",
+                style="danger", **emoji_kwargs("remind_off"),
+            ),
+            InlineKeyboardButton(
+                "قبول", callback_data=f"comp_appjoin_ok:{contest_code}:{user_id}",
+                style="success", **emoji_kwargs("join_accept_btn"),
+            ),
+        ],
+    ])
+
+
+def build_contest_join_request_decided_owner_message(display_name: str, accepted: bool) -> tuple:
+    """تستبدل رسالة طلب المشاركة عند صاحب المسابقة بعد اتخاذ قراره، لمنع
+    الضغط على الأزرار أكثر من مرة."""
+    if accepted:
+        return bold_notice(f"✅ تم قبول مشاركة: {display_name}")
+    return bold_notice(f"❌ تم رفض مشاركة: {display_name}")
+
+
+def build_contest_join_rejected_user_message() -> tuple:
+    """رسالة تُرسل للمستخدم عند رفض صاحب المسابقة لطلب مشاركته."""
+    return bold_notice("❌ تم رفض طلب مشاركتك في هذه المسابقة.")
 
 
 def build_contest_channel_gate_message() -> tuple:
@@ -5229,6 +5290,13 @@ _CONTEST_PARTICIPANTS_LOADED = set()
 _PARTICIPANT_CODE_INDEX = {}       # participant_code -> (contest_code, user_id)
 _OPEN_CONTEST_CODES = None         # None = لم تُحمَّل بعد؛ set بعد أول تحميل
 
+# طلبات مشاركة بانتظار موافقة صاحب المسابقة (خاصية "موافقة المشاركات").
+# تُحفظ في الذاكرة فقط بلا أي كتابة/قراءة من قاعدة البيانات لحظة الطلب —
+# القراءة/الكتابة الفعلية في Firestore تحدث فقط عند قرار صاحب المسابقة
+# (قبول/رفض)، تمامًا كطلب المستخدم بعدم استهلاك موارد القراءة.
+# (contest_code, user_id) -> {"display_name": str, "username": str|None}
+_CONTEST_PENDING_JOIN_REQUESTS = {}
+
 
 def _get_open_contest_codes() -> set:
     """يعيد مجموعة أكواد المسابقات المفتوحة حاليًا. تُقرأ من Firestore مرة
@@ -5307,7 +5375,7 @@ def create_contest(contest_code: str, owner_id: int, chat_id: int, cliche_text: 
         "winners_count": winners_count,
         "notify_win": int(bool(settings.get("contest_notify_win", False))),
         "announce_results": int(bool(settings.get("contest_announce_results", False))),
-        "approve_participants": int(bool(settings.get("contest_approve_participants", True))),
+        "approve_participants": int(bool(settings.get("contest_approve_participants", False))),
         "premium_only": int(bool(settings.get("contest_premium_only", False))),
         "channel_message_id": None,
         "status": "open",
@@ -10072,17 +10140,27 @@ def build_gw_draw_result_keyboard(gw_code: str) -> InlineKeyboardMarkup:
 
 
 async def notify_giveaway_winner(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int):
-    """يرسل رسالة خاصة تصل للفائز فقط، بنفس تصميم/زخرفة وخط البوت العريض."""
+    """يرسل رسالة خاصة تصل للفائز فقط، بنفس تصميم/زخرفة وخط البوت العريض.
+    اسم القناة يظهر كرابط أزرق قابل للضغط يفتح القناة مباشرة، لمساعدة الفائز
+    على الدخول إليها فورًا."""
+    channel_label = "القناة"
+    channel_url = ""
     try:
         chat = await context.bot.get_chat(chat_id)
         channel_label = chat.title or "القناة"
+        if chat.username:
+            channel_url = f"https://t.me/{chat.username}"
     except Exception:
-        channel_label = "القناة"
+        pass
+    if not channel_url:
+        channel_url = await build_channel_join_link(context.bot, chat_id)
+    channel_part = (channel_label, "link", channel_url) if channel_url else channel_label
     try:
         text, entities = build_text_with_emojis([
             ([
                 ("🎉", EMOJI["party"]),
-                f" مبروك! أنت أحد الفائزين في السحب في قناة {channel_label}",
+                " مبروك! أنت أحد الفائزين في السحب في قناة ",
+                channel_part,
                 " ",
                 ("🏆", EMOJI["trophy_win"]),
             ], "bold", None),
@@ -10369,10 +10447,29 @@ async def finish_contest_by_time(bot, contest_code: str):
             pass
 
     if contest["notify_win"] and winners:
+        contest_channel_label = "القناة"
+        contest_channel_url = ""
+        try:
+            contest_chat = await bot.get_chat(contest["chat_id"])
+            contest_channel_label = contest_chat.title or "القناة"
+            if contest_chat.username:
+                contest_channel_url = f"https://t.me/{contest_chat.username}"
+        except Exception:
+            pass
+        if not contest_channel_url:
+            contest_channel_url = await build_channel_join_link(bot, contest["chat_id"])
+        contest_channel_part = (
+            (contest_channel_label, "link", contest_channel_url) if contest_channel_url else contest_channel_label
+        )
         for user_id, name, _, votes in winners:
             try:
                 text, entities = build_text_with_emojis([
-                    ([("🎉", EMOJI["party"]), f" مبروك! لقد فزت في المسابقة بإسم: {name}"], "bold", None),
+                    ([
+                        ("🎉", EMOJI["party"]),
+                        " مبروك! لقد فزت في المسابقة في قناة ",
+                        contest_channel_part,
+                        f" بإسم: {name}",
+                    ], "bold", None),
                     "\n\n",
                     f"عدد أصواتك: {format_votes_label(votes)}",
                 ])
@@ -10556,9 +10653,37 @@ async def _contest_participation_callback_inner(update: Update, context: Context
             )
             return
 
+        display_name = user.first_name or user.username or str(user.id)
+
+        # خاصية «موافقة المشاركات»: إن كانت مفعّلة لهذه المسابقة، لا يُسجَّل
+        # المستخدم مباشرة، بل يُحفظ طلبه في الذاكرة فقط (بلا أي قراءة/كتابة
+        # لقاعدة البيانات هنا) ويُرسَل لصاحب المسابقة لمراجعته. التسجيل
+        # الفعلي في قاعدة البيانات يحدث فقط بعد ضغط صاحب المسابقة «قبول».
+        if contest.get("approve_participants"):
+            await query.answer()
+            _CONTEST_PENDING_JOIN_REQUESTS[(contest_code, user.id)] = {
+                "display_name": display_name,
+                "username": user.username,
+            }
+            pending_text, pending_entities = build_contest_join_pending_message()
+            await safe_edit_message_text(query, pending_text, pending_entities)
+
+            owner_text, owner_entities = build_contest_join_request_owner_message(
+                display_name, user.username, user.id
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id=contest["owner_id"],
+                    text=owner_text,
+                    entities=owner_entities,
+                    reply_markup=build_contest_join_request_owner_keyboard(contest_code, user.id),
+                )
+            except Exception:
+                logger.exception("تعذّر إرسال طلب المشاركة إلى صاحب المسابقة %s", contest.get("owner_id"))
+            return
+
         await query.answer()
 
-        display_name = user.first_name or user.username or str(user.id)
         participant_code = generate_participant_code(contest_code)
         try:
             add_contest_participant(contest_code, user.id, display_name, participant_code)
@@ -10592,6 +10717,104 @@ async def _contest_participation_callback_inner(update: Update, context: Context
                 reply_markup=build_contest_vote_keyboard(contest_code, user.id, 0, participant_code),
             )
             set_participant_channel_message(contest_code, user.id, sent.message_id)
+        except Exception:
+            pass
+        return
+
+    if data.startswith("comp_appjoin_ok:") or data.startswith("comp_appjoin_no:"):
+        accepted = data.startswith("comp_appjoin_ok:")
+        try:
+            _, contest_code, user_id_raw = data.split(":", 2)
+            target_user_id = int(user_id_raw)
+        except (ValueError, IndexError):
+            await query.answer("⚠️ طلب غير صالح.", show_alert=True)
+            return
+
+        contest = get_contest(contest_code)
+        if not contest:
+            await query.answer("⚠️ هذه المسابقة لم تعد متاحة.", show_alert=True)
+            return
+        if query.from_user.id != contest["owner_id"]:
+            await query.answer("🚫 هذا القرار متاح فقط لصاحب المسابقة.", show_alert=True)
+            return
+
+        pending = _CONTEST_PENDING_JOIN_REQUESTS.pop((contest_code, target_user_id), None)
+        if pending is None:
+            await query.answer("⚠️ لم يعد هذا الطلب متاحًا (ربما تمت معالجته مسبقًا).", show_alert=True)
+            return
+
+        display_name = pending["display_name"]
+
+        if not accepted:
+            await query.answer()
+            decided_text, decided_entities = build_contest_join_request_decided_owner_message(
+                display_name, accepted=False
+            )
+            await safe_edit_message_text(query, decided_text, decided_entities)
+            try:
+                reject_text, reject_entities = build_contest_join_rejected_user_message()
+                await context.bot.send_message(
+                    chat_id=target_user_id, text=reject_text, entities=reject_entities,
+                )
+            except Exception:
+                pass
+            return
+
+        existing = get_contest_participant(contest_code, target_user_id)
+        if existing:
+            await query.answer("✅ هذا المستخدم مسجّل بالفعل في المسابقة.")
+            decided_text, decided_entities = build_contest_join_request_decided_owner_message(
+                display_name, accepted=True
+            )
+            await safe_edit_message_text(query, decided_text, decided_entities)
+            return
+
+        if contest["status"] != "open":
+            await query.answer("⚠️ هذه المسابقة لم تعد متاحة.", show_alert=True)
+            return
+        current = count_contest_participants(contest_code)
+        if current >= contest["target_count"]:
+            await query.answer("⚠️ اكتمل عدد المشاركين المسموح في هذه المسابقة بالفعل.", show_alert=True)
+            return
+
+        await query.answer()
+        participant_code = generate_participant_code(contest_code)
+        try:
+            add_contest_participant(contest_code, target_user_id, display_name, participant_code)
+        except sqlite3.IntegrityError:
+            existing = get_contest_participant(contest_code, target_user_id)
+            if existing:
+                display_name = existing["display_name"]
+                participant_code = existing["participant_code"]
+            else:
+                await query.message.reply_text("⚠️ حدث خطأ أثناء تسجيل المشاركة، حاول مرة أخرى.")
+                return
+
+        decided_text, decided_entities = build_contest_join_request_decided_owner_message(
+            display_name, accepted=True
+        )
+        await safe_edit_message_text(query, decided_text, decided_entities)
+
+        try:
+            registered_text, registered_entities = build_contest_registered_message(display_name, participant_code)
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=registered_text,
+                entities=registered_entities,
+                reply_markup=build_contest_registered_keyboard(contest_code, target_user_id, participant_code),
+            )
+        except Exception:
+            pass
+
+        vote_text, vote_entities = build_contest_vote_post_message(display_name)
+        try:
+            sent = await context.bot.send_message(
+                chat_id=contest["chat_id"],
+                text=vote_text,
+                entities=vote_entities,
+                reply_markup=build_contest_vote_keyboard(contest_code, target_user_id, 0, participant_code),
+            )
+            set_participant_channel_message(contest_code, target_user_id, sent.message_id)
         except Exception:
             pass
         return
@@ -15546,7 +15769,7 @@ def main():
 
     app.add_handler(CallbackQueryHandler(
         contest_participation_callback,
-        pattern=r"^(comp_reject_join:|comp_confirm_join:|comp_withdraw:)",
+        pattern=r"^(comp_reject_join:|comp_confirm_join:|comp_withdraw:|comp_appjoin_ok:|comp_appjoin_no:)",
     ))
     app.add_handler(CallbackQueryHandler(vote_captcha_callback, pattern=r"^compcap:"))
     app.add_handler(CallbackQueryHandler(contest_vote_gate_check_callback, pattern=r"^compcond:"))
