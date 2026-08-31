@@ -2,7 +2,7 @@ import os
 TOKEN = "8872823199:AAGlOZmzYOb9C3esalQBsWW9I32HkV5BBkI"
 BOT_USERNAME = "NOP3bot"
 
-ADMIN_IDS = [12345689]
+ADMIN_IDS = [123456789]
 POINTS_ADMIN_ID = 7638322813
 
 OWNER_IDS = [POINTS_ADMIN_ID, 8676850552]
@@ -35,15 +35,45 @@ def _moderator_doc_ref(user_id: int):
     return fs_db().collection("bot_moderators").document(str(user_id))
 
 
+_MODERATOR_CACHE = {}
+MODERATOR_CACHE_TTL = 60  # ثانية
+
+
+def _invalidate_moderator_cache(user_id: int = None) -> None:
+    """يُفرغ كاش المشرفين — لمستخدم واحد عند تمرير user_id، أو بالكامل إن لم
+    يُمرَّر (أبسط وأضمن عند حذف مشرف، بدل التأكد من كل مفتاح محتمل)."""
+    if user_id is None:
+        _MODERATOR_CACHE.clear()
+    else:
+        _MODERATOR_CACHE.pop(user_id, None)
+
+
 def get_moderator(user_id: int):
-    """يعيد بيانات المشرف (FSRow) أو None إن لم يكن مشرفًا مسجّلًا."""
+    """يعيد بيانات المشرف (FSRow) أو None إن لم يكن مشرفًا مسجّلًا.
+
+    ⚡ هذه الدالة (عبر is_moderator) كانت تُستدعى بقراءة Firestore مباشرة
+    وبدون أي كاش مع **كل تحديث يصل للبوت إطلاقًا** — كل رسالة وكل ضغطة زر من
+    أي مستخدم في أي محادثة خاصة/جروب/قناة، عبر بوابة الصيانة العامة
+    (_maintenance_gate_handler) المسجَّلة بأولوية أعلى من كل شيء آخر. هذا كان
+    على الأرجح السبب الأكبر في استهلاك حصة القراءة اليومية بسرعة، لأنه غير
+    مقيَّد بالمحادثة الخاصة فقط (بخلاف بوابة الاشتراك الإجباري) ويشمل أي
+    نشاط في أي جروب/قناة البوت عضو فيها. الآن يُقرأ من Firestore فعليًا مرة
+    واحدة لكل مستخدم كل MODERATOR_CACHE_TTL ثانية، مع تفريغ فوري للكاش عند
+    إضافة/حذف أي مشرف حتى تنعكس صلاحياته مباشرة."""
+    now = time.time()
+    cached = _MODERATOR_CACHE.get(user_id)
+    if cached is not None and now - cached["ts"] < MODERATOR_CACHE_TTL:
+        return cached["value"]
     doc = _moderator_doc_ref(user_id).get()
     if not doc.exists:
-        return None
-    data = doc.to_dict() or {}
-    data.setdefault("user_id", user_id)
-    data.setdefault("permissions", {})
-    return FSRow(data)
+        result = None
+    else:
+        data = doc.to_dict() or {}
+        data.setdefault("user_id", user_id)
+        data.setdefault("permissions", {})
+        result = FSRow(data)
+    _MODERATOR_CACHE[user_id] = {"value": result, "ts": now}
+    return result
 
 
 def is_moderator(user_id: int) -> bool:
@@ -74,16 +104,19 @@ def add_moderator(user_id: int, added_by: int, username: str = None, first_name:
         "added_at": datetime.now(timezone.utc).isoformat(),
         "permissions": {key: False for key in MODERATOR_PERMISSIONS},
     })
+    _invalidate_moderator_cache(user_id)
 
 
 def remove_moderator(user_id: int) -> None:
     """يحذف مشرفًا نهائيًا مع كل صلاحياته."""
     _moderator_doc_ref(user_id).delete()
+    _invalidate_moderator_cache(user_id)
 
 
 def set_moderator_permission(user_id: int, perm_key: str, value: bool) -> None:
     """يفعّل/يعطّل صلاحية واحدة لدى مشرف معيّن."""
     _moderator_doc_ref(user_id).set({"permissions": {perm_key: value}}, merge=True)
+    _invalidate_moderator_cache(user_id)
 
 
 def moderator_can(user_id: int, perm_key: str) -> bool:
@@ -111,16 +144,19 @@ REQUIRED_CHANNEL_DEFAULT_LABELS = {
     "e_ggf": "𝐑𝐎𝐔𝐋𝐄𝐓𝐓𝐄 𝐕𝐎𝐑𝐓𝐄𝐗",
 }
 
-FIREBASE_PROJECT_ID = "wep-app-1771a"
-FIREBASE_PRIVATE_KEY_ID = "4e6f499aee9cf5a54366a87c45b3760782f43b41"
-FIREBASE_CLIENT_EMAIL = "firebase-adminsdk-fbsvc@wep-app-1771a.iam.gserviceaccount.com"
-FIREBASE_CLIENT_ID = "105199268649045240747"
-FIREBASE_CLIENT_CERT_URL = (
-    "https://www.googleapis.com/robot/v1/metadata/x509/"
-    "firebase-adminsdk-fbsvc%40wep-app-1771a.iam.gserviceaccount.com"
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "vortex-d8c4d")
+FIREBASE_PRIVATE_KEY_ID = os.environ.get("FIREBASE_PRIVATE_KEY_ID", "fd74b425cfab1dfaaa8ec8523b203ee0966cd54b")
+FIREBASE_CLIENT_EMAIL = os.environ.get("FIREBASE_CLIENT_EMAIL", "firebase-adminsdk-fbsvc@vortex-d8c4d.iam.gserviceaccount.com")
+FIREBASE_CLIENT_ID = os.environ.get("FIREBASE_CLIENT_ID", "117685275264885485415")
+
+FIREBASE_CLIENT_CERT_URL = os.environ.get(
+    "FIREBASE_CLIENT_CERT_URL",
+    f"https://www.googleapis.com/robot/v1/metadata/x509/{FIREBASE_CLIENT_EMAIL.replace('@', '%40')}"
 )
 
+# قراءة المفتاح الخاص حصراً من متغيرة البيئة
 _raw_private_key = os.environ.get("FIREBASE_PRIVATE_KEY", "")
+
 if "\\n" in _raw_private_key and "\n" not in _raw_private_key:
     _raw_private_key = _raw_private_key.replace("\\n", "\n")
 
@@ -657,6 +693,17 @@ def _next_required_channel_id() -> int:
     return _txn(transaction)
 
 
+_REQUIRED_CHANNELS_CACHE = {"data": None, "ts": 0.0}
+REQUIRED_CHANNELS_CACHE_TTL = 30  # ثانية
+
+
+def _invalidate_required_channels_cache() -> None:
+    """يُفرغ كاش قنوات الاشتراك الإجباري فور أي تعديل (إضافة/تحديث/حذف/نقل)
+    حتى لا يرى المالك أو المستخدمون بيانات قديمة بعد أي تغيير من لوحة الإدارة."""
+    _REQUIRED_CHANNELS_CACHE["data"] = None
+    _REQUIRED_CHANNELS_CACHE["ts"] = 0.0
+
+
 def create_required_channel(
     username: str, url: str = "", button_text: str = "",
     target_count=None, auto_delete_on_target: bool = False,
@@ -680,20 +727,38 @@ def create_required_channel(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "added_by": added_by,
     })
+    _invalidate_required_channels_cache()
     return channel_id
 
 
 def get_required_channels(enabled_only: bool = False) -> list:
-    """يعيد كل قنوات الاشتراك الإجباري مرتّبة بحسب الترتيب المحفوظ."""
-    docs = fs_db().collection("required_channels").stream()
-    rows = []
-    for doc in docs:
-        data = doc.to_dict() or {}
-        data.setdefault("channel_id", int(doc.id))
-        if enabled_only and not data.get("enabled", True):
-            continue
-        rows.append(FSRow(data))
-    rows.sort(key=lambda r: (r.get("order", 0), r.get("channel_id", 0)))
+    """يعيد كل قنوات الاشتراك الإجباري مرتّبة بحسب الترتيب المحفوظ.
+
+    ⚡ هذه الدالة تُستدعى مع كل تفاعل من أي مستخدم (كل زر/رسالة) عبر
+    enforce_mandatory_subscription_gate، وكانت تقرأ Firestore مباشرة في كل
+    مرة بدون أي كاش — هذا كان السبب الأساسي في استهلاك حصة القراءة اليومية
+    بسرعة حتى مع عدد مستخدمين قليل جدًا. الآن تُقرأ من Firestore فعليًا مرة
+    واحدة كل REQUIRED_CHANNELS_CACHE_TTL ثانية فقط، وبينهما تُعاد النتيجة
+    من الذاكرة مباشرة (كاش) — القائمة نفسها ثابتة عمليًا (لا تتغير إلا من
+    لوحة تحكم المالك)، فهذا آمن تمامًا ولا يؤثر على صحة البيانات، مع تفريغ
+    فوري للكاش (_invalidate_required_channels_cache) عند أي إضافة/تعديل/حذف/
+    نقل من لوحة الإدارة حتى تنعكس التغييرات مباشرة."""
+    now = time.time()
+    cached = _REQUIRED_CHANNELS_CACHE["data"]
+    if cached is not None and now - _REQUIRED_CHANNELS_CACHE["ts"] < REQUIRED_CHANNELS_CACHE_TTL:
+        rows = cached
+    else:
+        docs = fs_db().collection("required_channels").stream()
+        rows = []
+        for doc in docs:
+            data = doc.to_dict() or {}
+            data.setdefault("channel_id", int(doc.id))
+            rows.append(FSRow(data))
+        rows.sort(key=lambda r: (r.get("order", 0), r.get("channel_id", 0)))
+        _REQUIRED_CHANNELS_CACHE["data"] = rows
+        _REQUIRED_CHANNELS_CACHE["ts"] = now
+    if enabled_only:
+        return [r for r in rows if r.get("enabled", True)]
     return rows
 
 
@@ -712,11 +777,13 @@ def update_required_channel(channel_id: int, **fields) -> None:
     if not fields:
         return
     fs_db().collection("required_channels").document(str(channel_id)).set(fields, merge=True)
+    _invalidate_required_channels_cache()
 
 
 def delete_required_channel(channel_id: int) -> None:
     """يحذف قناة اشتراك إجباري نهائيًا من القائمة."""
     fs_db().collection("required_channels").document(str(channel_id)).delete()
+    _invalidate_required_channels_cache()
 
 
 def move_required_channel(channel_id: int, direction: int) -> bool:
@@ -3727,8 +3794,6 @@ def get_admin_logs(limit: int = ADMIN_LOG_MAX_ENTRIES) -> list:
 
 BOT_START_TIME = datetime.now(timezone.utc)
 
-BOT_ERRORS_MAX_ENTRIES = 200
-BOT_ERRORS_PAGE_SIZE = 5
 
 SPEED_THRESHOLDS_MS = [
     (300, "🚀 سريع جدًا"),
@@ -3782,48 +3847,6 @@ def get_last_speed_check() -> dict:
     if not ms:
         return {}
     return {"elapsed_ms": int(ms), "label": label, "checked_at": checked_at}
-
-
-def log_bot_error(error_text: str) -> None:
-    """يسجّل خطأ غير متوقع في Firestore (bot_errors) ليظهر لاحقًا ضمن «عرض
-    الأخطاء» في قسم صيانة البوت — لا يرفع أي استثناء إن فشل التسجيل نفسه."""
-    try:
-        fs_db().collection("bot_errors").add({
-            "error": (error_text or "")[:2000],
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
-    except Exception:
-        logger.exception("تعذّر تسجيل الخطأ في Firestore")
-
-
-def get_bot_errors(limit: int = BOT_ERRORS_MAX_ENTRIES) -> list:
-    """يعيد آخر الأخطاء المسجَّلة، الأحدث أولًا."""
-    try:
-        docs = (
-            fs_db().collection("bot_errors")
-            .order_by("created_at", direction=firestore.Query.DESCENDING)
-            .limit(limit)
-            .stream()
-        )
-        return [FSRow(d.to_dict()) for d in docs]
-    except Exception:
-        logger.exception("تعذّر جلب سجل الأخطاء")
-        return []
-
-
-def count_bot_errors_today() -> int:
-    """يعدّ عدد الأخطاء المسجَّلة خلال آخر 24 ساعة — يُستخدم في «عرض حالة البوت»."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-    count = 0
-    for err in get_bot_errors():
-        created_raw = err.get("created_at")
-        try:
-            created = datetime.fromisoformat(created_raw)
-        except (ValueError, TypeError):
-            continue
-        if created >= cutoff:
-            count += 1
-    return count
 
 
 def format_bot_uptime() -> str:
@@ -4034,9 +4057,24 @@ def get_points(owner_id: int) -> int:
     return doc.to_dict().get("points", 0) or 0
 
 def get_top_channel_points(limit: int = 5):
-    """يعيد أعلى القنوات التي حصلت على نقاط فعلية من سحوبات منع الرشق."""
+    """يعيد أعلى القنوات التي حصلت على نقاط فعلية من سحوبات منع الرشق.
+
+    (محسّنة أكثر: تجلب مباشرة من Firestore أعلى القنوات نقاطًا فقط عبر
+    order_by + limit، بدل قراءة كل قناة سجّلت نقاطًا على الإطلاق مهما كان
+    عددها — الفكرة: معرفة إحصائيات أعلى 5 قنوات فقط، لا كل القنوات. تُستخدم
+    دفعة (buffer) أكبر قليلاً من العدد المطلوب لتعويض أي قناة من ضمن الأعلى
+    نقاطًا قد تكون غير نشطة أو ليست من نوع «قناة» فتُستبعد، مع التوقف فور
+    الوصول للعدد المطلوب من القنوات الصالحة فعليًا — فيقل عدد قراءات
+    registered_chats أيضًا إلى ما يُقارب 5 بدل قراءتها جميعًا.)"""
     client = fs_db()
-    docs = client.collection("channel_points").stream()
+    wanted = max(1, min(int(limit), 5))
+    buffer_size = max(wanted * 6, 30)
+    docs = (
+        client.collection("channel_points")
+        .order_by("points", direction=firestore.Query.DESCENDING)
+        .limit(buffer_size)
+        .stream()
+    )
     candidates = []
     for d in docs:
         data = d.to_dict()
@@ -4058,9 +4096,125 @@ def get_top_channel_points(limit: int = 5):
             "updated_at": data.get("updated_at"),
             "chat_title": rc.get("chat_title") or f"قناة {chat_id}",
         }))
+        if len(candidates) >= wanted:
+            break
     candidates.sort(key=lambda r: (r.get("points") or 0, r.get("updated_at") or ""), reverse=True)
     return candidates[:max(1, min(int(limit), 5))]
 
+
+def bump_channel_new_users(chat_id: int) -> None:
+    """يزيد عدّاد المستخدمين الجدد الذين انضمّوا للبوت عبر قناة معيّنة (من خلال
+    سحب أو مسابقة نُشرت فيها) بمقدار واحد. يُستدعى مرة واحدة فقط لكل مستخدم
+    جديد فعليًا (is_genuinely_new=True)، بمعزل تام عن نظام النقاط."""
+    if not chat_id:
+        return
+    ref = fs_db().collection("channel_new_users").document(str(chat_id))
+    _fs_bump_counter(ref, "new_users", 1, extra={"chat_id": chat_id})
+
+
+def get_channel_roulette_counts() -> dict:
+    """يحسب عدد عمليات «الروليت» (سحوبات + مسابقات) التي استُضيفت في كل قناة،
+    بتجميع وثائق مجموعتي giveaways وcontests حسب chat_id. لا يشمل الروليت
+    السريع لأن بنية بياناته غير مرتبطة بأي قناة محددة (يُنشر عبر البحث
+    المضمّن Inline داخل أي محادثة)."""
+    counts = {}
+    for doc in fs_db().collection("giveaways").stream():
+        chat_id = doc.to_dict().get("chat_id")
+        if chat_id:
+            counts[chat_id] = counts.get(chat_id, 0) + 1
+    for doc in fs_db().collection("contests").stream():
+        chat_id = doc.to_dict().get("chat_id")
+        if chat_id:
+            counts[chat_id] = counts.get(chat_id, 0) + 1
+    return counts
+
+
+_CHANNEL_NEW_USERS_CACHE = {"data": None, "ts": 0.0}
+STATS_SCREEN_CACHE_TTL = 120  # ثانية — نفس فكرة الكاش المطبَّقة على إحصائيات
+# المالك: تفادي إعادة قراءة مجموعات كاملة من Firestore عند كل ضغطة على شاشة
+# «📊 الإحصائيات» العامة (يستخدمها كل المستخدمين وليس المالك فقط).
+
+
+def get_channel_new_users_counts(force_refresh: bool = False) -> dict:
+    """يعيد عدد المستخدمين الجدد المسجَّلين فعليًا لكل قناة (chat_id) من
+    مجموعة channel_new_users. مُخزَّنة مؤقتًا (كاش) لأنها تُستدعى أكثر من
+    مرة لكل ضغطة على شاشة الإحصائيات العامة."""
+    now_ts = time.time()
+    cached = _CHANNEL_NEW_USERS_CACHE["data"]
+    if not force_refresh and cached is not None and now_ts - _CHANNEL_NEW_USERS_CACHE["ts"] < STATS_SCREEN_CACHE_TTL:
+        return cached
+    counts = {}
+    for doc in fs_db().collection("channel_new_users").stream():
+        data = doc.to_dict()
+        chat_id = data.get("chat_id")
+        if chat_id:
+            counts[chat_id] = data.get("new_users", 0) or 0
+    _CHANNEL_NEW_USERS_CACHE["data"] = counts
+    _CHANNEL_NEW_USERS_CACHE["ts"] = now_ts
+    return counts
+
+
+_TOP_CHANNELS_STATS_CACHE = {"data": None, "ts": 0.0}
+
+
+def get_top_channels_full_stats(limit: int = 5, force_refresh: bool = False) -> list:
+    """يجمع لكل قناة من أعلى القنوات نقاطًا: عدد عمليات الروليت (سحوبات +
+    مسابقات) المستضافة فيها، وعدد المستخدمين الجدد القادمين للبوت عبرها،
+    إضافة للنقاط المكتسبة منها — تُستخدم في شاشة «📊 الإحصائيات» العامة.
+    مُخزَّنة مؤقتًا (كاش) لتفادي إعادة قراءة channel_points وgiveaways
+    وcontests كاملة عند كل ضغطة، وهذه العملية هي السبب الرئيسي في بطء هذه
+    الشاشة عند وجود عدد كبير من القنوات/السحوبات/المسابقات السابقة."""
+    now_ts = time.time()
+    cached = _TOP_CHANNELS_STATS_CACHE["data"]
+    if not force_refresh and cached is not None and now_ts - _TOP_CHANNELS_STATS_CACHE["ts"] < STATS_SCREEN_CACHE_TTL:
+        return cached
+    top_points = get_top_channel_points(limit)
+    roulette_counts = get_channel_roulette_counts()
+    new_user_counts = get_channel_new_users_counts(force_refresh=force_refresh)
+    result = []
+    for row in top_points:
+        chat_id = row["chat_id"]
+        result.append({
+            "chat_id": chat_id,
+            "chat_title": row["chat_title"],
+            "points": row.get("points") or 0,
+            "roulette_count": roulette_counts.get(chat_id, 0),
+            "new_users": new_user_counts.get(chat_id, 0),
+        })
+    _TOP_CHANNELS_STATS_CACHE["data"] = result
+    _TOP_CHANNELS_STATS_CACHE["ts"] = now_ts
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 🗂️ كاش مستخدمي البوت (known_bot_users) — كل مستخدم يُقرأ من Firestore مرة
+# واحدة فقط طول عمر تشغيل البوت (أول مرة يُحتاج فيها)، وتبقى نسخته بالذاكرة
+# بعدها (_USER_CACHE). لا تحدث أي كتابة لـFirestore إلا عند تغيير فعلي حقيقي:
+# مستخدم جديد كليًا لأول مرة، أو تغيّر يوزر/اسم المستخدم عن آخر نسخة معروفة.
+# مجرد /start أو أي تفاعل عادي متكرر من مستخدم معروف مسبقًا وبلا تغيير في
+# بياناته **لا يكتب شيئًا إطلاقًا** لـFirestore — يُحدَّث بالذاكرة فقط.
+# ملاحظة: بما أن last_seen_at لم يعد يُكتب لـFirestore إلا مع تغيّر فعلي في
+# اليوزر/الاسم، فإحصائيات «المستخدمين النشطين اليوم/الأسبوع» (المعتمدة على
+# last_seen_at المخزّن) قد تصبح أقل دقة زمنيًا لمن لا يغيّر يوزره أبدًا. هذا
+# تنازل مقصود لتقليل الكتابة إلى الحد الأدنى المطلق كما طُلب.
+# ---------------------------------------------------------------------------
+
+_USER_CACHE = {}  # user_id -> dict بيانات المستخدم كاملة، أو None إن لم يكن معروفًا
+
+
+def _bot_user_doc_ref(user_id: int):
+    return fs_db().collection("known_bot_users").document(str(user_id))
+
+
+def _load_user_into_cache(user_id: int):
+    """يقرأ مستخدمًا من Firestore ويخزّنه بالكاش (مرة واحدة فقط لكل مستخدم
+    طول عمر التشغيلة، إلا إذا استُدعيت لاحقًا صراحة بعد تعديل)."""
+    doc = _bot_user_doc_ref(user_id).get()
+    data = doc.to_dict() if doc.exists else None
+    if data is not None:
+        data.setdefault("user_id", user_id)
+    _USER_CACHE[user_id] = data
+    return data
 
 
 def register_bot_user_and_check_new(user_id: int, user=None) -> bool:
@@ -4073,52 +4227,82 @@ def register_bot_user_and_check_new(user_id: int, user=None) -> bool:
     حتى لو لم يشارك في أي سحب سابقًا. تُستخدم هذه القيمة لمنع احتساب نقطة
     لصاحب السحب عندما يشارك مستخدم "قديم" وليس مستخدمًا جديدًا حقيقيًا.
 
-    عند تمرير user (كائن telegram.User) يُحدَّث اليوزر/الاسم في سجل المستخدم في
-    كل استدعاء عبر merge، دون المساس بحالة الحظر، ليبقى قسم «إدارة المستخدمين»
-    يعرض دائمًا أحدث بيانات معروفة عن كل مستخدم.
+    عند تمرير user (كائن telegram.User): يُحدَّث اليوزر/الاسم بالكاش دائمًا،
+    لكن لا يُكتب لـFirestore إلا لو تغيّر فعليًا عن آخر نسخة معروفة — بدل
+    كتابة last_seen_at في كل استدعاء بدون داعٍ.
     """
-    from google.api_core.exceptions import AlreadyExists
-    ref = fs_db().collection("known_bot_users").document(str(user_id))
-    is_new = False
-    try:
-        ref.create({
+    ref = _bot_user_doc_ref(user_id)
+
+    if user_id not in _USER_CACHE:
+        _load_user_into_cache(user_id)
+
+    cached = _USER_CACHE.get(user_id)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if cached is None:
+        # مستخدم جديد كليًا — كتابة واحدة ضرورية لإنشاء سجلّه لأول مرة.
+        new_data = {
             "user_id": user_id,
-            "first_seen_at": datetime.now(timezone.utc).isoformat(),
-        })
-        is_new = True
-    except AlreadyExists:
-        is_new = False
-    if user is not None:
+            "first_seen_at": now_iso,
+            "last_seen_at": now_iso,
+            "username": (user.username or "") if user is not None else "",
+            "username_lower": ((user.username or "").lower()) if user is not None else "",
+            "first_name": (user.first_name or "") if user is not None else "",
+            "last_name": (user.last_name or "") if user is not None else "",
+        }
         try:
-            ref.set({
-                "user_id": user_id,
-                "username": user.username or "",
-                "username_lower": (user.username or "").lower(),
-                "first_name": user.first_name or "",
-                "last_name": user.last_name or "",
-                "last_seen_at": datetime.now(timezone.utc).isoformat(),
-            }, merge=True)
+            ref.set(new_data)
         except Exception:
-            logger.exception("تعذّر تحديث بيانات المستخدم %s", user_id)
-    return is_new
+            logger.exception("تعذّر إنشاء سجل المستخدم %s", user_id)
+        _USER_CACHE[user_id] = new_data
+        return True
+
+    # مستخدم معروف مسبقًا — تحديث الكاش دائمًا، وكتابة Firestore فقط لو
+    # تغيّر اليوزر/الاسم فعليًا عن آخر نسخة مخزَّنة لدينا.
+    cached["last_seen_at"] = now_iso  # بالذاكرة فقط، بدون كتابة لـFirestore
+    if user is not None:
+        new_username = user.username or ""
+        new_first = user.first_name or ""
+        new_last = user.last_name or ""
+        changed = (
+            cached.get("username", "") != new_username
+            or cached.get("first_name", "") != new_first
+            or cached.get("last_name", "") != new_last
+        )
+        cached["username"] = new_username
+        cached["username_lower"] = new_username.lower()
+        cached["first_name"] = new_first
+        cached["last_name"] = new_last
+        if changed:
+            try:
+                ref.set({
+                    "username": new_username,
+                    "username_lower": new_username.lower(),
+                    "first_name": new_first,
+                    "last_name": new_last,
+                    "last_seen_at": now_iso,
+                }, merge=True)
+            except Exception:
+                logger.exception("تعذّر تحديث بيانات المستخدم %s", user_id)
+    return False
 
 
 _BAN_CACHE = {}
 BAN_CACHE_TTL = 60
 
 
-def _bot_user_doc_ref(user_id: int):
-    return fs_db().collection("known_bot_users").document(str(user_id))
-
-
 def get_bot_user(user_id: int):
-    """يعيد بيانات مستخدم البوت (FSRow) أو None إن لم يكن معروفًا لدى البوت."""
-    doc = _bot_user_doc_ref(user_id).get()
-    if not doc.exists:
+    """يعيد بيانات مستخدم البوت (FSRow) أو None إن لم يكن معروفًا لدى البوت.
+    تُقرأ من Firestore مرة واحدة فقط لكل مستخدم طول عمر تشغيل البوت (كاش
+    دائم بالذاكرة _USER_CACHE)، وبعدها تُعاد من الذاكرة مباشرة بدون أي
+    استدعاء إضافي لـFirestore."""
+    if user_id in _USER_CACHE:
+        data = _USER_CACHE[user_id]
+    else:
+        data = _load_user_into_cache(user_id)
+    if data is None:
         return None
-    data = doc.to_dict() or {}
-    data.setdefault("user_id", user_id)
-    return FSRow(data)
+    return FSRow(dict(data))
 
 
 def find_bot_user_by_username(username: str):
@@ -4141,37 +4325,43 @@ def find_bot_user_by_username(username: str):
 
 
 def is_bot_user_banned(user_id: int, force_refresh: bool = False) -> bool:
-    """يتحقق مما إذا كان المستخدم محظورًا من استخدام البوت، مع كاش قصير المدة
-    لتفادي قراءة Firestore عند كل تحديث/ضغطة زر يرسلها أي مستخدم."""
-    now = time.time()
-    cached = _BAN_CACHE.get(user_id)
-    if not force_refresh and cached is not None and now - cached["ts"] < BAN_CACHE_TTL:
-        return cached["banned"]
+    """يتحقق مما إذا كان المستخدم محظورًا من استخدام البوت. يعتمد على نفس
+    كاش المستخدم الدائم (_USER_CACHE) — بدون قراءة Firestore إطلاقًا بعد
+    أول مرة، إلا لو force_refresh=True صراحة."""
+    if force_refresh:
+        _load_user_into_cache(user_id)
     row = get_bot_user(user_id)
-    banned = bool(row and row.get("banned"))
-    _BAN_CACHE[user_id] = {"banned": banned, "ts": now}
-    return banned
+    return bool(row and row.get("banned"))
 
 
 def ban_bot_user(user_id: int, reason: str, banned_by: int) -> None:
     """يحظر مستخدمًا من استخدام البوت. يعمل حتى مع مستخدم لم يبدأ محادثة مع
-    البوت من قبل إطلاقًا (حظر استباقي بالمعرف الرقمي فقط)."""
-    _bot_user_doc_ref(user_id).set({
+    البوت من قبل إطلاقًا (حظر استباقي بالمعرف الرقمي فقط). كتابة فعلية لأن
+    هذا تعديل حقيقي ومقصود من المشرف."""
+    ban_fields = {
         "user_id": user_id,
         "banned": True,
         "ban_reason": reason or "",
         "banned_at": datetime.now(timezone.utc).isoformat(),
         "banned_by": banned_by,
-    }, merge=True)
+    }
+    _bot_user_doc_ref(user_id).set(ban_fields, merge=True)
+    cached = _USER_CACHE.get(user_id) or {"user_id": user_id}
+    cached.update(ban_fields)
+    _USER_CACHE[user_id] = cached
     _BAN_CACHE[user_id] = {"banned": True, "ts": time.time()}
 
 
 def unban_bot_user(user_id: int) -> None:
-    """يفكّ حظر مستخدم."""
+    """يفكّ حظر مستخدم. كتابة فعلية لأن هذا تعديل حقيقي ومقصود من المشرف."""
     _bot_user_doc_ref(user_id).set({
         "banned": False,
         "ban_reason": "",
     }, merge=True)
+    cached = _USER_CACHE.get(user_id) or {"user_id": user_id}
+    cached["banned"] = False
+    cached["ban_reason"] = ""
+    _USER_CACHE[user_id] = cached
     _BAN_CACHE[user_id] = {"banned": False, "ts": time.time()}
 
 
@@ -4189,42 +4379,44 @@ def get_banned_bot_users() -> list:
 
 def get_bot_users_stats() -> dict:
     """إحصائيات عامة عن مستخدمي البوت: الإجمالي، عدد المحظورين، الجدد اليوم
-    والجدد خلال آخر 7 أيام (بالاعتماد على first_seen_at)."""
-    now = datetime.now(timezone.utc)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = now - timedelta(days=7)
-    total = 0
-    banned = 0
-    new_today = 0
-    new_week = 0
-    for doc in fs_db().collection("known_bot_users").stream():
-        data = doc.to_dict() or {}
-        total += 1
-        if data.get("banned"):
-            banned += 1
-        first_seen_raw = data.get("first_seen_at")
-        if first_seen_raw:
-            try:
-                first_seen = datetime.fromisoformat(first_seen_raw)
-                if first_seen >= today_start:
-                    new_today += 1
-                if first_seen >= week_start:
-                    new_week += 1
-            except (ValueError, TypeError):
-                pass
+    والجدد خلال آخر 7 أيام. كانت هذه الدالة تقرأ كل وثائق known_bot_users من
+    Firestore مباشرة وبدون أي كاش عند كل ضغطة على زر «📊 إحصائيات المستخدمين»
+    — بخلاف get_full_bot_statistics المجاورة لها التي كانت مُخزَّنة مؤقتًا
+    (كاش) بالفعل. الآن تُعيد استخدام نفس نتيجة get_full_bot_statistics
+    (ونفس كاشها لمدة FULL_BOT_STATS_CACHE_TTL ثانية) بدل مسح المجموعة مرة
+    ثانية من الصفر — فتصبح قراءة واحدة فعلية بدل قراءتين لكل ضغطة زر."""
+    users = get_full_bot_statistics().get("users", {})
     return {
-        "total": total,
-        "banned": banned,
-        "new_today": new_today,
-        "new_week": new_week,
+        "total": users.get("total", 0),
+        "banned": users.get("banned", 0),
+        "new_today": users.get("new_today", 0),
+        "new_week": users.get("new_week", 0),
     }
 
 
-def get_full_bot_statistics() -> dict:
+_FULL_BOT_STATS_CACHE = {"data": None, "ts": 0.0}
+FULL_BOT_STATS_CACHE_TTL = 120  # ثانية — يمنع إعادة قراءة كل مستخدمي/قنوات
+# البوت من Firestore عند كل ضغطة على «📊 إحصائيات البوت»، مع بقاء الأرقام
+# قريبة جدًا من اللحظية (كحد أقصى دقيقتان قديمة). زر «🔄 تحديث» نفسه يستفيد
+# من الكاش أيضًا خلال هذه المدة القصيرة، وهو فرق غير محسوس عمليًا.
+
+
+def get_full_bot_statistics(force_refresh: bool = False) -> dict:
     """إحصائيات شاملة عن البوت: المستخدمون، القنوات، المجموعات — تُستخدم في
     قسم «📊 إحصائيات البوت» لدى المالك. تعتمد على last_seen_at لتحديد النشاط
     الفعلي (أي استخدام حقيقي للبوت: /start، مشاركة في سحب/مسابقة/روليت سريع)
-    وليس مجرد الضغط على شرط التحقق من الاشتراك."""
+    وليس مجرد الضغط على شرط التحقق من الاشتراك.
+
+    تُخزَّن النتيجة مؤقتًا (كاش) لمدة FULL_BOT_STATS_CACHE_TTL ثانية، لأن هذه
+    الدالة تقرأ كل وثائق known_bot_users وكل الشات المسجّلة من Firestore —
+    عملية ثقيلة يجب ألا تتكرر عند كل ضغطة. يجب استدعاؤها دائمًا عبر
+    asyncio.to_thread من أي async handler حتى لو كانت النتيجة ستأتي من
+    الكاش، لتفادي أي حظر لحلقة الأحداث في حال انتهت صلاحية الكاش أثناء ذلك."""
+    now_ts = time.time()
+    cached = _FULL_BOT_STATS_CACHE["data"]
+    if not force_refresh and cached is not None and now_ts - _FULL_BOT_STATS_CACHE["ts"] < FULL_BOT_STATS_CACHE_TTL:
+        return cached
+
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
@@ -4307,7 +4499,7 @@ def get_full_bot_statistics() -> dict:
 
     required_channels = get_required_channels()
 
-    return {
+    result = {
         "users": {
             "total": total_users,
             "active_today": active_today,
@@ -4335,6 +4527,9 @@ def get_full_bot_statistics() -> dict:
             "new_month": new_groups_month,
         },
     }
+    _FULL_BOT_STATS_CACHE["data"] = result
+    _FULL_BOT_STATS_CACHE["ts"] = now_ts
+    return result
 
 
 async def get_required_channels_total_members(context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -5017,6 +5212,85 @@ def generate_participant_code(contest_code: str) -> str:
             return code
 
 
+# ---------------------------------------------------------------------------
+# 🗳️ كاش المسابقات (مشاركين + أصوات + قائمة المفتوحة) — كل مسابقة تُقرأ من
+# Firestore مرة واحدة فقط (أول مرة تُحتاج فيها خلال التشغيلة الحالية)، وتبقى
+# بالذاكرة بعدها. أي حدث مشاركة حقيقي (تصويت جديد، انضمام متسابق، إلغاء
+# تصويت، تغيير حالة) يُحدَّث بالذاكرة وبـFirestore معًا بنفس اللحظة — فتُقرأ
+# لوحة المتصدرين وعدّ الأصوات وفحص «هل صوّت» والـaudit الدوري كلها من الذاكرة
+# دون أي قراءة متكررة، وتقتصر القراءات/الكتابات الفعلية على لحظة الإنشاء أو
+# المشاركة فقط، تمامًا كما طُلب.
+# ---------------------------------------------------------------------------
+
+_CONTEST_VOTES_CACHE = {}          # contest_code -> {voter_id: vote_dict}
+_CONTEST_VOTES_LOADED = set()      # contest_codes التي حُمِّلت فعليًا من Firestore
+_CONTEST_PARTICIPANTS_CACHE = {}   # contest_code -> {user_id: participant_dict}
+_CONTEST_PARTICIPANTS_LOADED = set()
+_PARTICIPANT_CODE_INDEX = {}       # participant_code -> (contest_code, user_id)
+_OPEN_CONTEST_CODES = None         # None = لم تُحمَّل بعد؛ set بعد أول تحميل
+
+
+def _get_open_contest_codes() -> set:
+    """يعيد مجموعة أكواد المسابقات المفتوحة حاليًا. تُقرأ من Firestore مرة
+    واحدة فقط طول عمر تشغيل البوت، وتُحدَّث بعدها بالذاكرة فقط عند إنشاء/
+    إغلاق أي مسابقة فعليًا."""
+    global _OPEN_CONTEST_CODES
+    if _OPEN_CONTEST_CODES is None:
+        _OPEN_CONTEST_CODES = {
+            d.to_dict().get("contest_code")
+            for d in fs_db().collection("contests").where("status", "==", "open").stream()
+        }
+        _OPEN_CONTEST_CODES.discard(None)
+    return _OPEN_CONTEST_CODES
+
+
+def _load_contest_votes(contest_code: str) -> dict:
+    """يحمّل أصوات مسابقة معيّنة من Firestore مرة واحدة فقط، ويبقيها بالذاكرة
+    (dict بمفتاح voter_id) لكل الاستدعاءات اللاحقة بنفس التشغيلة."""
+    if contest_code not in _CONTEST_VOTES_LOADED:
+        votes = {}
+        for d in fs_db().collection("contest_votes").where("contest_code", "==", contest_code).stream():
+            data = d.to_dict() or {}
+            voter_id = data.get("voter_id")
+            if voter_id is not None:
+                votes[voter_id] = data
+        _CONTEST_VOTES_CACHE[contest_code] = votes
+        _CONTEST_VOTES_LOADED.add(contest_code)
+    return _CONTEST_VOTES_CACHE.setdefault(contest_code, {})
+
+
+def _load_contest_participants(contest_code: str) -> dict:
+    """يحمّل متسابقي مسابقة معيّنة من Firestore مرة واحدة فقط، ويبقيهم بالذاكرة
+    (dict بمفتاح user_id) لكل الاستدعاءات اللاحقة بنفس التشغيلة."""
+    if contest_code not in _CONTEST_PARTICIPANTS_LOADED:
+        parts = {}
+        for d in fs_db().collection("contest_participants").where("contest_code", "==", contest_code).stream():
+            data = d.to_dict() or {}
+            uid = data.get("user_id")
+            if uid is not None:
+                parts[uid] = data
+                pc = data.get("participant_code")
+                if pc:
+                    _PARTICIPANT_CODE_INDEX[pc] = (contest_code, uid)
+        _CONTEST_PARTICIPANTS_CACHE[contest_code] = parts
+        _CONTEST_PARTICIPANTS_LOADED.add(contest_code)
+    return _CONTEST_PARTICIPANTS_CACHE.setdefault(contest_code, {})
+
+
+def _evict_contest_cache(contest_code: str) -> None:
+    """يفرّغ كاش مسابقة معيّنة من الذاكرة كليًا (بعد الحذف النهائي)."""
+    _CONTEST_VOTES_CACHE.pop(contest_code, None)
+    _CONTEST_VOTES_LOADED.discard(contest_code)
+    parts = _CONTEST_PARTICIPANTS_CACHE.pop(contest_code, {})
+    _CONTEST_PARTICIPANTS_LOADED.discard(contest_code)
+    for data in parts.values():
+        pc = data.get("participant_code")
+        if pc:
+            _PARTICIPANT_CODE_INDEX.pop(pc, None)
+    if _OPEN_CONTEST_CODES is not None:
+        _OPEN_CONTEST_CODES.discard(contest_code)
+
+
 def create_contest(contest_code: str, owner_id: int, chat_id: int, cliche_text: str,
                     cliche_entities, target_count: int, end_type: str, time_minutes,
                     winners_count, settings: dict, votes_target=None) -> None:
@@ -5039,6 +5313,13 @@ def create_contest(contest_code: str, owner_id: int, chat_id: int, cliche_text: 
         "status": "open",
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
+    # حدث إنشاء فعلي — يُضاف مباشرة لكاش المسابقات المفتوحة بالذاكرة (يضمن
+    # التحميل الأول من Firestore لو لم يحدث بعد بهذه التشغيلة).
+    _get_open_contest_codes().add(contest_code)
+    _CONTEST_VOTES_CACHE[contest_code] = {}
+    _CONTEST_VOTES_LOADED.add(contest_code)
+    _CONTEST_PARTICIPANTS_CACHE[contest_code] = {}
+    _CONTEST_PARTICIPANTS_LOADED.add(contest_code)
 
 
 def get_contest(contest_code: str):
@@ -5177,13 +5458,16 @@ async def announce_new_post(context: ContextTypes.DEFAULT_TYPE, source_chat_id: 
 
 
 def delete_contest_completely(contest_code: str) -> None:
-    """يحذف المسابقة بكل مشاركيها وأصواتها نهائيًا من قاعدة البيانات."""
+    """يحذف المسابقة بكل مشاركيها وأصواتها نهائيًا من قاعدة البيانات. عملية
+    إدارية نادرة (حذف كامل من المالك) — لازم تعداد المستندات الفعلية لحذفها،
+    فتبقى قراءات هذه الدالة تحديدًا كما هي."""
     client = fs_db()
     for d in client.collection("contest_votes").where("contest_code", "==", contest_code).stream():
         d.reference.delete()
     for d in client.collection("contest_participants").where("contest_code", "==", contest_code).stream():
         d.reference.delete()
     client.collection("contests").document(contest_code).delete()
+    _evict_contest_cache(contest_code)
 
 
 def set_contest_channel_message(contest_code: str, message_id: int):
@@ -5192,11 +5476,14 @@ def set_contest_channel_message(contest_code: str, message_id: int):
 
 def set_contest_status(contest_code: str, status: str):
     fs_db().collection("contests").document(contest_code).update({"status": status})
+    if status == "open":
+        _get_open_contest_codes().add(contest_code)
+    elif _OPEN_CONTEST_CODES is not None:
+        _OPEN_CONTEST_CODES.discard(contest_code)
 
 
 def count_contest_participants(contest_code: str) -> int:
-    docs = fs_db().collection("contest_participants").where("contest_code", "==", contest_code).stream()
-    return sum(1 for _ in docs)
+    return len(_load_contest_participants(contest_code))
 
 
 def _contest_participant_doc_id(contest_code: str, user_id: int) -> str:
@@ -5204,54 +5491,84 @@ def _contest_participant_doc_id(contest_code: str, user_id: int) -> str:
 
 
 def get_contest_participant(contest_code: str, user_id: int):
-    doc = fs_db().collection("contest_participants").document(_contest_participant_doc_id(contest_code, user_id)).get()
-    return _fs_row_or_none(doc)
+    data = _load_contest_participants(contest_code).get(user_id)
+    return FSRow(dict(data)) if data is not None else None
 
 
 def get_participant_by_code(participant_code: str):
+    """يبحث عن متسابق عبر كوده. يعتمد أولًا على الفهرس بالذاكرة (مبني من كل
+    مسابقة سبق تحميلها بهذه التشغيلة)؛ فقط لو لم يوجد الكود بالفهرس بعد،
+    يقرأ من Firestore مباشرة (حالة نادرة: كود يخص مسابقة لم تُفتح بعد بهذه
+    التشغيلة)."""
+    hit = _PARTICIPANT_CODE_INDEX.get(participant_code)
+    if hit is not None:
+        contest_code, user_id = hit
+        data = _CONTEST_PARTICIPANTS_CACHE.get(contest_code, {}).get(user_id)
+        if data is not None:
+            return FSRow(dict(data))
     docs = fs_db().collection("contest_participants").where("participant_code", "==", participant_code).limit(1).stream()
     for d in docs:
-        return FSRow(d.to_dict())
+        data = d.to_dict() or {}
+        cc = data.get("contest_code")
+        uid = data.get("user_id")
+        if cc and uid is not None:
+            _load_contest_participants(cc)  # يضمن تحميل بقية مسابقته للكاش أيضًا
+            _CONTEST_PARTICIPANTS_CACHE.setdefault(cc, {})[uid] = data
+            _PARTICIPANT_CODE_INDEX[participant_code] = (cc, uid)
+        return FSRow(data)
     return None
 
 
 def add_contest_participant(contest_code: str, user_id: int, display_name: str, participant_code: str):
     ref = fs_db().collection("contest_participants").document(_contest_participant_doc_id(contest_code, user_id))
-    _fs_create_or_integrity_error(ref, {
+    new_data = {
         "contest_code": contest_code,
         "user_id": user_id,
         "display_name": display_name,
         "participant_code": participant_code,
         "channel_message_id": None,
         "joined_at": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    _fs_create_or_integrity_error(ref, new_data)
+    # حدث مشاركة فعلي — يُحدَّث الكاش مباشرة بالذاكرة.
+    parts = _load_contest_participants(contest_code)
+    parts[user_id] = new_data
+    _PARTICIPANT_CODE_INDEX[participant_code] = (contest_code, user_id)
 
 
 def remove_contest_participant(contest_code: str, user_id: int):
     client = fs_db()
     client.collection("contest_participants").document(_contest_participant_doc_id(contest_code, user_id)).delete()
-    for d in client.collection("contest_votes").where("contest_code", "==", contest_code).stream():
-        vd = d.to_dict()
+    votes = _load_contest_votes(contest_code)
+    for voter_id, vd in list(votes.items()):
         if vd.get("participant_user_id") == user_id:
             if vd.get("status", "confirmed") == "confirmed" and vd.get("points_awarded"):
                 reverse_contest_owner_points(vd.get("owner_id"), vd.get("points_awarded"))
-            d.reference.delete()
+            client.collection("contest_votes").document(f"{contest_code}_{voter_id}").delete()
+            votes.pop(voter_id, None)
+    parts = _load_contest_participants(contest_code)
+    removed = parts.pop(user_id, None)
+    if removed:
+        pc = removed.get("participant_code")
+        if pc:
+            _PARTICIPANT_CODE_INDEX.pop(pc, None)
 
 
 def set_participant_channel_message(contest_code: str, user_id: int, message_id: int):
     fs_db().collection("contest_participants").document(_contest_participant_doc_id(contest_code, user_id)).update(
         {"channel_message_id": message_id}
     )
+    parts = _load_contest_participants(contest_code)
+    if user_id in parts:
+        parts[user_id]["channel_message_id"] = message_id
 
 
 def has_voted(contest_code: str, voter_id: int) -> bool:
     """يعيد True فقط إذا كان لدى المصوّت تصويت «مؤكد» حاليًا. التصويتات
     الملغاة (بسبب مغادرة القنوات الإلزامية) لا تُحتسب هنا، ما يسمح للمصوّت
     بالتصويت من جديد إذا عاد واشترك لاحقًا."""
-    doc = fs_db().collection("contest_votes").document(f"{contest_code}_{voter_id}").get()
-    if not doc.exists:
-        return False
-    return doc.to_dict().get("status", "confirmed") == "confirmed"
+    data = _load_contest_votes(contest_code).get(voter_id)
+    return bool(data and data.get("status", "confirmed") == "confirmed")
 
 
 def register_confirmed_contest_vote(contest_code: str, voter_id: int, participant_user_id: int,
@@ -5262,11 +5579,12 @@ def register_confirmed_contest_vote(contest_code: str, voter_id: int, participan
     True إذا سُجّل التصويت فعليًا، وFalse إذا كان هناك تصويت مؤكد سابقًا بالفعل.
     يُخزَّن أيضًا اسم المصوّت وقت التصويت (voter_display_name) لاستخدامه لاحقًا
     في إشعار خصم الصوت دون الحاجة لطلب بيانات المستخدم من تيليجرام من جديد."""
-    ref = fs_db().collection("contest_votes").document(f"{contest_code}_{voter_id}")
-    snap = ref.get()
-    if snap.exists and snap.to_dict().get("status", "confirmed") == "confirmed":
+    votes = _load_contest_votes(contest_code)
+    existing = votes.get(voter_id)
+    if existing and existing.get("status", "confirmed") == "confirmed":
         return False
-    ref.set({
+    ref = fs_db().collection("contest_votes").document(f"{contest_code}_{voter_id}")
+    vote_data = {
         "contest_code": contest_code,
         "voter_id": voter_id,
         "participant_user_id": participant_user_id,
@@ -5275,10 +5593,14 @@ def register_confirmed_contest_vote(contest_code: str, voter_id: int, participan
         "voted_at": datetime.now(timezone.utc).isoformat(),
         "status": "confirmed",
         "points_awarded": 0,
-    })
+    }
+    ref.set(vote_data)
     amount = award_contest_owner_points(owner_id)
     if amount:
+        vote_data["points_awarded"] = amount
         ref.update({"points_awarded": amount})
+    # حدث مشاركة فعلي (تصويت) — يُحدَّث الكاش مباشرة بالذاكرة.
+    votes[voter_id] = vote_data
     return True
 
 
@@ -5286,10 +5608,9 @@ def has_voted_for(contest_code: str, voter_id: int, participant_user_id: int) ->
     """يتحقق من أن المستخدم صوّت تحديدًا لهذا المتسابق (وليس لأي متسابق آخر في نفس
     المسابقة) — يُستخدم للتحقق من شرط «تصويت متسابق» قبل السماح بالمشاركة في السحب.
     لا يُحتسب أي تصويت مُلغى بسبب مغادرة القنوات الإلزامية."""
-    doc = fs_db().collection("contest_votes").document(f"{contest_code}_{voter_id}").get()
-    if not doc.exists:
+    data = _load_contest_votes(contest_code).get(voter_id)
+    if not data:
         return False
-    data = doc.to_dict()
     return (
         data.get("status", "confirmed") == "confirmed"
         and data.get("participant_user_id") == participant_user_id
@@ -5297,11 +5618,11 @@ def has_voted_for(contest_code: str, voter_id: int, participant_user_id: int) ->
 
 
 def get_participant_votes(contest_code: str, participant_user_id: int) -> int:
-    docs = fs_db().collection("contest_votes").where("contest_code", "==", contest_code).stream()
+    votes = _load_contest_votes(contest_code)
     return sum(
-        1 for d in docs
-        if d.to_dict().get("participant_user_id") == participant_user_id
-        and d.to_dict().get("status", "confirmed") == "confirmed"
+        1 for v in votes.values()
+        if v.get("participant_user_id") == participant_user_id
+        and v.get("status", "confirmed") == "confirmed"
     )
 
 
@@ -5311,20 +5632,16 @@ def get_contest_leaderboard(contest_code: str):
     وعند التعادل يُقدَّم من انضمّ أولًا. كل عنصر: (user_id, display_name, participant_code, votes).
     التصويتات الملغاة (بسبب مغادرة القنوات الإلزامية) لا تُحتسب ضمن العدد.
     """
-    client = fs_db()
-    participants = list(client.collection("contest_participants").where("contest_code", "==", contest_code).stream())
-    votes = list(client.collection("contest_votes").where("contest_code", "==", contest_code).stream())
+    participants = _load_contest_participants(contest_code)
+    votes = _load_contest_votes(contest_code)
     vote_counts = {}
-    for v in votes:
-        vd = v.to_dict()
+    for vd in votes.values():
         if vd.get("status", "confirmed") != "confirmed":
             continue
         pid = vd.get("participant_user_id")
         vote_counts[pid] = vote_counts.get(pid, 0) + 1
     rows = []
-    for p in participants:
-        data = p.to_dict()
-        uid = data.get("user_id")
+    for uid, data in participants.items():
         rows.append((
             uid, data.get("display_name") or str(uid), data.get("participant_code"),
             vote_counts.get(uid, 0), data.get("joined_at") or "",
@@ -5363,9 +5680,21 @@ def delete_contest_admin(contest_code: str) -> None:
     delete_contest_completely(contest_code)
 
 
-def get_contests_statistics() -> dict:
+_CONTESTS_STATS_CACHE = {"data": None, "ts": 0.0}
+
+
+def get_contests_statistics(force_refresh: bool = False) -> dict:
     """إحصائيات شاملة عن كل مسابقات البوت — تُستخدم في «📊 إحصائيات المسابقات»
-    ضمن قسم إدارة المسابقات لدى المالك."""
+    ضمن قسم إدارة المسابقات لدى المالك، وفي شاشة «📊 الإحصائيات» العامة.
+
+    (محسّنة: تحسب عدد المشاركين لكل المسابقات بقراءة واحدة شاملة لمجموعة
+    contest_participants وتجميعها في الذاكرة حسب contest_code، بدل استعلام
+    منفصل لكل مسابقة — نفس الأرقام تمامًا، بقراءة واحدة بدل مئات القراءات.
+    ومُخزَّنة مؤقتًا (كاش) لتفادي إعادة هذه القراءة عند كل ضغطة.)"""
+    now_ts = time.time()
+    cached = _CONTESTS_STATS_CACHE["data"]
+    if not force_refresh and cached is not None and now_ts - _CONTESTS_STATS_CACHE["ts"] < STATS_SCREEN_CACHE_TTL:
+        return cached
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
@@ -5392,7 +5721,12 @@ def get_contests_statistics() -> dict:
         if created >= month_start:
             month_count += 1
 
-    participant_counts = [count_contest_participants(c["contest_code"]) for c in contests]
+    participants_by_code = {}
+    for doc in fs_db().collection("contest_participants").stream():
+        code = doc.to_dict().get("contest_code")
+        if code:
+            participants_by_code[code] = participants_by_code.get(code, 0) + 1
+    participant_counts = [participants_by_code.get(c["contest_code"], 0) for c in contests]
     total_participants = sum(participant_counts)
     avg_participants = (total_participants / total) if total else 0
 
@@ -5403,7 +5737,7 @@ def get_contests_statistics() -> dict:
             top_count = cnt
             top_contest_code = c["contest_code"]
 
-    return {
+    result = {
         "total": total,
         "active": active,
         "finished": finished,
@@ -5415,6 +5749,9 @@ def get_contests_statistics() -> dict:
         "top_contest_code": top_contest_code,
         "top_count": top_count,
     }
+    _CONTESTS_STATS_CACHE["data"] = result
+    _CONTESTS_STATS_CACHE["ts"] = now_ts
+    return result
 
 
 def generate_gw_code() -> str:
@@ -5579,10 +5916,21 @@ def delete_giveaway_admin(gw_code: str) -> None:
     fs_db().collection("giveaways").document(gw_code).delete()
 
 
-def get_giveaways_statistics() -> dict:
+_GIVEAWAYS_STATS_CACHE = {"data": None, "ts": 0.0}
+
+
+def get_giveaways_statistics(force_refresh: bool = False) -> dict:
     """إحصائيات شاملة عن كل سحوبات البوت — تُستخدم في «📊 إحصائيات السحوبات»
-    ضمن قسم إدارة السحوبات لدى المالك. تعتمد على count_giveaway_participants
-    الموجودة مسبقًا لحساب عدد المشاركين لكل سحب."""
+    ضمن قسم إدارة السحوبات لدى المالك، وفي شاشة «📊 الإحصائيات» العامة.
+
+    (محسّنة: تحسب عدد المشاركين لكل السحوبات بقراءة واحدة شاملة لمجموعة
+    giveaway_participants وتجميعها في الذاكرة حسب gw_code، بدل استعلام منفصل
+    لكل سحب — نفس الأرقام تمامًا، بقراءة واحدة بدل مئات القراءات. ومُخزَّنة
+    مؤقتًا (كاش) لتفادي إعادة هذه القراءة عند كل ضغطة.)"""
+    now_ts = time.time()
+    cached = _GIVEAWAYS_STATS_CACHE["data"]
+    if not force_refresh and cached is not None and now_ts - _GIVEAWAYS_STATS_CACHE["ts"] < STATS_SCREEN_CACHE_TTL:
+        return cached
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
@@ -5609,7 +5957,12 @@ def get_giveaways_statistics() -> dict:
         if created >= month_start:
             month_count += 1
 
-    participant_counts = [count_giveaway_participants(g["gw_code"]) for g in giveaways]
+    participants_by_code = {}
+    for doc in fs_db().collection("giveaway_participants").stream():
+        code = doc.to_dict().get("gw_code")
+        if code:
+            participants_by_code[code] = participants_by_code.get(code, 0) + 1
+    participant_counts = [participants_by_code.get(g["gw_code"], 0) for g in giveaways]
     total_participants = sum(participant_counts)
     avg_participants = (total_participants / total) if total else 0
 
@@ -5620,7 +5973,7 @@ def get_giveaways_statistics() -> dict:
             top_count = cnt
             top_gw_code = g["gw_code"]
 
-    return {
+    result = {
         "total": total,
         "active": active,
         "finished": finished,
@@ -5632,6 +5985,9 @@ def get_giveaways_statistics() -> dict:
         "top_gw_code": top_gw_code,
         "top_count": top_count,
     }
+    _GIVEAWAYS_STATS_CACHE["data"] = result
+    _GIVEAWAYS_STATS_CACHE["ts"] = now_ts
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -5659,9 +6015,17 @@ def delete_quick_roulette_admin(roulette_id: int) -> None:
     fs_db().collection("roulettes").document(str(roulette_id)).delete()
 
 
-def get_quick_roulette_statistics() -> dict:
+_QUICK_ROULETTE_STATS_CACHE = {"data": None, "ts": 0.0}
+
+
+def get_quick_roulette_statistics(force_refresh: bool = False) -> dict:
     """إحصائيات شاملة عن كل عمليات السحب السريع — تعتمد على count_participants
-    الموجودة مسبقًا لحساب عدد المشاركين لكل عملية سحب."""
+    الموجودة مسبقًا لحساب عدد المشاركين لكل عملية سحب. مُخزَّنة مؤقتًا (كاش)
+    لتفادي إعادة قراءة كل السجلات عند كل ضغطة."""
+    now_ts = time.time()
+    cached = _QUICK_ROULETTE_STATS_CACHE["data"]
+    if not force_refresh and cached is not None and now_ts - _QUICK_ROULETTE_STATS_CACHE["ts"] < STATS_SCREEN_CACHE_TTL:
+        return cached
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_start = now - timedelta(days=7)
@@ -5688,11 +6052,18 @@ def get_quick_roulette_statistics() -> dict:
         if created >= month_start:
             month_count += 1
 
-    participant_counts = [count_participants(r["roulette_id"]) for r in roulettes]
+    # محسّنة: قراءة واحدة شاملة لمجموعة counted_users وتجميعها حسب roulette_id
+    # بدل استعلام منفصل لكل عملية سحب سريع — نفس الأرقام تمامًا.
+    participants_by_id = {}
+    for doc in fs_db().collection("counted_users").stream():
+        rid = doc.to_dict().get("roulette_id")
+        if rid:
+            participants_by_id[rid] = participants_by_id.get(rid, 0) + 1
+    participant_counts = [participants_by_id.get(r["roulette_id"], 0) for r in roulettes]
     total_participants = sum(participant_counts)
     avg_participants = (total_participants / total) if total else 0
 
-    return {
+    result = {
         "total": total,
         "active": active,
         "finished": finished,
@@ -5702,6 +6073,9 @@ def get_quick_roulette_statistics() -> dict:
         "week_count": week_count,
         "month_count": month_count,
     }
+    _QUICK_ROULETTE_STATS_CACHE["data"] = result
+    _QUICK_ROULETTE_STATS_CACHE["ts"] = now_ts
+    return result
 
 
 async def bot_chat_status_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5798,29 +6172,71 @@ def build_points_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def build_points_statistics_message() -> tuple:
-    """عرض أعلى خمس قنوات بحسب النقاط المسجلة فعليًا."""
-    rows = get_top_channel_points(5)
+async def build_points_statistics_message(context: ContextTypes.DEFAULT_TYPE) -> tuple:
+    """لوحة إحصائيات عامة احترافية: تعرض أعلى 5 قنوات نشاطًا (وفق النقاط
+    المسجَّلة فعليًا)، ولكل قناة اسمها كرابط قابل للضغط، وعدد عمليات «الروليت»
+    التي استضافتها (سحوبات + مسابقات)، وعدد المستخدمين الجدد الذين دخلوا
+    البوت عبرها، ونقاطها. تُذيَّل بملخّص عام يشمل الروليت السريع أيضًا."""
+    # كل هذه الاستدعاءات تقرأ من Firestore بشكل متزامن (blocking)؛ تُنفَّذ عبر
+    # asyncio.to_thread في خيط منفصل حتى لا تُجمِّد حلقة أحداث البوت وتُعلِّق
+    # باقي المستخدمين — خصوصًا أن هذه الشاشة يفتحها كل مستخدمي البوت وليس
+    # المالك فقط. النتائج مخزَّنة مؤقتًا (كاش) داخل كل دالة، فحتى عند إخفاق
+    # الكاش تبقى العملية معزولة في خيطها الخاص.
+    rows = await asyncio.to_thread(get_top_channels_full_stats, 5)
+    quick_stats = await asyncio.to_thread(get_quick_roulette_statistics)
+    gw_stats = await asyncio.to_thread(get_giveaways_statistics)
+    ct_stats = await asyncio.to_thread(get_contests_statistics)
+
+    total_roulette_ops = gw_stats["total"] + ct_stats["total"] + quick_stats["total"]
+    grand_new_users = await asyncio.to_thread(get_channel_new_users_counts)
+    total_new_via_channels = sum(grand_new_users.values()) if grand_new_users else 0
+
     content = [
-        ("📊", EMOJI["chart"]),
-        " إحصائيات النقاط",
-        "\n\n",
+        ("📊", EMOJI["chart"]), " لوحة الإحصائيات",
+        "\n", "⟡▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬⟡", "\n\n",
     ]
+
+    content.append(([
+        ("🎡", EMOJI["roulette"]), " إجمالي عمليات الروليت: ", f"{total_roulette_ops}", "\n",
+        ("👥", EMOJI["people"]), " إجمالي المستخدمين الجدد عبر القنوات: ", f"{total_new_via_channels}",
+    ], "blockquote", None))
+    content.append("\n\n")
+
     if not rows:
-        content.append((["📭 لا توجد نقاط مسجلة للقنوات حتى الآن ”"], "blockquote", None))
+        content.append((["📭 لا توجد إحصائيات مسجّلة للقنوات حتى الآن ”"], "blockquote", None))
     else:
-        content.append((["🏆 أعلى 5 قنوات بالنقاط ”"], "blockquote", None))
+        content.append(([("🏆", EMOJI["trophy_win"]), " الصدارة — أعلى 5 قنوات أداءً ”"], "blockquote", None))
         content.append("\n\n")
         medals = ["🥇", "🥈", "🥉", "🏅", "🎖️"]
         for index, row in enumerate(rows):
             title = row["chat_title"] or str(row["chat_id"])
-            content.append(([
-                f"{medals[index]} {index + 1}. {title}\n",
-                f"💎 النقاط: {row['points']}\n",
-                "━━━━━━━━━━━━\n",
-            ], "blockquote", None))
-    content.append("\n")
-    content.append((["📌 تُحتسب النقاط من المشاركات المؤكدة في سحوبات منع الرشق فقط ”"], "blockquote", None))
+            link = ""
+            try:
+                link = await build_contest_channel_join_link(context, row["chat_id"])
+            except Exception:
+                link = ""
+            name_part = (title, "link", link) if link else title
+            block = [
+                f"{medals[index]} ", name_part, "\n",
+                "⟡ ", ("🎡", EMOJI["roulette"]), f" عمليات الروليت: {row['roulette_count']}\n",
+                "⟡ ", ("👥", EMOJI["people"]), f" مستخدمون جدد: {row['new_users']}\n",
+                "⟡ ", ("💎", EMOJI["star"]), f" النقاط: {row['points']}",
+            ]
+            if index < len(rows) - 1:
+                block.append("\n⟡▬▬▬▬▬▬▬▬▬▬▬▬▬")
+            content.append((block, "blockquote", None))
+            content.append("\n\n" if index < len(rows) - 1 else "\n")
+
+    content.append(([
+        "📌 الترتيب والنقاط يُحتسبان من المشاركات المؤكدة في سحوبات منع الرشق، "
+        "وعدّاد الروليت يشمل السحوبات والمسابقات معًا لكل قناة ”"
+    ], "blockquote", None))
+    if quick_stats["total"]:
+        content.append("\n")
+        content.append(([
+            ("⚡", EMOJI["roulette"]),
+            f" الروليت السريع (غير مرتبط بقناة محددة): {quick_stats['total']} عملية",
+        ], "blockquote", None))
     return build_text_with_emojis([(content, "bold", None)])
 
 
@@ -6101,7 +6517,6 @@ def build_owner_maintenance_section_keyboard() -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(toggle_text, callback_data="owner_maintenance_toggle", style=toggle_style)]]
     rows += pair_buttons([
         InlineKeyboardButton("📶 فحص سرعة الاستجابة", callback_data="owner_maintenance_speedtest", style="primary"),
-        InlineKeyboardButton("⚠️ عرض الأخطاء", callback_data="owner_maintenance_errors:1", style="primary"),
         InlineKeyboardButton("📊 عرض حالة البوت", callback_data="owner_maintenance_status", style="primary"),
     ])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
@@ -6127,7 +6542,6 @@ def build_owner_maintenance_status_message() -> tuple:
     status_line = "🔴 مفعّل" if maintenance_on else "🟢 غير مفعّل"
     speed = get_last_speed_check()
     speed_line = f"{speed['label']} ({speed['elapsed_ms']} مللي ثانية)" if speed else "لم يُفحص بعد"
-    errors_24h = count_bot_errors_today()
     uptime = format_bot_uptime()
     return build_text_with_emojis([
         ([
@@ -6136,51 +6550,10 @@ def build_owner_maintenance_status_message() -> tuple:
             ([
                 f"🛠️ وضع الصيانة: {status_line}\n",
                 f"📶 سرعة الاستجابة: {speed_line}\n",
-                f"⚠️ أخطاء آخر 24 ساعة: {errors_24h}\n",
                 f"⏳ مدة التشغيل منذ آخر إقلاع: {uptime}",
             ], "blockquote", None),
         ], "bold", None),
     ])
-
-
-def build_owner_maintenance_errors_message(errors: list, page: int) -> tuple:
-    if not errors:
-        content = [
-            "⚠️ عرض الأخطاء",
-            "\n\n",
-            (["لا توجد أي أخطاء مسجَّلة حتى الآن ”"], "blockquote", None),
-        ]
-        return build_text_with_emojis([(content, "bold", None)])
-
-    total_pages = max(1, (len(errors) + BOT_ERRORS_PAGE_SIZE - 1) // BOT_ERRORS_PAGE_SIZE)
-    page = max(1, min(page, total_pages))
-    start = (page - 1) * BOT_ERRORS_PAGE_SIZE
-    page_items = errors[start:start + BOT_ERRORS_PAGE_SIZE]
-
-    content = [f"⚠️ عرض الأخطاء ({len(errors)})", "\n\n"]
-    for err in page_items:
-        when = _format_ts(err.get("created_at"))
-        text = err.get("error") or "—"
-        if len(text) > 300:
-            text = text[:300] + "…"
-        content.append((f"🕒 {when}\n{text}", "blockquote", None))
-        content.append("\n\n")
-    return build_text_with_emojis([(content, "bold", None)])
-
-
-def build_owner_maintenance_errors_keyboard(errors: list, page: int) -> InlineKeyboardMarkup:
-    total_pages = max(1, (len(errors) + BOT_ERRORS_PAGE_SIZE - 1) // BOT_ERRORS_PAGE_SIZE)
-    page = max(1, min(page, total_pages))
-
-    rows = []
-    if total_pages > 1:
-        rows.append(build_pager_nav_row(
-            page, total_pages, "owner_maintenance_errors:{page}", "owner_maintenance_noop",
-        ))
-
-    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_maintenance_section", style="danger",
-                                      **emoji_kwargs("back_section_btn"))])
-    return InlineKeyboardMarkup(rows)
 
 
 def build_owner_points_section_message() -> tuple:
@@ -7117,20 +7490,30 @@ def build_owner_referrals_settings_keyboard() -> InlineKeyboardMarkup:
 
 
 def build_referral_info_block(user_id: int) -> list:
-    """يبني مقطعًا نصيًا (blockquote) يعرض رابط الدعوة الخاص بالمستخدم وبياناته
-    إن كان مصرَّحًا له بالإحالة ورابطه مفعّل حاليًا. يُستخدم داخل قسم ربح
-    (build_points_message) — يعود بقائمة فارغة إن لم يكن مؤهّلًا فلا يظهر شيء."""
+    """يبني قسمًا مستقلاً منسَّقًا باحترافية يعرض رابط الدعوة الخاص بالمستخدم
+    وبياناته، إن كان مصرَّحًا له بالإحالة ورابطه مفعّل حاليًا. يُستخدم داخل
+    قسم ربح (build_points_message) — يعود بقائمة فارغة إن لم يكن مؤهّلًا
+    فلا يظهر شيء. الرابط يُعرض بصيغة code (monospace) لينسخه المستخدم بضغطة
+    واحدة بدل رابط خام قد يلتف بشكل غير مرتّب."""
     row = get_referral(user_id)
     if not row or not row.get("active"):
         return []
+    link = get_referral_link(user_id)
     return [
         "\n\n",
+        "⟡▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬⟡",
+        "\n\n",
+        "🔗 قسم الإحالة الخاص بك",
+        "\n\n",
         ([
-            "🔗 رابط دعوتك الخاص\n",
-            f"{get_referral_link(user_id)}\n",
-            f"📊 نسبتك: {row.get('percentage')}%\n",
-            f"📥 عدد الإحالات: {row.get('referred_count', 0)}\n",
-            f"💎 أرباح الإحالة: {row.get('points_earned', 0)} نقطة ”",
+            "📎 رابطك الخاص (اضغط عليه لنسخه) :\n",
+            (link, "code", None),
+        ], "blockquote", None),
+        "\n\n",
+        ([
+            f"📊 نسبتك : {row.get('percentage')}%\n",
+            f"📥 عدد الإحالات : {row.get('referred_count', 0)}\n",
+            f"💎 أرباح الإحالة : {row.get('points_earned', 0)} نقطة ”",
         ], "blockquote", None),
     ]
 
@@ -9014,6 +9397,11 @@ async def finalize_giveaway_join(context: ContextTypes.DEFAULT_TYPE, gw_code: st
     added = add_giveaway_participant(gw_code, user.id, display_name, user.username)
     if not added:
         return
+    if is_genuinely_new:
+        try:
+            bump_channel_new_users(giveaway["chat_id"])
+        except Exception:
+            logger.exception("تعذّر تحديث عدّاد المستخدمين الجدد لقناة السحب %s", giveaway.get("chat_id"))
     if bool(giveaway["antispam"]) and is_genuinely_new:
         reward_giveaway_user(
             user.id, gw_code, giveaway["owner_id"], giveaway["chat_id"]
@@ -9937,6 +10325,8 @@ async def finish_contest_by_time(bot, contest_code: str):
         "ended_at": datetime.now(timezone.utc).isoformat(),
     })
     contest["status"] = "ended"
+    if _OPEN_CONTEST_CODES is not None:
+        _OPEN_CONTEST_CODES.discard(contest_code)
 
     leaderboard = get_contest_leaderboard(contest_code)
     winners_count = contest["winners_count"] or 1
@@ -10122,7 +10512,8 @@ async def _contest_participation_callback_inner(update: Update, context: Context
     if data.startswith("comp_confirm_join:"):
         contest_code = data.split(":", 1)[1]
         user = query.from_user
-        if register_bot_user_and_check_new(user.id, user):
+        is_genuinely_new = register_bot_user_and_check_new(user.id, user)
+        if is_genuinely_new:
             await _notify_new_user_join(context, user)
 
         contest = get_contest(contest_code)
@@ -10171,6 +10562,11 @@ async def _contest_participation_callback_inner(update: Update, context: Context
         participant_code = generate_participant_code(contest_code)
         try:
             add_contest_participant(contest_code, user.id, display_name, participant_code)
+            if is_genuinely_new:
+                try:
+                    bump_channel_new_users(contest["chat_id"])
+                except Exception:
+                    logger.exception("تعذّر تحديث عدّاد المستخدمين الجدد لقناة المسابقة %s", contest.get("chat_id"))
         except sqlite3.IntegrityError:
             existing = get_contest_participant(contest_code, user.id)
             if existing:
@@ -10386,7 +10782,8 @@ async def _notify_contest_owner_vote_deducted(context: ContextTypes.DEFAULT_TYPE
         logger.warning("تعذّر إرسال إشعار خصم تصويت لصاحب المسابقة %s", owner_id)
 
 
-async def cancel_contest_vote_if_unsubscribed(context: ContextTypes.DEFAULT_TYPE, vote_doc) -> bool:
+async def cancel_contest_vote_if_unsubscribed(context: ContextTypes.DEFAULT_TYPE,
+                                               contest_code: str, voter_id: int, data: dict) -> bool:
     """نظام الأمان وإلغاء التصويت: يتحقق من استمرار اشتراك مصوّت واحد في القناة
     الإلزامية. إن غادرها بعد احتساب صوته يُلغي هذا النظام تلقائيًا:
     - يُسجَّل التصويت كـ«ملغى بسبب مغادرة القنوات الإلزامية» (لا يُحذف، للتوثيق) —
@@ -10401,42 +10798,37 @@ async def cancel_contest_vote_if_unsubscribed(context: ContextTypes.DEFAULT_TYPE
     - يسمح هذا للمصوّت بالتصويت من جديد إذا عاد واشترك لاحقًا (has_voted تعيد
       False لأي تصويت غير مؤكد)، مع خضوعه لنفس كابتشا منع الرشق من جديد.
     يعيد True إذا أُلغي التصويت فعليًا في هذه المرة.
-    """
-    data = vote_doc.to_dict()
+    تأخذ الآن (contest_code, voter_id, data) من كاش الأصوات بالذاكرة بدل
+    مستند Firestore حي — فلا قراءة إطلاقًا هنا، وتبقى الكتابة الوحيدة هي
+    فعليًا لحظة إلغاء تصويت حقيقي فقط."""
     if data.get("status", "confirmed") != "confirmed":
-        return False
-
-    voter_id = data.get("voter_id")
-    if not voter_id:
         return False
 
     subscribed = await is_user_subscribed(context, voter_id, force_refresh=True)
     if subscribed:
         return False
 
-    # كل عمليات Firestore هنا متزامنة (blocking) بطبيعة المكتبة المستخدمة في
-    # هذا المشروع؛ تُنفَّذ عبر asyncio.to_thread في خيط منفصل حتى لا تُجمِّد
-    # حلقة أحداث البوت (event loop) وتؤخّر باقي المستخدمين أثناء الفحص الدوري،
-    # سواء زاد عدد الأصوات أو تكرر الفحص كل 5 دقائق.
+    cancelled_at = datetime.now(timezone.utc).isoformat()
+    ref = fs_db().collection("contest_votes").document(f"{contest_code}_{voter_id}")
+    # كتابة فعلية لأن هذا تعديل حقيقي (إلغاء تصويت بسبب مغادرة قناة). تُنفَّذ
+    # عبر asyncio.to_thread حتى لا تُجمِّد حلقة أحداث البوت.
     await asyncio.to_thread(
-        vote_doc.reference.update,
-        {
-            "status": "cancelled_unsubscribed",
-            "cancelled_at": datetime.now(timezone.utc).isoformat(),
-        },
+        ref.update,
+        {"status": "cancelled_unsubscribed", "cancelled_at": cancelled_at},
     )
+    data["status"] = "cancelled_unsubscribed"
+    data["cancelled_at"] = cancelled_at
 
     amount = data.get("points_awarded") or 0
     owner_id = data.get("owner_id")
     if amount and owner_id:
         await asyncio.to_thread(reverse_contest_owner_points, owner_id, amount)
 
-    contest_code = data.get("contest_code")
     participant_id = data.get("participant_user_id")
-    if contest_code and participant_id:
-        contest = await asyncio.to_thread(get_contest, contest_code)
-        participant = await asyncio.to_thread(get_contest_participant, contest_code, participant_id)
-        new_votes = await asyncio.to_thread(get_participant_votes, contest_code, participant_id)
+    if participant_id:
+        contest = get_contest(contest_code)
+        participant = get_contest_participant(contest_code, participant_id)
+        new_votes = get_participant_votes(contest_code, participant_id)
 
         if contest and participant and contest.get("status") == "open" and participant.get("channel_message_id"):
             try:
@@ -10463,51 +10855,35 @@ async def cancel_contest_vote_if_unsubscribed(context: ContextTypes.DEFAULT_TYPE
 async def contest_votes_subscription_audit(context: ContextTypes.DEFAULT_TYPE):
     """فحص دوري (نظام الأمان): يمرّ على كل التصويتات المؤكدة في المسابقات
     المفتوحة حاليًا، ويتحقق من استمرار اشتراك كل مصوّت في القناة الإلزامية.
-    من غادر القناة تُلغى نقطته تلقائيًا (اكتشاف من خرج من القنوات وإلغاء
-    أصواتهم تلقائيًا دون انتظار أن يفتح البوت مجددًا).
-    كل عمليات القراءة من Firestore هنا متزامنة (blocking)، لذا تُنفَّذ داخل
-    خيط منفصل عبر asyncio.to_thread حتى لا تُجمِّد حلقة أحداث البوت (event
-    loop) الرئيسية أثناء الفحص، ولا يتأخر أي مستخدم آخر يتفاعل مع البوت في
-    نفس اللحظة، مهما كان عدد المسابقات أو الأصوات."""
-    client = fs_db()
+    من غادر القناة تُلغى نقطته تلقائيًا.
 
-    def _fetch_open_codes():
-        return [
-            c.to_dict().get("contest_code")
-            for c in client.collection("contests").where("status", "==", "open").stream()
-        ]
-
-    try:
-        open_codes = await asyncio.to_thread(_fetch_open_codes)
-    except Exception:
-        logger.exception("contest_votes_subscription_audit: فشل جلب المسابقات المفتوحة")
-        return
+    ⚡ لم تعد هذه الدالة تقرأ من Firestore إطلاقًا في التشغيل العادي — تعتمد
+    كليًا على كاش المسابقات بالذاكرة (_get_open_contest_codes + كاش الأصوات
+    المحمَّل مسبقًا من أحداث الإنشاء/المشاركة الفعلية). القراءة الوحيدة
+    المحتملة هي أول مرة تُفتح فيها مسابقة معيّنة بعد إعادة تشغيل البوت (تحميل
+    كسول لمرة واحدة)، وبعدها صفر قراءات مهما تكرر الفحص. لا كتابة إطلاقًا
+    إلا عند إلغاء تصويت حقيقي (مستخدم غادر القناة فعلًا)."""
+    open_codes = _get_open_contest_codes()
     if not open_codes:
         return
 
     checked = 0
     cancelled = 0
-    for contest_code in open_codes:
+    for contest_code in list(open_codes):
         if not contest_code:
             continue
-        try:
-            docs = await asyncio.to_thread(
-                lambda code=contest_code: list(
-                    client.collection("contest_votes").where("contest_code", "==", code).stream()
-                )
-            )
-        except Exception:
-            logger.exception("contest_votes_subscription_audit: فشل جلب أصوات المسابقة %s", contest_code)
-            continue
-        for d in docs:
-            if d.to_dict().get("status", "confirmed") != "confirmed":
+        votes = await asyncio.to_thread(_load_contest_votes, contest_code)
+        for voter_id, data in list(votes.items()):
+            if data.get("status", "confirmed") != "confirmed":
                 continue
             checked += 1
             try:
-                if await cancel_contest_vote_if_unsubscribed(context, d):
+                if await cancel_contest_vote_if_unsubscribed(context, contest_code, voter_id, data):
                     cancelled += 1
             except Exception:
-                logger.exception("contest_votes_subscription_audit: فشل فحص التصويت %s", d.id)
+                logger.exception(
+                    "contest_votes_subscription_audit: فشل فحص التصويت %s_%s", contest_code, voter_id
+                )
             await asyncio.sleep(0.05)
 
     if checked:
@@ -10987,7 +11363,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if query.data == "points_stats":
-        text, entities = build_points_statistics_message()
+        text, entities = await build_points_statistics_message(context)
         await query.edit_message_text(
             text=text, entities=entities,
             reply_markup=build_points_statistics_keyboard(),
@@ -12084,7 +12460,11 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
         await query.answer()
-        stats = get_full_bot_statistics()
+        # يُنفَّذ عبر asyncio.to_thread في خيط منفصل حتى لا تُجمِّد قراءة كل
+        # مستخدمي/قنوات البوت من Firestore حلقة أحداث البوت (event loop)
+        # وتُعلِّق باقي المستخدمين لحين انتهائها — نفس النمط المتّبع أصلًا
+        # في هذا المشروع لأي عملية Firestore ثقيلة داخل async handler.
+        stats = await asyncio.to_thread(get_full_bot_statistics)
         required_members = await get_required_channels_total_members(context)
         text, entities = build_owner_stats_message(stats, required_members)
         await query.edit_message_text(
@@ -12173,20 +12553,6 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(
             text=text, entities=entities,
             reply_markup=build_owner_maintenance_section_keyboard(),
-        )
-        return
-
-    if query.data.startswith("owner_maintenance_errors:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        await query.answer()
-        page = int(query.data.split(":", 1)[1])
-        errors = get_bot_errors()
-        text, entities = build_owner_maintenance_errors_message(errors, page)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_maintenance_errors_keyboard(errors, page),
         )
         return
 
@@ -12376,7 +12742,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
-        stats = get_giveaways_statistics()
+        stats = await asyncio.to_thread(get_giveaways_statistics)
         text, entities = build_admgw_stats_message(stats)
         await query.edit_message_text(
             text=text, entities=entities,
@@ -12498,7 +12864,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
-        stats = get_contests_statistics()
+        stats = await asyncio.to_thread(get_contests_statistics)
         text, entities = build_admct_stats_message(stats)
         await query.edit_message_text(
             text=text, entities=entities,
@@ -12621,7 +12987,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not is_owner(query.from_user.id):
             await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
             return
-        stats = get_quick_roulette_statistics()
+        stats = await asyncio.to_thread(get_quick_roulette_statistics)
         text, entities = build_admrr_stats_message(stats)
         await query.edit_message_text(
             text=text, entities=entities,
@@ -15080,16 +15446,10 @@ async def _go_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """يسجّل أي خطأ غير متوقع بدل أن يختفي بصمت — هذا كان السبب في تعذّر تشخيص
     مشاكل مثل «الزر لا يستجيب أحيانًا» أو «لم تُرسل رسالة عند انتهاء الوقت».
-    كما يحفظ نص الخطأ في Firestore ليظهر ضمن «⚠️ عرض الأخطاء» في قسم صيانة
-    البوت لدى المالك."""
+    يُسجَّل الخطأ في السجلّ المحلي (logger) فقط — لم يعد يُكتب في Firestore
+    (مجموعة bot_errors حُذفت) حتى لا تُستهلك حصة الكتابة اليومية بسبب أخطاء
+    متكررة."""
     logger.exception("خطأ غير متوقع أثناء معالجة تحديث: %s", update, exc_info=context.error)
-    try:
-        tb_text = "".join(
-            traceback.format_exception(type(context.error), context.error, context.error.__traceback__)
-        )
-    except Exception:
-        tb_text = str(context.error)
-    log_bot_error(tb_text[-2000:])
 
 
 def main():
@@ -15260,4 +15620,4 @@ def main():
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    main() 
+    main()
