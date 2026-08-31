@@ -6930,6 +6930,7 @@ def build_owner_maintenance_section_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton("📶 فحص سرعة الاستجابة", callback_data="owner_maintenance_speedtest", style="primary"),
         InlineKeyboardButton("📊 عرض حالة البوت", callback_data="owner_maintenance_status", style="primary"),
     ])
+    rows.append([InlineKeyboardButton("🧪 حذف مستخدم اختباري", callback_data="owner_reset_test_user", style="danger")])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
                                       **emoji_kwargs("back_section_btn"))])
     return InlineKeyboardMarkup(rows)
@@ -11958,2161 +11959,2234 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # ملاحظة: فحص الاشتراك الإجباري يتم مركزيًا عبر _subscription_gate_handler
     # (group=-1) قبل الوصول إلى هذا المعالج أصلاً — لا حاجة لتكراره هنا.
     query = update.callback_query
-    await query.answer()
-
-    if query.data == "my_stats":
-        if get_setting("points_enabled") != "1":
-            await query.answer("🚫 القسم غير متاح حاليًا.", show_alert=True)
-            return
-        text, entities = build_points_message(query.from_user.id)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_points_keyboard(query.from_user.id),
-        )
-        return
-
-    if query.data == "points_stats":
-        text, entities = await build_points_statistics_message(context)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_points_statistics_keyboard(),
-        )
-        return
-
-    if query.data == "owner_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_owner_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_section_keyboard(),
-        )
-        return
-
-    if query.data == "owner_points_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_owner_points_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_points_section_keyboard(),
-        )
-        return
-
-    if query.data == "points_manage_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_points_manage_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_points_manage_section_keyboard(),
-        )
-        return
-
-    if query.data in ("points_manage_add_lookup", "points_manage_deduct_lookup"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        action = "add" if query.data == "points_manage_add_lookup" else "deduct"
-        context.user_data["awaiting"] = f"points_manual_{action}_lookup"
-        verb = "إضافة" if action == "add" else "خصم"
-        await query.edit_message_text(
-            f"✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) لـ{verb} النقاط منه ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="points_manage_section", style="danger")
-            ]]),
-        )
-        return
-
-    # قائمة تصفّح المستخدمين (نقاط + إحالات) قابلة للربط من عدة أقسام —
-    # كل قسم يمرّر بادئة (prefix) خاصة به وزر رجوع خاص به، مع نفس المنطق
-    # والعرض الموحّد. لإضافة القائمة إلى قسم جديد يكفي إضافة بادئة هنا.
-    BROWSE_LIST_PREFIXES = {
-        "points_browse": "points_manage_section",
-        "users_browse": "owner_users_section",
-    }
-
-    if query.data in (f"{p}:noop" for p in BROWSE_LIST_PREFIXES):
-        await query.answer()
-        return
-
-    _browse_list_prefix = next(
-        (p for p in BROWSE_LIST_PREFIXES if query.data.startswith(f"{p}:list:")), None,
-    )
-    if _browse_list_prefix:
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        page_str = query.data.split(":", 2)[2]
-        page = int(page_str) if page_str.isdigit() else 1
-        rows = get_all_known_users_with_points()
-        text, entities = build_users_points_browse_message(rows, page)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_users_points_browse_keyboard(
-                rows, page, callback_prefix=_browse_list_prefix,
-                back_callback=BROWSE_LIST_PREFIXES[_browse_list_prefix],
-            ),
-        )
-        return
-
-    _browse_pick_prefix = next(
-        (p for p in BROWSE_LIST_PREFIXES if query.data.startswith(f"{p}:pick:")), None,
-    )
-    if _browse_pick_prefix:
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, _, uid_str, page_str = query.data.split(":", 3)
-        target_id = int(uid_str)
-        back_page = int(page_str) if page_str.isdigit() else 1
-        row = get_bot_user(target_id)
-        if not row:
-            await query.answer("⚠️ تعذّر العثور على بيانات هذا المستخدم.", show_alert=True)
-            return
-        referral = get_referral(target_id)
-        row = FSRow({
-            "user_id": target_id,
-            "username": row.get("username"),
-            "first_name": row.get("first_name"),
-            "points": get_points(target_id),
-            "referred_count": int(referral.get("referred_count") or 0) if referral else 0,
-        })
-        text, entities = build_user_points_profile_message(row)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_user_points_profile_keyboard(
-                target_id, back_page, browse_prefix=_browse_pick_prefix,
-            ),
-        )
-        return
-
-    if query.data.startswith("points_manual_add:") or query.data.startswith("points_manual_deduct:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        action = "add" if query.data.startswith("points_manual_add:") else "deduct"
-        parts = query.data.split(":")
-        uid_str, page_str = parts[1], parts[2]
-        browse_prefix = parts[3] if len(parts) > 3 else "points_browse"
-        target_id = int(uid_str)
-        back_page = int(page_str) if page_str.isdigit() else 1
-        context.user_data["awaiting"] = f"points_manual_{action}_amount"
-        context.user_data["points_manual_target_id"] = target_id
-        context.user_data["points_manual_back_page"] = back_page
-        context.user_data["points_manual_browse_prefix"] = browse_prefix
-        verb = "إضافتها" if action == "add" else "خصمها"
-        await query.edit_message_text(
-            f"✍️ أرسل الآن عدد النقاط المراد {verb} (رقم صحيح موجب) ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "🔙 رجوع", callback_data=f"{browse_prefix}:pick:{target_id}:{back_page}", style="danger",
-                )
-            ]]),
-        )
-        return
-
-    if query.data == "owner_withdraw_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_owner_withdraw_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_withdraw_section_keyboard(),
-        )
-        return
-
-    if query.data.startswith("wd_complete:") or query.data.startswith("wd_reject:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
-            return
-        is_reject = query.data.startswith("wd_reject:")
-        request_id = query.data.split(":", 1)[1]
-        req = get_withdraw_request(request_id)
-        if not req:
-            await query.answer("⚠️ هذا الطلب غير موجود.", show_alert=True)
-        elif req.get("status") != "pending":
-            await query.answer("✅ تم إغلاق هذا الطلب مسبقًا.", show_alert=True)
-        else:
-            if is_reject:
-                mark_withdraw_rejected(request_id)
-                await query.answer("❌ تم رفض الطلب وإعادة النقاط لرصيد المستخدم.")
-                notify_text = (
-                    "❌ تم رفض طلب سحبك.\n\n"
-                    f"💎 عدد النقاط: {req.get('points_amount', 0)}\n"
-                    "📌 الحالة: 🔴 مرفوض\n"
-                    "↩️ تمت إعادة النقاط إلى رصيدك."
-                )
-            else:
-                mark_withdraw_completed(request_id)
-                await query.answer("✅ تم قبول الطلب وتعليمه كمكتمل.")
-                notify_text = (
-                    "🎉 تم قبول طلب سحبك وتحويل مكافأتك!\n\n"
-                    f"💎 عدد النقاط المسحوبة: {req.get('points_amount', 0)}\n"
-                    "📌 الحالة: 🟢 مقبول"
-                )
-            try:
-                await context.bot.send_message(chat_id=req["user_id"], text=notify_text)
-            except Exception:
-                pass
-        text, entities = build_owner_withdraw_section_message()
-        try:
-            await query.edit_message_text(
-                text=text, entities=entities,
-                reply_markup=build_owner_withdraw_section_keyboard(),
-            )
-        except Exception:
-            pass
-        return
-
-    if query.data == "wd_channel_settings":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_withdraw_channel_settings_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_withdraw_channel_settings_keyboard(),
-        )
-        return
-
-    if query.data == "wd_channel_set":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "withdraw_channel_set"
-        await query.edit_message_text(
-            "✍️ أرسل الآن يوزر القناة (مثال: @channel أو رابط t.me/channel).\n"
-            "⚠️ تأكد من إضافة البوت كمشرف (Admin) في القناة أولًا حتى يتمكن من الإرسال إليها ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="wd_channel_settings", style="danger"),
-            ]]),
-        )
-        return
-
-    if query.data == "wd_channel_clear":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        clear_withdraw_channel()
-        log_admin_action(
-            "change_settings", query.from_user.id, details="إلغاء قناة استقبال طلبات السحب",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        await query.answer("✅ تم إلغاء قناة استقبال السحب.")
-        text, entities = build_withdraw_channel_settings_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_withdraw_channel_settings_keyboard(),
-        )
-        return
-
-    if query.data == "withdraw_locked":
-        await query.answer(
-            "🔒 رصيدك غير كافٍ لسحب هذه القيمة حاليًا، أو أن الخيار غير مفعّل من المالك بعد.",
-            show_alert=True,
-        )
-        return
-
-    if query.data == "withdraw_pending":
-        await query.answer(
-            "🕐 لديك طلب سحب قيد المعالجة بالفعل، انتظر إغلاقه أولاً — تابعه من «📋 سجل السحب».",
-            show_alert=True,
-        )
-        return
-
-    if query.data == "wd_stars_menu":
-        if get_setting("points_enabled") != "1":
-            await query.answer("🚫 القسم غير متاح حاليًا.", show_alert=True)
-            return
-        text, entities = build_stars_withdraw_menu_message(query.from_user.id)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_stars_withdraw_menu_keyboard(query.from_user.id),
-        )
-        return
-
-    if query.data == "wd_history_noop":
-        await query.answer()
-        return
-
-    if query.data.startswith("wd_history:"):
-        page_str = query.data.split(":", 1)[1]
-        page = int(page_str) if page_str.isdigit() else 1
-        text, entities = build_wd_history_message(query.from_user.id, page)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_wd_history_keyboard(query.from_user.id, page),
-        )
-        return
-
-    if query.data.startswith("wd_stars_pick:"):
-        user = query.from_user
-        if get_setting("points_enabled") != "1":
-            await query.answer("🚫 القسم غير متاح حاليًا.", show_alert=True)
-            return
-        tier_str = query.data.split(":", 1)[1]
-        tier = int(tier_str) if tier_str.isdigit() else 0
-        if tier not in STAR_WITHDRAW_TIERS:
-            await query.answer("⚠️ خيار غير صالح.", show_alert=True)
-            return
-        # مانع ضغط متكرر: قفل مؤقت في user_data يمنع تنفيذ طلبين من نفس
-        # المستخدم في نفس اللحظة قبل أن تُغلق المعاملة الذرية الأولى.
-        if context.user_data.get("wd_processing"):
-            await query.answer("⏳ جارٍ معالجة طلبك، فضلاً انتظر لحظة.", show_alert=True)
-            return
-        if has_pending_withdraw_request_any(user.id):
-            await query.answer(
-                "🕐 لديك طلب سحب قيد المعالجة بالفعل، انتظر إغلاقه أولاً.", show_alert=True,
-            )
-            return
-        cost = get_star_cost(tier)
-        if cost <= 0:
-            await query.answer("⚠️ هذا الخيار غير مفعّل حاليًا من المالك.", show_alert=True)
-            return
-        pts = get_points(user.id)
-        if pts < cost:
-            await query.answer(
-                f"🔒 تحتاج {cost} نقطة على الأقل لسحب ⭐{tier}، رصيدك الحالي: {pts} نقطة.",
-                show_alert=True,
-            )
-            return
-        # التواصل مع صاحب طلب السحب يتم عبر يوزر تليجرام مباشرة، لذا لا يمكن
-        # إنشاء أي طلب لمستخدم بلا اسم مستخدم (username) — نطلب منه إضافته
-        # أولاً من إعدادات تليجرام قبل السماح له بالمتابعة.
-        if not user.username:
-            await query.answer(
-                "⚠️ يجب إضافة اسم مستخدم (Username) في إعدادات تليجرام أولاً "
-                "حتى نتمكن من التواصل معك، ثم اضغط على زر السحب مجددًا.",
-                show_alert=True,
-            )
-            return
-
-        context.user_data["wd_processing"] = True
-        try:
-            display_name = user.first_name or user.username or str(user.id)
-            request_id = await asyncio.to_thread(
-                create_star_withdraw_request, user.id, display_name, user.username, tier, cost,
-            )
-        finally:
-            context.user_data.pop("wd_processing", None)
-
-        if not request_id:
-            await query.answer(
-                "⚠️ رصيدك لم يعد كافيًا لهذا الطلب (ربما تغيّر للتو)، حدّث الصفحة وحاول مجددًا.",
-                show_alert=True,
-            )
-            return
-
-        await query.answer(
-            f"✅ تم إرسال طلب سحب ⭐{tier} بنجاح!\n💎 تم خصم {cost} نقطة.\n📌 الحالة: تحت المراجعة",
-            show_alert=True,
-        )
-
-        text, entities = build_points_message(user.id)
-        try:
-            await query.edit_message_text(
-                text=text, entities=entities,
-                reply_markup=build_points_keyboard(user.id),
-            )
-        except Exception:
-            pass
-
-        wd_request_notify_markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ قبول", callback_data=f"wd_stars_accept:{request_id}", style="success"),
-            InlineKeyboardButton("❌ رفض", callback_data=f"wd_stars_reject:{request_id}", style="danger"),
-        ]])
-        wd_request_notify_text = (
-            "⭐ طلب سحب نجوم جديد\n\n"
-            f"👤 المستخدم: {display_name} (ID: {user.id})\n"
-            f"🔗 يوزر: @{user.username}\n"
-            f"⭐ القيمة: {tier} نجمة\n"
-            f"💎 النقاط المخصومة: {cost}"
-        )
-
-        for owner_id in OWNER_IDS:
-            try:
-                await context.bot.send_message(
-                    chat_id=owner_id,
-                    text=wd_request_notify_text,
-                    reply_markup=wd_request_notify_markup,
-                )
-            except Exception:
-                pass
-
-        withdraw_channel = get_withdraw_channel()
-        if withdraw_channel:
-            try:
-                await context.bot.send_message(
-                    chat_id=withdraw_channel["chat_id"],
-                    text=wd_request_notify_text,
-                    reply_markup=wd_request_notify_markup,
-                )
-            except Exception:
-                pass
-        return
-
-    if (query.data.startswith("wd_stars_accept:") or query.data.startswith("wd_stars_reject:")
-            or query.data.startswith("wd_stars_complete:")):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
-            return
-        action, request_id = query.data.split(":", 1)
-        req = get_withdraw_request(request_id)
-        notify_text = None
-        if not req:
-            await query.answer("⚠️ هذا الطلب غير موجود.", show_alert=True)
-        elif action == "wd_stars_reject":
-            if mark_star_withdraw_rejected(request_id):
-                await query.answer("❌ تم رفض الطلب وإعادة النقاط لرصيد المستخدم.")
-                notify_text = (
-                    "❌ تم رفض طلب سحب النجوم الخاص بك.\n\n"
-                    f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة\n"
-                    f"💎 النقاط: {req.get('points_amount', 0)}\n"
-                    "📌 الحالة: 🔴 مرفوض\n"
-                    "↩️ تمت إعادة النقاط إلى رصيدك."
-                )
-            else:
-                await query.answer("✅ تم إغلاق هذا الطلب مسبقًا.", show_alert=True)
-        elif action == "wd_stars_accept":
-            if mark_star_withdraw_accepted(request_id):
-                await query.answer("🟢 تم قبول الطلب. أرسل النجوم يدويًا ثم اضغط «📤 تم الإرسال».")
-                notify_text = (
-                    "🟢 تم قبول طلب سحب النجوم الخاص بك، وسيتم تحويلها قريبًا.\n\n"
-                    f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة"
-                )
-            else:
-                await query.answer("✅ تم إغلاق هذا الطلب مسبقًا.", show_alert=True)
-        else:  # wd_stars_complete
-            if mark_star_withdraw_completed(request_id):
-                await query.answer("✅ تم تعليم الطلب كمكتمل.")
-                notify_text = (
-                    "🎉 تم إرسال نجومك بنجاح!\n\n"
-                    f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة\n"
-                    "📌 الحالة: ✅ مكتمل"
-                )
-            else:
-                await query.answer("⚠️ تعذّر إتمام الطلب (يجب أن يكون بحالة «مقبول» أولًا).", show_alert=True)
-        if notify_text and req:
-            try:
-                await context.bot.send_message(chat_id=req["user_id"], text=notify_text)
-            except Exception:
-                pass
-        text, entities = build_owner_withdraw_section_message()
-        try:
-            await query.edit_message_text(
-                text=text, entities=entities,
-                reply_markup=build_owner_withdraw_section_keyboard(),
-            )
-        except Exception:
-            pass
-        return
-
-    if query.data == "star_settings":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_star_settings_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_star_settings_keyboard(),
-        )
-        return
-
-    if query.data.startswith("star_edit:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        tier_str = query.data.split(":", 1)[1]
-        tier = int(tier_str) if tier_str.isdigit() else 0
-        if tier not in STAR_WITHDRAW_TIERS:
-            await query.answer("⚠️ قيمة غير صالحة.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "star_cost_edit"
-        context.user_data["star_cost_edit_tier"] = tier
-        await query.edit_message_text(
-            f"✍️ أرسل الآن عدد النقاط المطلوبة لسحب ⭐{tier} نجمة (رقم صحيح ≥ صفر) ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="star_settings", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "owner_sub_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_owner_sub_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_section_keyboard(),
-        )
-        return
-
-    if query.data == "owner_sub_add":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "admin_channel_add_username"
-        await query.edit_message_text(
-            "✍️ أرسل الآن يوزر القناة الجديدة (مثال: @channel أو رابط t.me/channel) ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_section", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data in ("owner_sub_add_autodel_yes", "owner_sub_add_autodel_no"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        username = context.user_data.pop("admin_new_channel_username", None)
-        target = context.user_data.pop("admin_new_channel_target", None)
-        if not username:
-            await query.answer("⚠️ انتهت صلاحية هذه العملية، ابدأ من جديد.", show_alert=True)
-            return
-        auto_delete = query.data == "owner_sub_add_autodel_yes"
-        channel_id = create_required_channel(
-            username=username, target_count=target, auto_delete_on_target=auto_delete,
-            added_by=query.from_user.id,
-        )
-        log_admin_action(
-            "add_channel", query.from_user.id, details=f"@{username}",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        warning = await _check_bot_can_verify_channel(context, username)
-        channel = get_required_channel(channel_id)
-        await query.answer("✅ تمت إضافة القناة بنجاح")
-        text, entities = await build_owner_sub_channel_message(context, channel)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_channel_keyboard(channel),
-        )
-        if warning:
-            try:
-                await context.bot.send_message(chat_id=query.from_user.id, text=warning)
-            except Exception:
-                pass
-        return
-
-    if query.data.startswith("owner_sub_list:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        page = int(query.data.split(":", 1)[1])
-        channels = get_required_channels()
-        text, entities = build_owner_sub_list_message(channels)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_list_keyboard(channels, page),
-        )
-        return
-
-    if query.data.startswith("owner_sub_check_target_now:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        channel_id = int(query.data.split(":", 1)[1])
-        channel = get_required_channel(channel_id)
-        if not channel:
-            await query.answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
-            return
-        status, info = await _check_and_maybe_delete_channel_target(context, channel)
-        if status == "error":
-            await query.answer(
-                f"⚠️ تعذّر التحقق ({info}). الأرجح أن البوت غير مضاف كمشرف في هذه القناة.",
-                show_alert=True,
-            )
-            return
-        if status == "skipped":
-            await query.answer("⚠️ لا يوجد هدف محدد أو الحذف التلقائي غير مفعّل لهذه القناة.", show_alert=True)
-            return
-        if status == "not_reached":
-            await query.answer(
-                f"📊 لم يصل الهدف بعد ({info}/{channel.get('target_count')} عضو).",
-                show_alert=True,
-            )
-            return
-        # status == "deleted"
-        await query.answer(f"✅ تم بلوغ الهدف ({info} عضو) — حُذفت القناة من الاشتراك الإجباري.", show_alert=True)
-        text, entities = build_owner_sub_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_section_keyboard(),
-        )
-        return
-
-    if query.data.startswith("owner_sub_edit_button_text:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        channel_id = int(query.data.split(":", 1)[1])
-        context.user_data["awaiting"] = "admin_channel_edit_button_text"
-        context.user_data["admin_channel_id"] = channel_id
-        await query.edit_message_text(
-            "✍️ أرسل الآن الاسم الذي تريد أن يظهر في زر هذه القناة بدل اليوزر الخام "
-            "(مثال: 𝐑𝐎𝐔𝐋𝐄𝐓𝐓𝐄 𝐕𝐎𝐑𝐓𝐄𝐗)، أو أرسل - لحذف الاسم المخصص والعودة لعرض اليوزر ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_sub_channel:{channel_id}", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data.startswith("owner_sub_edit_username:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        channel_id = int(query.data.split(":", 1)[1])
-        context.user_data["awaiting"] = "admin_channel_edit_username"
-        context.user_data["admin_channel_id"] = channel_id
-        await query.edit_message_text(
-            "✍️ أرسل الآن اليوزر الجديد لهذه القناة (مثال: @channel أو رابط t.me/channel) ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_sub_channel:{channel_id}", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data.startswith("owner_sub_edit_link:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        channel_id = int(query.data.split(":", 1)[1])
-        context.user_data["awaiting"] = "admin_channel_edit_link"
-        context.user_data["admin_channel_id"] = channel_id
-        await query.edit_message_text(
-            "✍️ أرسل الآن رابط الانضمام الجديد لهذه القناة (مثال: https://t.me/channel أو رابط دعوة خاص) ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_sub_channel:{channel_id}", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data.startswith("owner_sub_edit_target:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        channel_id = int(query.data.split(":", 1)[1])
-        context.user_data["awaiting"] = "admin_channel_edit_target"
-        context.user_data["admin_channel_id"] = channel_id
-        await query.edit_message_text(
-            "✍️ أرسل الآن عدد الأعضاء المستهدف لهذه القناة (رقم)، أو أرسل 0 لإلغاء الهدف ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_sub_channel:{channel_id}", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data.startswith("owner_sub_toggle_autodel:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        channel_id = int(query.data.split(":", 1)[1])
-        channel = get_required_channel(channel_id)
-        if not channel:
-            await query.answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
-            return
-        new_value = not bool(channel.get("auto_delete_on_target"))
-        update_required_channel(channel_id, auto_delete_on_target=new_value)
-        channel["auto_delete_on_target"] = new_value
-        await query.answer("🔄 سيتم حذفها تلقائيًا عند الهدف" if new_value else "♾️ ستبقى دائمًا بدون حذف")
-        text, entities = await build_owner_sub_channel_message(context, channel)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_channel_keyboard(channel),
-        )
-        return
-
-    if query.data.startswith("owner_sub_toggle_enabled:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        channel_id = int(query.data.split(":", 1)[1])
-        channel = get_required_channel(channel_id)
-        if not channel:
-            await query.answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
-            return
-        new_value = not channel.get("enabled", True)
-        update_required_channel(channel_id, enabled=new_value)
-        channel["enabled"] = new_value
-        await query.answer("🟢 تم تفعيل القناة" if new_value else "🔴 تم تعطيل القناة")
-        text, entities = await build_owner_sub_channel_message(context, channel)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_channel_keyboard(channel),
-        )
-        return
-
-    if query.data.startswith("owner_sub_channel_stats:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        channel_id = int(query.data.split(":", 1)[1])
-        channel = get_required_channel(channel_id)
-        if not channel:
-            await query.answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
-            return
-        text, entities = await build_owner_sub_channel_stats_message(context, channel)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_channel_stats_keyboard(channel_id),
-        )
-        return
-
-    if query.data.startswith("owner_sub_delete_confirm:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        channel_id = int(query.data.split(":", 1)[1])
-        _deleted_channel = get_required_channel(channel_id)
-        delete_required_channel(channel_id)
-        _deleted_username = _deleted_channel.get("username") if _deleted_channel else None
-        log_admin_action(
-            "delete_channel", query.from_user.id,
-            details=f"@{_deleted_username}" if _deleted_username else f"معرف القناة: {channel_id}",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        await query.answer("🗑️ تم حذف القناة بنجاح")
-        channels = get_required_channels()
-        text, entities = build_owner_sub_list_message(channels)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_list_keyboard(channels, 1),
-        )
-        return
-
-    if query.data.startswith("owner_sub_delete:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        channel_id = int(query.data.split(":", 1)[1])
-        channel = get_required_channel(channel_id)
-        if not channel:
-            await query.answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
-            return
-        text, entities = build_owner_sub_delete_confirm_message(channel)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_delete_confirm_keyboard(channel_id),
-        )
-        return
-
-    if query.data.startswith("owner_sub_channel:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        channel_id = int(query.data.split(":", 1)[1])
-        channel = get_required_channel(channel_id)
-        if not channel:
-            await query.answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
-            return
-        text, entities = await build_owner_sub_channel_message(context, channel)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_channel_keyboard(channel),
-        )
-        return
-
-    if query.data == "owner_sub_reorder":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        channels = get_required_channels()
-        text, entities = build_owner_sub_reorder_message(channels)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_reorder_keyboard(channels),
-        )
-        return
-
-    if query.data.startswith("owner_sub_move_up:") or query.data.startswith("owner_sub_move_down:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        channel_id = int(query.data.split(":", 1)[1])
-        direction = -1 if query.data.startswith("owner_sub_move_up:") else 1
-        move_required_channel(channel_id, direction)
-        await query.answer("✅ تم تحديث الترتيب")
-        channels = get_required_channels()
-        text, entities = build_owner_sub_reorder_message(channels)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_reorder_keyboard(channels),
-        )
-        return
-
-    if query.data == "owner_sub_stats_all":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = await build_owner_sub_stats_all_message(context)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_sub_stats_all_keyboard(),
-        )
-        return
-
-    if query.data == "owner_sub_noop":
-        await query.answer()
-        return
-
-    if query.data == "owner_users_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_owner_users_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_users_section_keyboard(),
-        )
-        return
-
-    if query.data in ("owner_users_search", "owner_users_view"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "admin_user_lookup"
-        await query.edit_message_text(
-            "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "owner_users_ban":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "admin_user_ban_lookup"
-        await query.edit_message_text(
-            "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) المراد حظره ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "owner_users_unban":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "admin_user_unban_lookup"
-        await query.edit_message_text(
-            "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) المراد فك حظره ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data.startswith("owner_users_banned:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        page = int(query.data.split(":", 1)[1])
-        banned_users = get_banned_bot_users()
-        text, entities = build_owner_users_banned_list_message(banned_users)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_users_banned_list_keyboard(banned_users, page),
-        )
-        return
-
-    if query.data == "owner_users_stats":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        stats = get_bot_users_stats()
-        text, entities = build_owner_users_stats_message(stats)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_users_stats_keyboard(),
-        )
-        return
-
-    if query.data.startswith("owner_users_profile_ban:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        target_id = int(query.data.split(":", 1)[1])
-        if target_id in OWNER_IDS:
-            await query.answer("⚠️ لا يمكن حظر مالك البوت.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "admin_user_ban_reason"
-        context.user_data["admin_ban_target_id"] = target_id
-        await query.edit_message_text(
-            "✍️ أرسل الآن سبب الحظر، أو أرسل - لتركه بدون سبب ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_users_profile:{target_id}", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data.startswith("owner_users_profile_unban:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        target_id = int(query.data.split(":", 1)[1])
-        unban_bot_user(target_id)
-        log_admin_action(
-            "unban_user", query.from_user.id, details=f"معرف المستخدم: {target_id}",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        await query.answer("✅ تم فك الحظر بنجاح")
-        row = get_bot_user(target_id) or FSRow({"user_id": target_id})
-        text, entities = build_user_profile_message(row)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_user_profile_keyboard(row),
-        )
-        return
-
-    if query.data.startswith("owner_users_profile:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        target_id = int(query.data.split(":", 1)[1])
-        row = get_bot_user(target_id) or FSRow({"user_id": target_id})
-        text, entities = build_user_profile_message(row)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_user_profile_keyboard(row),
-        )
-        return
-
-    if query.data == "owner_users_noop":
-        await query.answer()
-        return
-
-    if query.data == "owner_admins_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_owner_admins_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_admins_section_keyboard(),
-        )
-        return
-
-    if query.data == "owner_admins_add":
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
-            await query.answer("⛔ ليس لديك صلاحية إضافة مشرفين.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "mod_add_lookup"
-        await query.edit_message_text(
-            "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) لإضافته كمشرف ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_admins_section", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data.startswith("owner_admins_list:"):
-        _, mode, page_str = query.data.split(":", 2)
-        needs_owner = mode in ("perms", "remove")
-        if needs_owner and not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
-            return
-        if not needs_owner and not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        page = int(page_str) if page_str.isdigit() else 1
-        mods = list_moderators()
-        text, entities = build_owner_admins_list_message(mods, mode)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_admins_list_keyboard(mods, mode, page),
-        )
-        return
-
-    if query.data == "owner_admins_noop":
-        await query.answer()
-        return
-
-    if query.data.startswith("owner_admins_pick:"):
-        _, mode, uid_str = query.data.split(":", 2)
-        target_id = int(uid_str)
-        if mode == "view":
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
-                await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+    # ⚠️ إصلاح: كنا نستدعي query.answer() هنا مباشرة وبدون أي نص، وهذا كان
+    # "يستهلك" الرد الوحيد المسموح به على الـ callback من تيليجرام. فأي محاولة
+    # لاحقة لعرض تنبيه (show_alert=True) — مثل رسالة "القسم غير متاح حاليًا"
+    # عند إيقاف قسم الربح — كانت تُرسَل لكنها لا تظهر أبدًا، لأن تيليجرام
+    # يسمح برد واحد فقط لكل ضغطة زر. الحل: نؤجل الرد الفارغ إلى أن نتأكد أن
+    # أي فرع من الفروع أدناه لم يرسل رده الخاص (ومنها التنبيهات) بنفسه.
+    _cb_answered = False
+    async def _cb_answer(*args, **kwargs):
+        nonlocal _cb_answered
+        _cb_answered = True
+        await query.answer(*args, **kwargs)
+
+    try:
+        if query.data == "my_stats":
+            if get_setting("points_enabled") != "1":
+                await _cb_answer("🚫 القسم غير متاح حاليًا.", show_alert=True)
                 return
-        elif not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
-            return
-        row = get_moderator(target_id)
-        if not row:
-            await query.answer("⚠️ هذا المشرف لم يعد موجودًا.", show_alert=True)
-            return
-        if mode == "remove":
-            text, entities = build_moderator_delete_confirm_message(row)
+            text, entities = build_points_message(query.from_user.id)
             await query.edit_message_text(
                 text=text, entities=entities,
-                reply_markup=build_moderator_delete_confirm_keyboard(target_id),
+                reply_markup=build_points_keyboard(query.from_user.id),
             )
-        elif mode == "perms":
+            return
+
+        if query.data == "points_stats":
+            text, entities = await build_points_statistics_message(context)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_points_statistics_keyboard(),
+            )
+            return
+
+        if query.data == "owner_section":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_section_keyboard(),
+            )
+            return
+
+        if query.data == "owner_points_section":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_points_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_points_section_keyboard(),
+            )
+            return
+
+        if query.data == "points_manage_section":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_points_manage_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_points_manage_section_keyboard(),
+            )
+            return
+
+        if query.data in ("points_manage_add_lookup", "points_manage_deduct_lookup"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            action = "add" if query.data == "points_manage_add_lookup" else "deduct"
+            context.user_data["awaiting"] = f"points_manual_{action}_lookup"
+            verb = "إضافة" if action == "add" else "خصم"
+            await query.edit_message_text(
+                f"✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) لـ{verb} النقاط منه ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="points_manage_section", style="danger")
+                ]]),
+            )
+            return
+
+        # قائمة تصفّح المستخدمين (نقاط + إحالات) قابلة للربط من عدة أقسام —
+        # كل قسم يمرّر بادئة (prefix) خاصة به وزر رجوع خاص به، مع نفس المنطق
+        # والعرض الموحّد. لإضافة القائمة إلى قسم جديد يكفي إضافة بادئة هنا.
+        BROWSE_LIST_PREFIXES = {
+            "points_browse": "points_manage_section",
+            "users_browse": "owner_users_section",
+        }
+
+        if query.data in (f"{p}:noop" for p in BROWSE_LIST_PREFIXES):
+            await _cb_answer()
+            return
+
+        _browse_list_prefix = next(
+            (p for p in BROWSE_LIST_PREFIXES if query.data.startswith(f"{p}:list:")), None,
+        )
+        if _browse_list_prefix:
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            page_str = query.data.split(":", 2)[2]
+            page = int(page_str) if page_str.isdigit() else 1
+            rows = get_all_known_users_with_points()
+            text, entities = build_users_points_browse_message(rows, page)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_users_points_browse_keyboard(
+                    rows, page, callback_prefix=_browse_list_prefix,
+                    back_callback=BROWSE_LIST_PREFIXES[_browse_list_prefix],
+                ),
+            )
+            return
+
+        _browse_pick_prefix = next(
+            (p for p in BROWSE_LIST_PREFIXES if query.data.startswith(f"{p}:pick:")), None,
+        )
+        if _browse_pick_prefix:
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, _, uid_str, page_str = query.data.split(":", 3)
+            target_id = int(uid_str)
+            back_page = int(page_str) if page_str.isdigit() else 1
+            row = get_bot_user(target_id)
+            if not row:
+                await _cb_answer("⚠️ تعذّر العثور على بيانات هذا المستخدم.", show_alert=True)
+                return
+            referral = get_referral(target_id)
+            row = FSRow({
+                "user_id": target_id,
+                "username": row.get("username"),
+                "first_name": row.get("first_name"),
+                "points": get_points(target_id),
+                "referred_count": int(referral.get("referred_count") or 0) if referral else 0,
+            })
+            text, entities = build_user_points_profile_message(row)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_user_points_profile_keyboard(
+                    target_id, back_page, browse_prefix=_browse_pick_prefix,
+                ),
+            )
+            return
+
+        if query.data.startswith("points_manual_add:") or query.data.startswith("points_manual_deduct:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            action = "add" if query.data.startswith("points_manual_add:") else "deduct"
+            parts = query.data.split(":")
+            uid_str, page_str = parts[1], parts[2]
+            browse_prefix = parts[3] if len(parts) > 3 else "points_browse"
+            target_id = int(uid_str)
+            back_page = int(page_str) if page_str.isdigit() else 1
+            context.user_data["awaiting"] = f"points_manual_{action}_amount"
+            context.user_data["points_manual_target_id"] = target_id
+            context.user_data["points_manual_back_page"] = back_page
+            context.user_data["points_manual_browse_prefix"] = browse_prefix
+            verb = "إضافتها" if action == "add" else "خصمها"
+            await query.edit_message_text(
+                f"✍️ أرسل الآن عدد النقاط المراد {verb} (رقم صحيح موجب) ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "🔙 رجوع", callback_data=f"{browse_prefix}:pick:{target_id}:{back_page}", style="danger",
+                    )
+                ]]),
+            )
+            return
+
+        if query.data == "owner_withdraw_section":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_withdraw_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_withdraw_section_keyboard(),
+            )
+            return
+
+        if query.data.startswith("wd_complete:") or query.data.startswith("wd_reject:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+                return
+            is_reject = query.data.startswith("wd_reject:")
+            request_id = query.data.split(":", 1)[1]
+            req = get_withdraw_request(request_id)
+            notify_text = None
+            if not req:
+                admin_result_text = "⚠️ هذا الطلب غير موجود."
+                await _cb_answer(admin_result_text, show_alert=True)
+            elif req.get("status") != "pending":
+                admin_result_text = "✅ تم إغلاق هذا الطلب مسبقًا."
+                await _cb_answer(admin_result_text, show_alert=True)
+            else:
+                if is_reject:
+                    mark_withdraw_rejected(request_id)
+                    admin_result_text = "❌ تم رفض الطلب وإعادة النقاط لرصيد المستخدم."
+                    await _cb_answer(admin_result_text)
+                    notify_text = (
+                        "❌ تم رفض طلب سحبك.\n\n"
+                        f"💎 عدد النقاط: {req.get('points_amount', 0)}\n"
+                        "📌 الحالة: 🔴 مرفوض\n"
+                        "↩️ تمت إعادة النقاط إلى رصيدك."
+                    )
+                else:
+                    mark_withdraw_completed(request_id)
+                    admin_result_text = "✅ تم قبول الطلب وتعليمه كمكتمل."
+                    await _cb_answer(admin_result_text)
+                    notify_text = (
+                        "🎉 تم قبول طلب سحبك وتحويل مكافأتك!\n\n"
+                        f"💎 عدد النقاط المسحوبة: {req.get('points_amount', 0)}\n"
+                        "📌 الحالة: 🟢 مقبول"
+                    )
+                try:
+                    await context.bot.send_message(chat_id=req["user_id"], text=notify_text)
+                except Exception:
+                    pass
+            # ⚠️ إصلاح: إن كانت هذه الضغطة داخل «قناة استقبال طلبات السحب» نفسها،
+            # فلا يجوز استبدال رسالة الإشعار البسيطة بلوحة تحكم المالك الكاملة
+            # (بأزرار تنقّل/رجوع) — لأن ذلك يحوّل رسالة القناة إلى واجهة بوت
+            # كاملة يمكن التنقل من خلالها. بدلًا من ذلك، تُستبدل الرسالة بنص
+            # تأكيد صغير فقط بلا أي أزرار. أما داخل محادثة المالك الخاصة فتبقى
+            # لوحة التحكم الكاملة كما كانت (سلوك مقصود هناك).
+            is_channel_msg = getattr(getattr(query.message, "chat", None), "type", None) == "channel"
+            if is_channel_msg:
+                try:
+                    await query.edit_message_text(text=admin_result_text, reply_markup=None)
+                except Exception:
+                    pass
+            else:
+                text, entities = build_owner_withdraw_section_message()
+                try:
+                    await query.edit_message_text(
+                        text=text, entities=entities,
+                        reply_markup=build_owner_withdraw_section_keyboard(),
+                    )
+                except Exception:
+                    pass
+            return
+
+        if query.data == "wd_channel_settings":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_withdraw_channel_settings_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_withdraw_channel_settings_keyboard(),
+            )
+            return
+
+        if query.data == "wd_channel_set":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "withdraw_channel_set"
+            await query.edit_message_text(
+                "✍️ أرسل الآن يوزر القناة (مثال: @channel أو رابط t.me/channel).\n"
+                "⚠️ تأكد من إضافة البوت كمشرف (Admin) في القناة أولًا حتى يتمكن من الإرسال إليها ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="wd_channel_settings", style="danger"),
+                ]]),
+            )
+            return
+
+        if query.data == "wd_channel_clear":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            clear_withdraw_channel()
+            log_admin_action(
+                "change_settings", query.from_user.id, details="إلغاء قناة استقبال طلبات السحب",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer("✅ تم إلغاء قناة استقبال السحب.")
+            text, entities = build_withdraw_channel_settings_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_withdraw_channel_settings_keyboard(),
+            )
+            return
+
+        if query.data == "withdraw_locked":
+            await _cb_answer(
+                "🔒 رصيدك غير كافٍ لسحب هذه القيمة حاليًا، أو أن الخيار غير مفعّل من المالك بعد.",
+                show_alert=True,
+            )
+            return
+
+        if query.data == "withdraw_pending":
+            await _cb_answer(
+                "🕐 لديك طلب سحب قيد المعالجة بالفعل، انتظر إغلاقه أولاً — تابعه من «📋 سجل السحب».",
+                show_alert=True,
+            )
+            return
+
+        if query.data == "wd_stars_menu":
+            if get_setting("points_enabled") != "1":
+                await _cb_answer("🚫 القسم غير متاح حاليًا.", show_alert=True)
+                return
+            text, entities = build_stars_withdraw_menu_message(query.from_user.id)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_stars_withdraw_menu_keyboard(query.from_user.id),
+            )
+            return
+
+        if query.data == "wd_history_noop":
+            await _cb_answer()
+            return
+
+        if query.data.startswith("wd_history:"):
+            page_str = query.data.split(":", 1)[1]
+            page = int(page_str) if page_str.isdigit() else 1
+            text, entities = build_wd_history_message(query.from_user.id, page)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_wd_history_keyboard(query.from_user.id, page),
+            )
+            return
+
+        if query.data.startswith("wd_stars_pick:"):
+            user = query.from_user
+            if get_setting("points_enabled") != "1":
+                await _cb_answer("🚫 القسم غير متاح حاليًا.", show_alert=True)
+                return
+            tier_str = query.data.split(":", 1)[1]
+            tier = int(tier_str) if tier_str.isdigit() else 0
+            if tier not in STAR_WITHDRAW_TIERS:
+                await _cb_answer("⚠️ خيار غير صالح.", show_alert=True)
+                return
+            # مانع ضغط متكرر: قفل مؤقت في user_data يمنع تنفيذ طلبين من نفس
+            # المستخدم في نفس اللحظة قبل أن تُغلق المعاملة الذرية الأولى.
+            if context.user_data.get("wd_processing"):
+                await _cb_answer("⏳ جارٍ معالجة طلبك، فضلاً انتظر لحظة.", show_alert=True)
+                return
+            if has_pending_withdraw_request_any(user.id):
+                await _cb_answer(
+                    "🕐 لديك طلب سحب قيد المعالجة بالفعل، انتظر إغلاقه أولاً.", show_alert=True,
+                )
+                return
+            cost = get_star_cost(tier)
+            if cost <= 0:
+                await _cb_answer("⚠️ هذا الخيار غير مفعّل حاليًا من المالك.", show_alert=True)
+                return
+            pts = get_points(user.id)
+            if pts < cost:
+                await _cb_answer(
+                    f"🔒 تحتاج {cost} نقطة على الأقل لسحب ⭐{tier}، رصيدك الحالي: {pts} نقطة.",
+                    show_alert=True,
+                )
+                return
+            # التواصل مع صاحب طلب السحب يتم عبر يوزر تليجرام مباشرة، لذا لا يمكن
+            # إنشاء أي طلب لمستخدم بلا اسم مستخدم (username) — نطلب منه إضافته
+            # أولاً من إعدادات تليجرام قبل السماح له بالمتابعة.
+            if not user.username:
+                await _cb_answer(
+                    "⚠️ يجب إضافة اسم مستخدم (Username) في إعدادات تليجرام أولاً "
+                    "حتى نتمكن من التواصل معك، ثم اضغط على زر السحب مجددًا.",
+                    show_alert=True,
+                )
+                return
+
+            context.user_data["wd_processing"] = True
+            try:
+                display_name = user.first_name or user.username or str(user.id)
+                request_id = await asyncio.to_thread(
+                    create_star_withdraw_request, user.id, display_name, user.username, tier, cost,
+                )
+            finally:
+                context.user_data.pop("wd_processing", None)
+
+            if not request_id:
+                await _cb_answer(
+                    "⚠️ رصيدك لم يعد كافيًا لهذا الطلب (ربما تغيّر للتو)، حدّث الصفحة وحاول مجددًا.",
+                    show_alert=True,
+                )
+                return
+
+            await _cb_answer(
+                f"✅ تم إرسال طلب سحب ⭐{tier} بنجاح!\n💎 تم خصم {cost} نقطة.\n📌 الحالة: تحت المراجعة",
+                show_alert=True,
+            )
+
+            text, entities = build_points_message(user.id)
+            try:
+                await query.edit_message_text(
+                    text=text, entities=entities,
+                    reply_markup=build_points_keyboard(user.id),
+                )
+            except Exception:
+                pass
+
+            wd_request_notify_markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ قبول", callback_data=f"wd_stars_accept:{request_id}", style="success"),
+                InlineKeyboardButton("❌ رفض", callback_data=f"wd_stars_reject:{request_id}", style="danger"),
+            ]])
+            wd_request_notify_text = (
+                "⭐ طلب سحب نجوم جديد\n\n"
+                f"👤 المستخدم: {display_name} (ID: {user.id})\n"
+                f"🔗 يوزر: @{user.username}\n"
+                f"⭐ القيمة: {tier} نجمة\n"
+                f"💎 النقاط المخصومة: {cost}"
+            )
+
+            for owner_id in OWNER_IDS:
+                try:
+                    await context.bot.send_message(
+                        chat_id=owner_id,
+                        text=wd_request_notify_text,
+                        reply_markup=wd_request_notify_markup,
+                    )
+                except Exception:
+                    pass
+
+            withdraw_channel = get_withdraw_channel()
+            if withdraw_channel:
+                try:
+                    await context.bot.send_message(
+                        chat_id=withdraw_channel["chat_id"],
+                        text=wd_request_notify_text,
+                        reply_markup=wd_request_notify_markup,
+                    )
+                except Exception:
+                    pass
+            return
+
+        if (query.data.startswith("wd_stars_accept:") or query.data.startswith("wd_stars_reject:")
+                or query.data.startswith("wd_stars_complete:")):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+                return
+            action, request_id = query.data.split(":", 1)
+            req = get_withdraw_request(request_id)
+            notify_text = None
+            if not req:
+                admin_result_text = "⚠️ هذا الطلب غير موجود."
+                await _cb_answer(admin_result_text, show_alert=True)
+            elif action == "wd_stars_reject":
+                if mark_star_withdraw_rejected(request_id):
+                    admin_result_text = "❌ تم رفض الطلب وإعادة النقاط لرصيد المستخدم."
+                    await _cb_answer(admin_result_text)
+                    notify_text = (
+                        "❌ تم رفض طلب سحب النجوم الخاص بك.\n\n"
+                        f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة\n"
+                        f"💎 النقاط: {req.get('points_amount', 0)}\n"
+                        "📌 الحالة: 🔴 مرفوض\n"
+                        "↩️ تمت إعادة النقاط إلى رصيدك."
+                    )
+                else:
+                    admin_result_text = "✅ تم إغلاق هذا الطلب مسبقًا."
+                    await _cb_answer(admin_result_text, show_alert=True)
+            elif action == "wd_stars_accept":
+                if mark_star_withdraw_accepted(request_id):
+                    admin_result_text = "🟢 تم قبول الطلب. أرسل النجوم يدويًا ثم اضغط «📤 تم الإرسال»."
+                    await _cb_answer(admin_result_text)
+                    notify_text = (
+                        "🟢 تم قبول طلب سحب النجوم الخاص بك، وسيتم تحويلها قريبًا.\n\n"
+                        f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة"
+                    )
+                else:
+                    admin_result_text = "✅ تم إغلاق هذا الطلب مسبقًا."
+                    await _cb_answer(admin_result_text, show_alert=True)
+            else:  # wd_stars_complete
+                if mark_star_withdraw_completed(request_id):
+                    admin_result_text = "✅ تم تعليم الطلب كمكتمل."
+                    await _cb_answer(admin_result_text)
+                    notify_text = (
+                        "🎉 تم إرسال نجومك بنجاح!\n\n"
+                        f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة\n"
+                        "📌 الحالة: ✅ مكتمل"
+                    )
+                else:
+                    admin_result_text = "⚠️ تعذّر إتمام الطلب (يجب أن يكون بحالة «مقبول» أولًا)."
+                    await _cb_answer(admin_result_text, show_alert=True)
+            if notify_text and req:
+                try:
+                    await context.bot.send_message(chat_id=req["user_id"], text=notify_text)
+                except Exception:
+                    pass
+            # ⚠️ إصلاح: نفس مشكلة الدالة أعلاه — لا نستبدل رسالة الإشعار داخل
+            # «قناة استقبال طلبات السحب» بلوحة تحكم المالك الكاملة، بل بنص
+            # تأكيد صغير فقط بلا أزرار، حتى لا تتحول القناة إلى واجهة بوت كاملة.
+            is_channel_msg = getattr(getattr(query.message, "chat", None), "type", None) == "channel"
+            if is_channel_msg:
+                try:
+                    await query.edit_message_text(text=admin_result_text, reply_markup=None)
+                except Exception:
+                    pass
+            else:
+                text, entities = build_owner_withdraw_section_message()
+                try:
+                    await query.edit_message_text(
+                        text=text, entities=entities,
+                        reply_markup=build_owner_withdraw_section_keyboard(),
+                    )
+                except Exception:
+                    pass
+            return
+
+        if query.data == "star_settings":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_star_settings_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_star_settings_keyboard(),
+            )
+            return
+
+        if query.data.startswith("star_edit:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            tier_str = query.data.split(":", 1)[1]
+            tier = int(tier_str) if tier_str.isdigit() else 0
+            if tier not in STAR_WITHDRAW_TIERS:
+                await _cb_answer("⚠️ قيمة غير صالحة.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "star_cost_edit"
+            context.user_data["star_cost_edit_tier"] = tier
+            await query.edit_message_text(
+                f"✍️ أرسل الآن عدد النقاط المطلوبة لسحب ⭐{tier} نجمة (رقم صحيح ≥ صفر) ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="star_settings", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data == "owner_sub_section":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_sub_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_section_keyboard(),
+            )
+            return
+
+        if query.data == "owner_sub_add":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "admin_channel_add_username"
+            await query.edit_message_text(
+                "✍️ أرسل الآن يوزر القناة الجديدة (مثال: @channel أو رابط t.me/channel) ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="owner_sub_section", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data in ("owner_sub_add_autodel_yes", "owner_sub_add_autodel_no"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            username = context.user_data.pop("admin_new_channel_username", None)
+            target = context.user_data.pop("admin_new_channel_target", None)
+            if not username:
+                await _cb_answer("⚠️ انتهت صلاحية هذه العملية، ابدأ من جديد.", show_alert=True)
+                return
+            auto_delete = query.data == "owner_sub_add_autodel_yes"
+            channel_id = create_required_channel(
+                username=username, target_count=target, auto_delete_on_target=auto_delete,
+                added_by=query.from_user.id,
+            )
+            log_admin_action(
+                "add_channel", query.from_user.id, details=f"@{username}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            warning = await _check_bot_can_verify_channel(context, username)
+            channel = get_required_channel(channel_id)
+            await _cb_answer("✅ تمت إضافة القناة بنجاح")
+            text, entities = await build_owner_sub_channel_message(context, channel)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_channel_keyboard(channel),
+            )
+            if warning:
+                try:
+                    await context.bot.send_message(chat_id=query.from_user.id, text=warning)
+                except Exception:
+                    pass
+            return
+
+        if query.data.startswith("owner_sub_list:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            page = int(query.data.split(":", 1)[1])
+            channels = get_required_channels()
+            text, entities = build_owner_sub_list_message(channels)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_list_keyboard(channels, page),
+            )
+            return
+
+        if query.data.startswith("owner_sub_check_target_now:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            channel_id = int(query.data.split(":", 1)[1])
+            channel = get_required_channel(channel_id)
+            if not channel:
+                await _cb_answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
+                return
+            status, info = await _check_and_maybe_delete_channel_target(context, channel)
+            if status == "error":
+                await _cb_answer(
+                    f"⚠️ تعذّر التحقق ({info}). الأرجح أن البوت غير مضاف كمشرف في هذه القناة.",
+                    show_alert=True,
+                )
+                return
+            if status == "skipped":
+                await _cb_answer("⚠️ لا يوجد هدف محدد أو الحذف التلقائي غير مفعّل لهذه القناة.", show_alert=True)
+                return
+            if status == "not_reached":
+                await _cb_answer(
+                    f"📊 لم يصل الهدف بعد ({info}/{channel.get('target_count')} عضو).",
+                    show_alert=True,
+                )
+                return
+            # status == "deleted"
+            await _cb_answer(f"✅ تم بلوغ الهدف ({info} عضو) — حُذفت القناة من الاشتراك الإجباري.", show_alert=True)
+            text, entities = build_owner_sub_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_section_keyboard(),
+            )
+            return
+
+        if query.data.startswith("owner_sub_edit_button_text:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            channel_id = int(query.data.split(":", 1)[1])
+            context.user_data["awaiting"] = "admin_channel_edit_button_text"
+            context.user_data["admin_channel_id"] = channel_id
+            await query.edit_message_text(
+                "✍️ أرسل الآن الاسم الذي تريد أن يظهر في زر هذه القناة بدل اليوزر الخام "
+                "(مثال: 𝐑𝐎𝐔𝐋𝐄𝐓𝐓𝐄 𝐕𝐎𝐑𝐓𝐄𝐗)، أو أرسل - لحذف الاسم المخصص والعودة لعرض اليوزر ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_sub_channel:{channel_id}", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data.startswith("owner_sub_edit_username:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            channel_id = int(query.data.split(":", 1)[1])
+            context.user_data["awaiting"] = "admin_channel_edit_username"
+            context.user_data["admin_channel_id"] = channel_id
+            await query.edit_message_text(
+                "✍️ أرسل الآن اليوزر الجديد لهذه القناة (مثال: @channel أو رابط t.me/channel) ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_sub_channel:{channel_id}", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data.startswith("owner_sub_edit_link:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            channel_id = int(query.data.split(":", 1)[1])
+            context.user_data["awaiting"] = "admin_channel_edit_link"
+            context.user_data["admin_channel_id"] = channel_id
+            await query.edit_message_text(
+                "✍️ أرسل الآن رابط الانضمام الجديد لهذه القناة (مثال: https://t.me/channel أو رابط دعوة خاص) ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_sub_channel:{channel_id}", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data.startswith("owner_sub_edit_target:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            channel_id = int(query.data.split(":", 1)[1])
+            context.user_data["awaiting"] = "admin_channel_edit_target"
+            context.user_data["admin_channel_id"] = channel_id
+            await query.edit_message_text(
+                "✍️ أرسل الآن عدد الأعضاء المستهدف لهذه القناة (رقم)، أو أرسل 0 لإلغاء الهدف ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_sub_channel:{channel_id}", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data.startswith("owner_sub_toggle_autodel:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            channel_id = int(query.data.split(":", 1)[1])
+            channel = get_required_channel(channel_id)
+            if not channel:
+                await _cb_answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
+                return
+            new_value = not bool(channel.get("auto_delete_on_target"))
+            update_required_channel(channel_id, auto_delete_on_target=new_value)
+            channel["auto_delete_on_target"] = new_value
+            await _cb_answer("🔄 سيتم حذفها تلقائيًا عند الهدف" if new_value else "♾️ ستبقى دائمًا بدون حذف")
+            text, entities = await build_owner_sub_channel_message(context, channel)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_channel_keyboard(channel),
+            )
+            return
+
+        if query.data.startswith("owner_sub_toggle_enabled:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            channel_id = int(query.data.split(":", 1)[1])
+            channel = get_required_channel(channel_id)
+            if not channel:
+                await _cb_answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
+                return
+            new_value = not channel.get("enabled", True)
+            update_required_channel(channel_id, enabled=new_value)
+            channel["enabled"] = new_value
+            await _cb_answer("🟢 تم تفعيل القناة" if new_value else "🔴 تم تعطيل القناة")
+            text, entities = await build_owner_sub_channel_message(context, channel)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_channel_keyboard(channel),
+            )
+            return
+
+        if query.data.startswith("owner_sub_channel_stats:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            channel_id = int(query.data.split(":", 1)[1])
+            channel = get_required_channel(channel_id)
+            if not channel:
+                await _cb_answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
+                return
+            text, entities = await build_owner_sub_channel_stats_message(context, channel)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_channel_stats_keyboard(channel_id),
+            )
+            return
+
+        if query.data.startswith("owner_sub_delete_confirm:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            channel_id = int(query.data.split(":", 1)[1])
+            _deleted_channel = get_required_channel(channel_id)
+            delete_required_channel(channel_id)
+            _deleted_username = _deleted_channel.get("username") if _deleted_channel else None
+            log_admin_action(
+                "delete_channel", query.from_user.id,
+                details=f"@{_deleted_username}" if _deleted_username else f"معرف القناة: {channel_id}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer("🗑️ تم حذف القناة بنجاح")
+            channels = get_required_channels()
+            text, entities = build_owner_sub_list_message(channels)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_list_keyboard(channels, 1),
+            )
+            return
+
+        if query.data.startswith("owner_sub_delete:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            channel_id = int(query.data.split(":", 1)[1])
+            channel = get_required_channel(channel_id)
+            if not channel:
+                await _cb_answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
+                return
+            text, entities = build_owner_sub_delete_confirm_message(channel)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_delete_confirm_keyboard(channel_id),
+            )
+            return
+
+        if query.data.startswith("owner_sub_channel:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            channel_id = int(query.data.split(":", 1)[1])
+            channel = get_required_channel(channel_id)
+            if not channel:
+                await _cb_answer("⚠️ هذه القناة لم تعد موجودة.", show_alert=True)
+                return
+            text, entities = await build_owner_sub_channel_message(context, channel)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_channel_keyboard(channel),
+            )
+            return
+
+        if query.data == "owner_sub_reorder":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            channels = get_required_channels()
+            text, entities = build_owner_sub_reorder_message(channels)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_reorder_keyboard(channels),
+            )
+            return
+
+        if query.data.startswith("owner_sub_move_up:") or query.data.startswith("owner_sub_move_down:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            channel_id = int(query.data.split(":", 1)[1])
+            direction = -1 if query.data.startswith("owner_sub_move_up:") else 1
+            move_required_channel(channel_id, direction)
+            await _cb_answer("✅ تم تحديث الترتيب")
+            channels = get_required_channels()
+            text, entities = build_owner_sub_reorder_message(channels)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_reorder_keyboard(channels),
+            )
+            return
+
+        if query.data == "owner_sub_stats_all":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = await build_owner_sub_stats_all_message(context)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_sub_stats_all_keyboard(),
+            )
+            return
+
+        if query.data == "owner_sub_noop":
+            await _cb_answer()
+            return
+
+        if query.data == "owner_users_section":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_users_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_users_section_keyboard(),
+            )
+            return
+
+        if query.data in ("owner_users_search", "owner_users_view"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "admin_user_lookup"
+            await query.edit_message_text(
+                "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data == "owner_users_ban":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "admin_user_ban_lookup"
+            await query.edit_message_text(
+                "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) المراد حظره ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data == "owner_users_unban":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "admin_user_unban_lookup"
+            await query.edit_message_text(
+                "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) المراد فك حظره ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="owner_users_section", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data.startswith("owner_users_banned:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            page = int(query.data.split(":", 1)[1])
+            banned_users = get_banned_bot_users()
+            text, entities = build_owner_users_banned_list_message(banned_users)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_users_banned_list_keyboard(banned_users, page),
+            )
+            return
+
+        if query.data == "owner_users_stats":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            stats = get_bot_users_stats()
+            text, entities = build_owner_users_stats_message(stats)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_users_stats_keyboard(),
+            )
+            return
+
+        if query.data.startswith("owner_users_profile_ban:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            target_id = int(query.data.split(":", 1)[1])
+            if target_id in OWNER_IDS:
+                await _cb_answer("⚠️ لا يمكن حظر مالك البوت.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "admin_user_ban_reason"
+            context.user_data["admin_ban_target_id"] = target_id
+            await query.edit_message_text(
+                "✍️ أرسل الآن سبب الحظر، أو أرسل - لتركه بدون سبب ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_users_profile:{target_id}", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data.startswith("owner_users_profile_unban:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            target_id = int(query.data.split(":", 1)[1])
+            unban_bot_user(target_id)
+            log_admin_action(
+                "unban_user", query.from_user.id, details=f"معرف المستخدم: {target_id}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer("✅ تم فك الحظر بنجاح")
+            row = get_bot_user(target_id) or FSRow({"user_id": target_id})
+            text, entities = build_user_profile_message(row)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_user_profile_keyboard(row),
+            )
+            return
+
+        if query.data.startswith("owner_users_profile:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            target_id = int(query.data.split(":", 1)[1])
+            row = get_bot_user(target_id) or FSRow({"user_id": target_id})
+            text, entities = build_user_profile_message(row)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_user_profile_keyboard(row),
+            )
+            return
+
+        if query.data == "owner_users_noop":
+            await _cb_answer()
+            return
+
+        if query.data == "owner_admins_section":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_admins_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_admins_section_keyboard(),
+            )
+            return
+
+        if query.data == "owner_admins_add":
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
+                await _cb_answer("⛔ ليس لديك صلاحية إضافة مشرفين.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "mod_add_lookup"
+            await query.edit_message_text(
+                "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) لإضافته كمشرف ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="owner_admins_section", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data.startswith("owner_admins_list:"):
+            _, mode, page_str = query.data.split(":", 2)
+            needs_owner = mode in ("perms", "remove")
+            if needs_owner and not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+                return
+            if not needs_owner and not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            page = int(page_str) if page_str.isdigit() else 1
+            mods = list_moderators()
+            text, entities = build_owner_admins_list_message(mods, mode)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_admins_list_keyboard(mods, mode, page),
+            )
+            return
+
+        if query.data == "owner_admins_noop":
+            await _cb_answer()
+            return
+
+        if query.data.startswith("owner_admins_pick:"):
+            _, mode, uid_str = query.data.split(":", 2)
+            target_id = int(uid_str)
+            if mode == "view":
+                if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
+                    await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                    return
+            elif not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+                return
+            row = get_moderator(target_id)
+            if not row:
+                await _cb_answer("⚠️ هذا المشرف لم يعد موجودًا.", show_alert=True)
+                return
+            if mode == "remove":
+                text, entities = build_moderator_delete_confirm_message(row)
+                await query.edit_message_text(
+                    text=text, entities=entities,
+                    reply_markup=build_moderator_delete_confirm_keyboard(target_id),
+                )
+            elif mode == "perms":
+                text, entities = build_moderator_perms_message(row)
+                await query.edit_message_text(
+                    text=text, entities=entities,
+                    reply_markup=build_moderator_perms_keyboard(row),
+                )
+            else:
+                text, entities = build_moderator_profile_message(row)
+                await query.edit_message_text(
+                    text=text, entities=entities,
+                    reply_markup=build_moderator_profile_keyboard(target_id),
+                )
+            return
+
+        if query.data.startswith("owner_admins_toggle:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, uid_str, perm_key = query.data.split(":", 2)
+            target_id = int(uid_str)
+            row = get_moderator(target_id)
+            if not row:
+                await _cb_answer("⚠️ هذا المشرف لم يعد موجودًا.", show_alert=True)
+                return
+            current = bool(row.get("permissions", {}).get(perm_key))
+            set_moderator_permission(target_id, perm_key, not current)
+            row = get_moderator(target_id)
             text, entities = build_moderator_perms_message(row)
             await query.edit_message_text(
                 text=text, entities=entities,
                 reply_markup=build_moderator_perms_keyboard(row),
             )
-        else:
-            text, entities = build_moderator_profile_message(row)
+            return
+
+        if query.data.startswith("owner_admins_remove_do:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+                return
+            target_id = int(query.data.split(":", 1)[1])
+            remove_moderator(target_id)
+            log_admin_action(
+                "remove_admin", query.from_user.id, details=f"معرف المشرف: {target_id}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer("✅ تم حذف المشرف بنجاح")
+            mods = list_moderators()
+            text, entities = build_owner_admins_list_message(mods, "view")
             await query.edit_message_text(
                 text=text, entities=entities,
-                reply_markup=build_moderator_profile_keyboard(target_id),
+                reply_markup=build_owner_admins_list_keyboard(mods, "view", 1),
             )
-        return
+            return
 
-    if query.data.startswith("owner_admins_toggle:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, uid_str, perm_key = query.data.split(":", 2)
-        target_id = int(uid_str)
-        row = get_moderator(target_id)
-        if not row:
-            await query.answer("⚠️ هذا المشرف لم يعد موجودًا.", show_alert=True)
-            return
-        current = bool(row.get("permissions", {}).get(perm_key))
-        set_moderator_permission(target_id, perm_key, not current)
-        row = get_moderator(target_id)
-        text, entities = build_moderator_perms_message(row)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_moderator_perms_keyboard(row),
-        )
-        return
-
-    if query.data.startswith("owner_admins_remove_do:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
-            return
-        target_id = int(query.data.split(":", 1)[1])
-        remove_moderator(target_id)
-        log_admin_action(
-            "remove_admin", query.from_user.id, details=f"معرف المشرف: {target_id}",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        await query.answer("✅ تم حذف المشرف بنجاح")
-        mods = list_moderators()
-        text, entities = build_owner_admins_list_message(mods, "view")
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_admins_list_keyboard(mods, "view", 1),
-        )
-        return
-
-    if query.data == "owner_referrals_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_owner_referrals_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_referrals_section_keyboard(),
-        )
-        return
-
-    if query.data == "owner_referrals_add":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "referral_add_lookup"
-        await query.edit_message_text(
-            "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) لمنحه رابط دعوة ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_section", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "owner_referrals_search":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "referral_search_lookup"
-        await query.edit_message_text(
-            "🔍 أرسل الآن معرف المستخدم (ID) أو يوزره (@username) للبحث عنه ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_section", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "owner_referrals_stats":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        await query.answer()
-        text, entities = build_owner_referrals_stats_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_referrals_stats_keyboard(),
-        )
-        return
-
-    if query.data == "owner_referrals_settings":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_owner_referrals_settings_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_referrals_settings_keyboard(),
-        )
-        return
-
-    if query.data == "owner_referrals_edit_default_pct":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "referral_default_pct"
-        await query.edit_message_text(
-            "✍️ أرسل الآن النسبة الافتراضية الجديدة (رقم من 0 إلى 100) ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_settings", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "owner_referrals_edit_signup_points":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "referral_signup_points"
-        await query.edit_message_text(
-            "✍️ أرسل الآن عدد نقاط كل إحالة جديدة عند نسبة 100% (رقم صحيح) ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_settings", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "owner_referrals_noop":
-        await query.answer()
-        return
-
-    if query.data.startswith("owner_referrals_list:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, mode, page_str = query.data.split(":", 2)
-        page = int(page_str) if page_str.isdigit() else 1
-        rows = list_referrers()
-        text, entities = build_owner_referrals_list_message(rows, mode)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_referrals_list_keyboard(rows, mode, page),
-        )
-        return
-
-    if query.data.startswith("owner_referrals_pick:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, mode, uid_str = query.data.split(":", 2)
-        target_id = int(uid_str)
-        row = get_referral(target_id)
-        if not row:
-            await query.answer("⚠️ هذا المستخدم لم يعد صاحب رابط دعوة.", show_alert=True)
-            return
-        if mode == "remove":
-            text, entities = build_referrer_delete_confirm_message(row)
+        if query.data == "owner_referrals_section":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_referrals_section_message()
             await query.edit_message_text(
                 text=text, entities=entities,
-                reply_markup=build_referrer_delete_confirm_keyboard(target_id),
+                reply_markup=build_owner_referrals_section_keyboard(),
             )
-        else:
+            return
+
+        if query.data == "owner_referrals_add":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "referral_add_lookup"
+            await query.edit_message_text(
+                "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) لمنحه رابط دعوة ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_section", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data == "owner_referrals_search":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "referral_search_lookup"
+            await query.edit_message_text(
+                "🔍 أرسل الآن معرف المستخدم (ID) أو يوزره (@username) للبحث عنه ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_section", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data == "owner_referrals_stats":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            await _cb_answer()
+            text, entities = build_owner_referrals_stats_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_referrals_stats_keyboard(),
+            )
+            return
+
+        if query.data == "owner_referrals_settings":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_referrals_settings_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_referrals_settings_keyboard(),
+            )
+            return
+
+        if query.data == "owner_referrals_edit_default_pct":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "referral_default_pct"
+            await query.edit_message_text(
+                "✍️ أرسل الآن النسبة الافتراضية الجديدة (رقم من 0 إلى 100) ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_settings", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data == "owner_referrals_edit_signup_points":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "referral_signup_points"
+            await query.edit_message_text(
+                "✍️ أرسل الآن عدد نقاط كل إحالة جديدة عند نسبة 100% (رقم صحيح) ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="owner_referrals_settings", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data == "owner_referrals_noop":
+            await _cb_answer()
+            return
+
+        if query.data.startswith("owner_referrals_list:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, mode, page_str = query.data.split(":", 2)
+            page = int(page_str) if page_str.isdigit() else 1
+            rows = list_referrers()
+            text, entities = build_owner_referrals_list_message(rows, mode)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_referrals_list_keyboard(rows, mode, page),
+            )
+            return
+
+        if query.data.startswith("owner_referrals_pick:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, mode, uid_str = query.data.split(":", 2)
+            target_id = int(uid_str)
+            row = get_referral(target_id)
+            if not row:
+                await _cb_answer("⚠️ هذا المستخدم لم يعد صاحب رابط دعوة.", show_alert=True)
+                return
+            if mode == "remove":
+                text, entities = build_referrer_delete_confirm_message(row)
+                await query.edit_message_text(
+                    text=text, entities=entities,
+                    reply_markup=build_referrer_delete_confirm_keyboard(target_id),
+                )
+            else:
+                text, entities = build_referrer_profile_message(row)
+                await query.edit_message_text(
+                    text=text, entities=entities,
+                    reply_markup=build_referrer_profile_keyboard(row),
+                )
+            return
+
+        if query.data.startswith("owner_referrals_toggle:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            target_id = int(query.data.split(":", 1)[1])
+            row = get_referral(target_id)
+            if not row:
+                await _cb_answer("⚠️ هذا المستخدم لم يعد صاحب رابط دعوة.", show_alert=True)
+                return
+            new_state = not row.get("active")
+            set_referrer_active(target_id, new_state)
+            log_admin_action(
+                "toggle_referrer", query.from_user.id,
+                details=f"معرف المستخدم: {target_id} — الحالة الجديدة: {'مفعّل' if new_state else 'معطّل'}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            row = get_referral(target_id)
             text, entities = build_referrer_profile_message(row)
             await query.edit_message_text(
                 text=text, entities=entities,
                 reply_markup=build_referrer_profile_keyboard(row),
             )
-        return
+            return
 
-    if query.data.startswith("owner_referrals_toggle:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        target_id = int(query.data.split(":", 1)[1])
-        row = get_referral(target_id)
-        if not row:
-            await query.answer("⚠️ هذا المستخدم لم يعد صاحب رابط دعوة.", show_alert=True)
-            return
-        new_state = not row.get("active")
-        set_referrer_active(target_id, new_state)
-        log_admin_action(
-            "toggle_referrer", query.from_user.id,
-            details=f"معرف المستخدم: {target_id} — الحالة الجديدة: {'مفعّل' if new_state else 'معطّل'}",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        row = get_referral(target_id)
-        text, entities = build_referrer_profile_message(row)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_referrer_profile_keyboard(row),
-        )
-        return
-
-    if query.data.startswith("owner_referrals_edit_pct:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        target_id = int(query.data.split(":", 1)[1])
-        if not get_referral(target_id):
-            await query.answer("⚠️ هذا المستخدم لم يعد صاحب رابط دعوة.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "referral_edit_percentage"
-        context.user_data["referral_target_id"] = target_id
-        await query.edit_message_text(
-            "✍️ أرسل الآن نسبة الإحالة الجديدة لهذا المستخدم (رقم من 0 إلى 100) ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_referrals_pick:view:{target_id}", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data.startswith("owner_referrals_remove_do:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
-            return
-        target_id = int(query.data.split(":", 1)[1])
-        remove_referrer(target_id)
-        log_admin_action(
-            "remove_referrer", query.from_user.id, details=f"معرف المستخدم: {target_id}",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        await query.answer("✅ تمت إزالة صاحب رابط الدعوة بنجاح")
-        rows = list_referrers()
-        text, entities = build_owner_referrals_list_message(rows, "view")
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_referrals_list_keyboard(rows, "view", 1),
-        )
-        return
-
-    if query.data == "owner_stats_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        await query.answer()
-        # يُنفَّذ عبر asyncio.to_thread في خيط منفصل حتى لا تُجمِّد قراءة كل
-        # مستخدمي/قنوات البوت من Firestore حلقة أحداث البوت (event loop)
-        # وتُعلِّق باقي المستخدمين لحين انتهائها — نفس النمط المتّبع أصلًا
-        # في هذا المشروع لأي عملية Firestore ثقيلة داخل async handler.
-        stats = await asyncio.to_thread(get_full_bot_statistics)
-        required_members = await get_required_channels_total_members(context)
-        text, entities = build_owner_stats_message(stats, required_members)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_stats_keyboard(),
-        )
-        return
-
-    if query.data == "owner_logs_noop":
-        await query.answer()
-        return
-
-    if query.data.startswith("owner_logs:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        await query.answer()
-        page = int(query.data.split(":", 1)[1])
-        logs = get_admin_logs()
-        text, entities = build_owner_logs_section_message(logs, page)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_logs_section_keyboard(logs, page),
-        )
-        return
-
-    if query.data == "owner_maintenance_noop":
-        await query.answer()
-        return
-
-    if query.data == "owner_maintenance_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        await query.answer()
-        text, entities = build_owner_maintenance_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_maintenance_section_keyboard(),
-        )
-        return
-
-    if query.data == "owner_maintenance_toggle":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        new_state = not is_maintenance_mode()
-        set_maintenance_mode(new_state)
-        log_admin_action(
-            "change_settings", query.from_user.id,
-            details=f"وضع الصيانة: {'مفعّل' if new_state else 'معطّل'}",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        await query.answer("🔴 تم تفعيل وضع الصيانة" if new_state else "🟢 تم إيقاف وضع الصيانة", show_alert=True)
-        text, entities = build_owner_maintenance_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_maintenance_section_keyboard(),
-        )
-        return
-
-    if query.data == "owner_maintenance_speedtest":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        await query.answer("⏳ جاري فحص السرعة ”")
-        try:
-            elapsed_ms, label = measure_bot_response_time()
-        except Exception:
-            logger.exception("تعذّر إجراء فحص سرعة الاستجابة")
-            await query.answer("⚠️ تعذّر إجراء الفحص، حاول مجددًا.", show_alert=True)
-            return
-        text, entities = build_owner_maintenance_speedtest_message(elapsed_ms, label)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_maintenance_section_keyboard(),
-        )
-        return
-
-    if query.data == "owner_maintenance_status":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        await query.answer()
-        text, entities = build_owner_maintenance_status_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_maintenance_section_keyboard(),
-        )
-        return
-
-    if query.data == "owner_new_user_notify_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        await query.answer()
-        text, entities = build_new_user_notify_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_new_user_notify_section_keyboard(),
-        )
-        return
-
-    if query.data == "owner_newuser_toggle":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        if not is_new_user_notify_enabled():
-            if not get_new_user_notify_channel():
-                await query.answer("⚠️ حدّد قناة الإشعارات أولًا قبل التفعيل.", show_alert=True)
+        if query.data.startswith("owner_referrals_edit_pct:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
-            set_new_user_notify_enabled(True)
-            msg = "🟢 تم تفعيل إشعارات دخول المستخدمين."
-        else:
-            set_new_user_notify_enabled(False)
-            msg = "🔴 تم إيقاف إشعارات دخول المستخدمين."
-        log_admin_action(
-            "change_settings", query.from_user.id, details=msg,
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        await query.answer(msg, show_alert=True)
-        text, entities = build_new_user_notify_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_new_user_notify_section_keyboard(),
-        )
-        return
-
-    if query.data == "owner_newuser_channel_set":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "new_user_notify_channel_set"
-        await query.edit_message_text(
-            "✍️ أرسل الآن يوزر القناة (مثال: @channel أو رابط t.me/channel).\n"
-            "⚠️ تأكد من إضافة البوت كمشرف (Admin) في القناة أولًا حتى يتمكن من الإرسال إليها ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="owner_new_user_notify_section", style="danger"),
-            ]]),
-        )
-        return
-
-    if query.data == "owner_newuser_channel_clear":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        clear_new_user_notify_channel()
-        # إجراء ذكي: إن أُلغيت القناة أثناء تفعيل الإشعارات، تُوقَف الإشعارات
-        # تلقائيًا تجنبًا لحالة "مفعّلة بلا قناة" التي لن تُرسِل شيئًا بصمت.
-        was_enabled = is_new_user_notify_enabled()
-        if was_enabled:
-            set_new_user_notify_enabled(False)
-        log_admin_action(
-            "change_settings", query.from_user.id, details="إلغاء قناة إشعارات دخول المستخدمين",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        await query.answer(
-            "✅ تم إلغاء قناة الإشعارات." + (" وتم إيقاف الإشعارات تلقائيًا." if was_enabled else ""),
-            show_alert=True,
-        )
-        text, entities = build_new_user_notify_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_new_user_notify_section_keyboard(),
-        )
-        return
-
-    if query.data == "owner_draws_section":
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_owner_draws_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_draws_section_keyboard(),
-        )
-        return
-
-    if query.data.startswith("admgw_list:"):
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, filt, page_str = query.data.split(":", 2)
-        page = int(page_str) if page_str.isdigit() else 1
-        giveaways = _admgw_filter_giveaways(get_all_giveaways(), filt)
-        total_pages = max(1, -(-len(giveaways) // GW_LIST_PAGE_SIZE))
-        page = max(1, min(page, total_pages))
-        text, entities = build_admgw_list_message(filt, page, total_pages, len(giveaways))
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admgw_list_keyboard(giveaways, filt, page, total_pages),
-        )
-        return
-
-    if query.data.startswith("admgw_detail:"):
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, gw_code, filt, page_str = query.data.split(":", 3)
-        page = int(page_str) if page_str.isdigit() else 1
-        giveaway = get_giveaway(gw_code)
-        if not giveaway:
-            await query.answer("⚠️ هذا السحب لم يعد موجودًا.", show_alert=True)
-            return
-        giveaways = _admgw_filter_giveaways(get_all_giveaways(), filt)
-        index = next((i + 1 for i, g in enumerate(giveaways) if g["gw_code"] == gw_code), 0)
-        channel_title = get_chat_title_by_id(giveaway["chat_id"])
-        participants_total = count_giveaway_participants(gw_code)
-        channel_url = await build_contest_post_link(context, giveaway["chat_id"], giveaway.get("channel_message_id"))
-        text, entities = build_admgw_detail_message(giveaway, index, channel_title, participants_total)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admgw_detail_keyboard(gw_code, filt, page, channel_url=channel_url),
-        )
-        return
-
-    if query.data.startswith("admgw_search:"):
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, filt, page_str = query.data.split(":", 2)
-        page = int(page_str) if page_str.isdigit() else 1
-        context.user_data["awaiting"] = "admgw_search_lookup"
-        context.user_data["admgw_search_filt"] = filt
-        context.user_data["admgw_search_page"] = page
-        await query.edit_message_text(
-            "🔍 أرسل الآن كود السحب الذي تريد البحث عنه ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data=f"admgw_list:{filt}:{page}", style="danger",
-                                      **emoji_kwargs("back_section_btn")),
-            ]]),
-        )
-        return
-
-    if query.data.startswith("admgw_delc:"):
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, gw_code, filt, page_str = query.data.split(":", 3)
-        page = int(page_str) if page_str.isdigit() else 1
-        giveaway = get_giveaway(gw_code)
-        if not giveaway:
-            await query.answer("⚠️ هذا السحب لم يعد موجودًا.", show_alert=True)
-            return
-        text, entities = build_admgw_delete_confirm_message(giveaway)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admgw_delete_confirm_keyboard(gw_code, filt, page),
-        )
-        return
-
-    if query.data.startswith("admgw_delete_do:"):
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, gw_code, filt, page_str = query.data.split(":", 3)
-        page = int(page_str) if page_str.isdigit() else 1
-        delete_giveaway_admin(gw_code)
-        log_admin_action(
-            "delete_giveaway", query.from_user.id, details=f"كود السحب: {gw_code}",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        await query.answer("🗑️ تم حذف السحب بنجاح")
-        giveaways = _admgw_filter_giveaways(get_all_giveaways(), filt)
-        total_pages = max(1, -(-len(giveaways) // GW_LIST_PAGE_SIZE))
-        page = max(1, min(page, total_pages))
-        text, entities = build_admgw_list_message(filt, page, total_pages, len(giveaways))
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admgw_list_keyboard(giveaways, filt, page, total_pages),
-        )
-        return
-
-    if query.data == "admgw_stats":
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        stats = await asyncio.to_thread(get_giveaways_statistics)
-        text, entities = build_admgw_stats_message(stats)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admgw_stats_keyboard(),
-        )
-        return
-
-    if query.data == "admgw_noop":
-        await query.answer()
-        return
-
-    if query.data == "owner_contests_section":
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_owner_contests_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_contests_section_keyboard(),
-        )
-        return
-
-    if query.data.startswith("admct_list:"):
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, filt, page_str = query.data.split(":", 2)
-        page = int(page_str) if page_str.isdigit() else 1
-        contests = _admct_filter_contests(get_all_contests(), filt)
-        total_pages = max(1, -(-len(contests) // GW_LIST_PAGE_SIZE))
-        page = max(1, min(page, total_pages))
-        text, entities = build_admct_list_message(filt, page, total_pages, len(contests))
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admct_list_keyboard(contests, filt, page, total_pages),
-        )
-        return
-
-    if query.data.startswith("admct_detail:"):
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, contest_code, filt, page_str = query.data.split(":", 3)
-        page = int(page_str) if page_str.isdigit() else 1
-        contest = get_contest(contest_code)
-        if not contest:
-            await query.answer("⚠️ هذه المسابقة لم تعد موجودة.", show_alert=True)
-            return
-        contests = _admct_filter_contests(get_all_contests(), filt)
-        index = next((i + 1 for i, c in enumerate(contests) if c["contest_code"] == contest_code), 0)
-        channel_title = get_chat_title_by_id(contest["chat_id"])
-        participants_total = count_contest_participants(contest_code)
-        channel_url = await build_contest_post_link(context, contest["chat_id"], contest.get("channel_message_id"))
-        text, entities = build_admct_detail_message(contest, index, channel_title, participants_total)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admct_detail_keyboard(contest_code, filt, page, channel_url=channel_url),
-        )
-        return
-
-    if query.data.startswith("admct_search:"):
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, filt, page_str = query.data.split(":", 2)
-        page = int(page_str) if page_str.isdigit() else 1
-        context.user_data["awaiting"] = "admct_search_lookup"
-        context.user_data["admct_search_filt"] = filt
-        context.user_data["admct_search_page"] = page
-        await query.edit_message_text(
-            "🔍 أرسل الآن كود المسابقة الذي تريد البحث عنها ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data=f"admct_list:{filt}:{page}", style="danger",
-                                      **emoji_kwargs("back_section_btn")),
-            ]]),
-        )
-        return
-
-    if query.data.startswith("admct_delc:"):
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, contest_code, filt, page_str = query.data.split(":", 3)
-        page = int(page_str) if page_str.isdigit() else 1
-        contest = get_contest(contest_code)
-        if not contest:
-            await query.answer("⚠️ هذه المسابقة لم تعد موجودة.", show_alert=True)
-            return
-        text, entities = build_admct_delete_confirm_message(contest)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admct_delete_confirm_keyboard(contest_code, filt, page),
-        )
-        return
-
-    if query.data.startswith("admct_delete_do:"):
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, contest_code, filt, page_str = query.data.split(":", 3)
-        page = int(page_str) if page_str.isdigit() else 1
-        delete_contest_admin(contest_code)
-        log_admin_action(
-            "delete_contest", query.from_user.id, details=f"كود المسابقة: {contest_code}",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        await query.answer("🗑️ تم حذف المسابقة بنجاح")
-        contests = _admct_filter_contests(get_all_contests(), filt)
-        total_pages = max(1, -(-len(contests) // GW_LIST_PAGE_SIZE))
-        page = max(1, min(page, total_pages))
-        text, entities = build_admct_list_message(filt, page, total_pages, len(contests))
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admct_list_keyboard(contests, filt, page, total_pages),
-        )
-        return
-
-    if query.data == "admct_stats":
-        if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        stats = await asyncio.to_thread(get_contests_statistics)
-        text, entities = build_admct_stats_message(stats)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admct_stats_keyboard(),
-        )
-        return
-
-    if query.data == "admct_noop":
-        await query.answer()
-        return
-
-    if query.data == "owner_quick_roulette_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_owner_quick_roulette_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_quick_roulette_section_keyboard(),
-        )
-        return
-
-    if query.data.startswith("admrr_list:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, filt, page_str = query.data.split(":", 2)
-        page = int(page_str) if page_str.isdigit() else 1
-        roulettes = _admrr_filter_roulettes(get_all_quick_roulettes(), filt)
-        total_pages = max(1, -(-len(roulettes) // GW_LIST_PAGE_SIZE))
-        page = max(1, min(page, total_pages))
-        text, entities = build_admrr_list_message(filt, page, total_pages, len(roulettes))
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admrr_list_keyboard(roulettes, filt, page, total_pages),
-        )
-        return
-
-    if query.data.startswith("admrr_detail:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, rid_str, filt, page_str = query.data.split(":", 3)
-        roulette_id = int(rid_str)
-        page = int(page_str) if page_str.isdigit() else 1
-        roulette = get_roulette(roulette_id)
-        if not roulette:
-            await query.answer("⚠️ هذا السحب لم يعد موجودًا.", show_alert=True)
-            return
-        roulettes = _admrr_filter_roulettes(get_all_quick_roulettes(), filt)
-        index = next((i + 1 for i, r in enumerate(roulettes) if r["roulette_id"] == roulette_id), 0)
-        participants_total = count_participants(roulette_id)
-        text, entities = build_admrr_detail_message(roulette, index, participants_total)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admrr_detail_keyboard(roulette_id, filt, page),
-        )
-        return
-
-    if query.data.startswith("admrr_search:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, filt, page_str = query.data.split(":", 2)
-        page = int(page_str) if page_str.isdigit() else 1
-        context.user_data["awaiting"] = "admrr_search_lookup"
-        context.user_data["admrr_search_filt"] = filt
-        context.user_data["admrr_search_page"] = page
-        await query.edit_message_text(
-            "🔍 أرسل الآن كود السحب السريع الذي تريد البحث عنه ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data=f"admrr_list:{filt}:{page}", style="danger",
-                                      **emoji_kwargs("back_section_btn")),
-            ]]),
-        )
-        return
-
-    if query.data.startswith("admrr_delc:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, rid_str, filt, page_str = query.data.split(":", 3)
-        roulette_id = int(rid_str)
-        page = int(page_str) if page_str.isdigit() else 1
-        roulette = get_roulette(roulette_id)
-        if not roulette:
-            await query.answer("⚠️ هذا السحب لم يعد موجودًا.", show_alert=True)
-            return
-        text, entities = build_admrr_delete_confirm_message(roulette)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admrr_delete_confirm_keyboard(roulette_id, filt, page),
-        )
-        return
-
-    if query.data.startswith("admrr_delete_do:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, rid_str, filt, page_str = query.data.split(":", 3)
-        roulette_id = int(rid_str)
-        page = int(page_str) if page_str.isdigit() else 1
-        delete_quick_roulette_admin(roulette_id)
-        log_admin_action(
-            "delete_quick_roulette", query.from_user.id, details=f"معرف السحب السريع: {roulette_id}",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        await query.answer("🗑️ تم حذف السحب السريع بنجاح")
-        roulettes = _admrr_filter_roulettes(get_all_quick_roulettes(), filt)
-        total_pages = max(1, -(-len(roulettes) // GW_LIST_PAGE_SIZE))
-        page = max(1, min(page, total_pages))
-        text, entities = build_admrr_list_message(filt, page, total_pages, len(roulettes))
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admrr_list_keyboard(roulettes, filt, page, total_pages),
-        )
-        return
-
-    if query.data == "admrr_stats":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        stats = await asyncio.to_thread(get_quick_roulette_statistics)
-        text, entities = build_admrr_stats_message(stats)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_admrr_stats_keyboard(),
-        )
-        return
-
-    if query.data == "admrr_noop":
-        await query.answer()
-        return
-
-    if query.data == "owner_broadcast_section":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        text, entities = build_owner_broadcast_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_broadcast_section_keyboard(),
-        )
-        return
-
-    if query.data == "broadcast_send_menu":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        # ⚠️ يجب أن تتم كل خطوات إعداد/تعديل الإذاعة من داخل محادثة المالك
-        # الخاصة مع البوت فقط، تجنبًا لأي التباس إذا وصلت هذه الرسالة بطريقة
-        # ما داخل مجموعة (حماية إضافية فوق قيد ChatType.PRIVATE على المعالجات).
-        if query.message and query.message.chat.type != "private":
-            await query.answer("⛔ إعداد الإذاعة متاح فقط من داخل محادثتك الخاصة مع البوت.", show_alert=True)
-            return
-        if _BROADCAST_STATE["running"]:
-            await query.answer("⚠️ توجد إذاعة قيد التنفيذ بالفعل، أوقفها أولاً إن أردت إرسال إذاعة جديدة.",
-                               show_alert=True)
-            return
-        context.user_data["awaiting"] = "broadcast_await_content"
-        text, entities = build_broadcast_universal_prompt_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_broadcast_universal_prompt_keyboard(),
-        )
-        return
-
-    if query.data == "broadcast_confirm_send":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        if query.message and query.message.chat.type != "private":
-            await query.answer("⛔ إعداد الإذاعة متاح فقط من داخل محادثتك الخاصة مع البوت.", show_alert=True)
-            return
-        pending = context.user_data.get("broadcast_pending")
-        if not pending:
-            await query.answer("⚠️ لا توجد رسالة إذاعة قيد الانتظار (ربما انتهت صلاحيتها).", show_alert=True)
-            return
-        if _BROADCAST_STATE["running"]:
-            await query.answer("⚠️ توجد إذاعة قيد التنفيذ بالفعل.", show_alert=True)
-            return
-        context.user_data.pop("broadcast_pending", None)
-        await query.answer("📣 بدأت عملية الإذاعة الآن، سيصلك إشعار عند الانتهاء ”", show_alert=True)
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-        asyncio.create_task(run_broadcast(
-            context, pending["content_type"], query.from_user.id,
-            source_chat_id=pending["source_chat_id"], source_message_id=pending["source_message_id"],
-            text=pending.get("text"), caption=pending.get("caption"),
-        ))
-        return
-
-    if query.data == "broadcast_cancel_send":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        context.user_data.pop("broadcast_pending", None)
-        await query.answer("❌ تم إلغاء إرسال الإذاعة.")
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-        return
-
-    if query.data == "broadcast_stop":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        if not _BROADCAST_STATE["running"]:
-            await query.answer("ℹ️ لا توجد إذاعة قيد التنفيذ حاليًا.", show_alert=True)
-        else:
-            _BROADCAST_STATE["stop_requested"] = True
-            await query.answer("⏹️ سيتم إيقاف الإذاعة خلال لحظات ”", show_alert=True)
-        return
-
-    if query.data == "broadcast_stats":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        stats = get_broadcast_stats()
-        text, entities = build_broadcast_stats_message(stats)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_broadcast_stats_keyboard(),
-        )
-        return
-
-    if query.data == "broadcast_logs:noop":
-        await query.answer()
-        return
-
-    if query.data.startswith("broadcast_logs:list:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        page_str = query.data.split(":", 2)[2]
-        page = int(page_str) if page_str.isdigit() else 1
-        rows = get_broadcast_logs()
-        text, entities = build_broadcast_logs_list_message(rows)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_broadcast_logs_list_keyboard(rows, page),
-        )
-        return
-
-    if query.data.startswith("broadcast_logs:pick:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, _, log_id, page_str = query.data.split(":", 3)
-        back_page = int(page_str) if page_str.isdigit() else 1
-        row = get_broadcast_log(log_id)
-        if not row:
-            await query.answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
-            return
-        text, entities = build_broadcast_log_detail_message(row)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_broadcast_log_detail_keyboard(log_id, back_page),
-        )
-        return
-
-    if query.data.startswith("broadcast_logs:edit:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        if query.message and query.message.chat.type != "private":
-            await query.answer("⛔ تعديل الإذاعة متاح فقط من داخل محادثتك الخاصة مع البوت.", show_alert=True)
-            return
-        _, _, log_id, page_str = query.data.split(":", 3)
-        back_page = int(page_str) if page_str.isdigit() else 1
-        row = get_broadcast_log(log_id)
-        if not row:
-            await query.answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
-            return
-        context.user_data["awaiting"] = "broadcast_log_edit_text"
-        context.user_data["broadcast_log_edit_id"] = log_id
-        context.user_data["broadcast_log_edit_back_page"] = back_page
-        await query.edit_message_text(
-            "✍️ أرسل الآن النص الجديد الذي سيحل محل النص/التعليق المؤرشف لهذا السجل.\n"
-            "⚠️ هذا يعدّل الأرشيف فقط ولا يعيد إرسال أي رسالة للمستخدمين ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data=f"broadcast_logs:pick:{log_id}:{back_page}", style="danger"),
-            ]]),
-        )
-        return
-
-    if query.data.startswith("broadcast_logs:delete_confirm:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, _, log_id, page_str = query.data.split(":", 3)
-        back_page = int(page_str) if page_str.isdigit() else 1
-        delete_broadcast_log(log_id)
-        log_admin_action(
-            "delete_broadcast_log", query.from_user.id, details=f"معرف السجل: {log_id}",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        await query.answer("🗑️ تم حذف السجل بنجاح")
-        rows = get_broadcast_logs()
-        text, entities = build_broadcast_logs_list_message(rows)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_broadcast_logs_list_keyboard(rows, back_page),
-        )
-        return
-
-    if query.data.startswith("broadcast_logs:delete:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, _, log_id, page_str = query.data.split(":", 3)
-        back_page = int(page_str) if page_str.isdigit() else 1
-        row = get_broadcast_log(log_id)
-        if not row:
-            await query.answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
-            return
-        text, entities = build_broadcast_log_delete_confirm_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_broadcast_log_delete_confirm_keyboard(log_id, back_page),
-        )
-        return
-
-    if query.data.startswith("broadcast_logs:delete_actual:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, _, log_id, page_str = query.data.split(":", 3)
-        back_page = int(page_str) if page_str.isdigit() else 1
-        row = get_broadcast_log(log_id)
-        if not row:
-            await query.answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
-            return
-        text, entities = build_broadcast_log_delete_actual_confirm_message(row)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_broadcast_log_delete_actual_confirm_keyboard(log_id, back_page),
-        )
-        return
-
-    if query.data.startswith("broadcast_logs:delete_actual_confirm:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
-            return
-        _, _, log_id, page_str = query.data.split(":", 3)
-        back_page = int(page_str) if page_str.isdigit() else 1
-        row = get_broadcast_log(log_id)
-        if not row:
-            await query.answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
-            return
-        await query.answer("🚫 جاري حذف الرسائل من عند المستخدمين، قد يستغرق هذا بعض الوقت ”")
-        deleted, failed = await delete_broadcast_actual_messages(context, log_id)
-        log_admin_action(
-            "delete_broadcast_actual", query.from_user.id,
-            details=f"معرف السجل: {log_id} — نجح: {deleted} — تعذّر: {failed}",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        row = get_broadcast_log(log_id)
-        text, entities = build_broadcast_log_detail_message(row)
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_broadcast_log_detail_keyboard(log_id, back_page),
-        )
-        return
-
-
-    if query.data == "points_settings":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
-            return
-        text, entities = build_points_settings_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_points_settings_keyboard(),
-        )
-        return
-
-    if query.data == "points_text_settings":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
-            return
-        text, entities = build_points_text_settings_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_points_text_settings_keyboard(),
-        )
-        return
-
-    if query.data == "points_restore_defaults":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
-            return
-        set_setting("points_title", DEFAULT_POINTS_TITLE)
-        set_setting("points_conditions", DEFAULT_POINTS_CONDITIONS)
-        log_admin_action(
-            "change_settings", query.from_user.id, details="إعادة نصوص قسم ربح للوضع الافتراضي",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        await query.answer("✅ تمت إعادة نصوص قسم ربح للوضع الافتراضي.")
-        text, entities = build_points_text_settings_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_points_text_settings_keyboard(),
-        )
-        return
-
-    if query.data == "points_toggle":
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
-            return
-        new_value = "0" if get_setting("points_enabled") == "1" else "1"
-        set_setting("points_enabled", new_value)
-        log_admin_action(
-            "change_settings", query.from_user.id,
-            details=f"تفعيل قسم ربح: {'مفعّل' if new_value == '1' else 'معطّل'}",
-            actor_name=query.from_user.full_name, actor_username=query.from_user.username,
-        )
-        text, entities = build_owner_points_section_message()
-        await query.edit_message_text(
-            text=text, entities=entities,
-            reply_markup=build_owner_points_section_keyboard(),
-        )
-        return
-
-    if query.data.startswith("points_edit:"):
-        if not is_owner(query.from_user.id):
-            await query.answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
-            return
-        field = query.data.split(":", 1)[1]
-        labels = {
-            "points_per_user": "عدد النقاط لكل مستخدم جديد",
-            "points_required": "عدد النقاط المطلوبة للمكافأة",
-            "reward_type": "نوع أو عملة المكافأة",
-            "reward_value": "قيمة المكافأة",
-            "points_title": "عنوان قسم ربح",
-            "points_conditions": "شروط قسم ربح",
-        }
-        context.user_data["awaiting_setting"] = field
-        await query.edit_message_text(
-            f"✍️ أرسل الآن {labels.get(field, 'القيمة الجديدة')} ”",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 رجوع", callback_data="points_settings", style="danger")
-            ]]),
-        )
-        return
-
-    if query.data == "remind_win":
-        enabled = toggle_remind_win(query.from_user.id)
-        try:
-            await query.edit_message_reply_markup(
-                reply_markup=build_main_keyboard(enabled, query.from_user.id)
+            target_id = int(query.data.split(":", 1)[1])
+            if not get_referral(target_id):
+                await _cb_answer("⚠️ هذا المستخدم لم يعد صاحب رابط دعوة.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "referral_edit_percentage"
+            context.user_data["referral_target_id"] = target_id
+            await query.edit_message_text(
+                "✍️ أرسل الآن نسبة الإحالة الجديدة لهذا المستخدم (رقم من 0 إلى 100) ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"owner_referrals_pick:view:{target_id}", style="danger")
+                ]]),
             )
-        except Exception:
-            pass
-        return
+            return
 
-    if query.data == "create_contest":
-        text, entities = build_contest_section_message()
-        await query.edit_message_text(
-            text=text,
-            entities=entities,
-            reply_markup=build_contest_section_keyboard(),
-        )
-        return
+        if query.data.startswith("owner_referrals_remove_do:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+                return
+            target_id = int(query.data.split(":", 1)[1])
+            remove_referrer(target_id)
+            log_admin_action(
+                "remove_referrer", query.from_user.id, details=f"معرف المستخدم: {target_id}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer("✅ تمت إزالة صاحب رابط الدعوة بنجاح")
+            rows = list_referrers()
+            text, entities = build_owner_referrals_list_message(rows, "view")
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_referrals_list_keyboard(rows, "view", 1),
+            )
+            return
 
-    if query.data == "terms":
-        text, entities = build_terms_message()
-        await query.edit_message_text(
-            text=text,
-            entities=entities,
-            reply_markup=build_terms_keyboard(),
-        )
-        return
+        if query.data == "owner_stats_section":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            await _cb_answer()
+            # يُنفَّذ عبر asyncio.to_thread في خيط منفصل حتى لا تُجمِّد قراءة كل
+            # مستخدمي/قنوات البوت من Firestore حلقة أحداث البوت (event loop)
+            # وتُعلِّق باقي المستخدمين لحين انتهائها — نفس النمط المتّبع أصلًا
+            # في هذا المشروع لأي عملية Firestore ثقيلة داخل async handler.
+            stats = await asyncio.to_thread(get_full_bot_statistics)
+            required_members = await get_required_channels_total_members(context)
+            text, entities = build_owner_stats_message(stats, required_members)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_stats_keyboard(),
+            )
+            return
 
-    if query.data == "support_bot":
-        text, entities = build_support_bot_message()
-        await query.edit_message_text(
-            text=text,
-            entities=entities,
-            reply_markup=build_support_bot_keyboard(),
-        )
-        return
+        if query.data == "owner_logs_noop":
+            await _cb_answer()
+            return
 
-    if query.data == "support_pay_stars":
-        await context.bot.send_invoice(
-            chat_id=query.message.chat_id,
-            title="دعم البوت ⭐",
-            description=(
-                f"ادفع {SUPPORT_BOT_STARS_AMOUNT} نجوم تيليجرام لدعم تطوير البوت 💖\n\n"
-                "كل نجمة تساعدنا في الاستمرار وتطوير ميزات جديدة!"
-            ),
-            payload="support_bot_stars",
-            provider_token="",
-            currency="XTR",
-            prices=[LabeledPrice("دعم البوت", SUPPORT_BOT_STARS_AMOUNT)],
-        )
-        return
+        if query.data.startswith("owner_logs:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            await _cb_answer()
+            page = int(query.data.split(":", 1)[1])
+            logs = get_admin_logs()
+            text, entities = build_owner_logs_section_message(logs, page)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_logs_section_keyboard(logs, page),
+            )
+            return
 
-    replies = {}
-    if query.data in replies:
-        emoji_char, emoji_key = replies[query.data]
-        text, entities = build_under_development_message(emoji_key=emoji_key, emoji_char=emoji_char)
-        await query.message.reply_text(text=text, entities=entities)
+        if query.data == "owner_maintenance_noop":
+            await _cb_answer()
+            return
+
+        if query.data == "owner_maintenance_section":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            await _cb_answer()
+            text, entities = build_owner_maintenance_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_maintenance_section_keyboard(),
+            )
+            return
+
+        if query.data == "owner_maintenance_toggle":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            new_state = not is_maintenance_mode()
+            set_maintenance_mode(new_state)
+            log_admin_action(
+                "change_settings", query.from_user.id,
+                details=f"وضع الصيانة: {'مفعّل' if new_state else 'معطّل'}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer("🔴 تم تفعيل وضع الصيانة" if new_state else "🟢 تم إيقاف وضع الصيانة", show_alert=True)
+            text, entities = build_owner_maintenance_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_maintenance_section_keyboard(),
+            )
+            return
+
+        if query.data == "owner_maintenance_speedtest":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            await _cb_answer("⏳ جاري فحص السرعة ”")
+            try:
+                elapsed_ms, label = measure_bot_response_time()
+            except Exception:
+                logger.exception("تعذّر إجراء فحص سرعة الاستجابة")
+                await _cb_answer("⚠️ تعذّر إجراء الفحص، حاول مجددًا.", show_alert=True)
+                return
+            text, entities = build_owner_maintenance_speedtest_message(elapsed_ms, label)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_maintenance_section_keyboard(),
+            )
+            return
+
+        if query.data == "owner_maintenance_status":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            await _cb_answer()
+            text, entities = build_owner_maintenance_status_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_maintenance_section_keyboard(),
+            )
+            return
+
+        if query.data == "owner_reset_test_user":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            await _cb_answer()
+            context.user_data["awaiting"] = "reset_test_user_lookup"
+            _bt, _be = bold_notice(
+                "✍️ أرسل الآن يوزر المستخدم الذي تريد حذف بياناته (مثال: @Jzllzjzjzjjz)، "
+                "أو أرسل معرّفه الرقمي مباشرة ”"
+            )
+            await query.edit_message_text(
+                text=_bt, entities=_be,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="owner_maintenance_section", style="danger"),
+                ]]),
+            )
+            return
+
+        if query.data == "owner_new_user_notify_section":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            await _cb_answer()
+            text, entities = build_new_user_notify_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_new_user_notify_section_keyboard(),
+            )
+            return
+
+        if query.data == "owner_newuser_toggle":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            if not is_new_user_notify_enabled():
+                if not get_new_user_notify_channel():
+                    await _cb_answer("⚠️ حدّد قناة الإشعارات أولًا قبل التفعيل.", show_alert=True)
+                    return
+                set_new_user_notify_enabled(True)
+                msg = "🟢 تم تفعيل إشعارات دخول المستخدمين."
+            else:
+                set_new_user_notify_enabled(False)
+                msg = "🔴 تم إيقاف إشعارات دخول المستخدمين."
+            log_admin_action(
+                "change_settings", query.from_user.id, details=msg,
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer(msg, show_alert=True)
+            text, entities = build_new_user_notify_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_new_user_notify_section_keyboard(),
+            )
+            return
+
+        if query.data == "owner_newuser_channel_set":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "new_user_notify_channel_set"
+            await query.edit_message_text(
+                "✍️ أرسل الآن يوزر القناة (مثال: @channel أو رابط t.me/channel).\n"
+                "⚠️ تأكد من إضافة البوت كمشرف (Admin) في القناة أولًا حتى يتمكن من الإرسال إليها ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="owner_new_user_notify_section", style="danger"),
+                ]]),
+            )
+            return
+
+        if query.data == "owner_newuser_channel_clear":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            clear_new_user_notify_channel()
+            # إجراء ذكي: إن أُلغيت القناة أثناء تفعيل الإشعارات، تُوقَف الإشعارات
+            # تلقائيًا تجنبًا لحالة "مفعّلة بلا قناة" التي لن تُرسِل شيئًا بصمت.
+            was_enabled = is_new_user_notify_enabled()
+            if was_enabled:
+                set_new_user_notify_enabled(False)
+            log_admin_action(
+                "change_settings", query.from_user.id, details="إلغاء قناة إشعارات دخول المستخدمين",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer(
+                "✅ تم إلغاء قناة الإشعارات." + (" وتم إيقاف الإشعارات تلقائيًا." if was_enabled else ""),
+                show_alert=True,
+            )
+            text, entities = build_new_user_notify_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_new_user_notify_section_keyboard(),
+            )
+            return
+
+        if query.data == "owner_draws_section":
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_draws_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_draws_section_keyboard(),
+            )
+            return
+
+        if query.data.startswith("admgw_list:"):
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, filt, page_str = query.data.split(":", 2)
+            page = int(page_str) if page_str.isdigit() else 1
+            giveaways = _admgw_filter_giveaways(get_all_giveaways(), filt)
+            total_pages = max(1, -(-len(giveaways) // GW_LIST_PAGE_SIZE))
+            page = max(1, min(page, total_pages))
+            text, entities = build_admgw_list_message(filt, page, total_pages, len(giveaways))
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admgw_list_keyboard(giveaways, filt, page, total_pages),
+            )
+            return
+
+        if query.data.startswith("admgw_detail:"):
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, gw_code, filt, page_str = query.data.split(":", 3)
+            page = int(page_str) if page_str.isdigit() else 1
+            giveaway = get_giveaway(gw_code)
+            if not giveaway:
+                await _cb_answer("⚠️ هذا السحب لم يعد موجودًا.", show_alert=True)
+                return
+            giveaways = _admgw_filter_giveaways(get_all_giveaways(), filt)
+            index = next((i + 1 for i, g in enumerate(giveaways) if g["gw_code"] == gw_code), 0)
+            channel_title = get_chat_title_by_id(giveaway["chat_id"])
+            participants_total = count_giveaway_participants(gw_code)
+            channel_url = await build_contest_post_link(context, giveaway["chat_id"], giveaway.get("channel_message_id"))
+            text, entities = build_admgw_detail_message(giveaway, index, channel_title, participants_total)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admgw_detail_keyboard(gw_code, filt, page, channel_url=channel_url),
+            )
+            return
+
+        if query.data.startswith("admgw_search:"):
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, filt, page_str = query.data.split(":", 2)
+            page = int(page_str) if page_str.isdigit() else 1
+            context.user_data["awaiting"] = "admgw_search_lookup"
+            context.user_data["admgw_search_filt"] = filt
+            context.user_data["admgw_search_page"] = page
+            await query.edit_message_text(
+                "🔍 أرسل الآن كود السحب الذي تريد البحث عنه ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"admgw_list:{filt}:{page}", style="danger",
+                                          **emoji_kwargs("back_section_btn")),
+                ]]),
+            )
+            return
+
+        if query.data.startswith("admgw_delc:"):
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, gw_code, filt, page_str = query.data.split(":", 3)
+            page = int(page_str) if page_str.isdigit() else 1
+            giveaway = get_giveaway(gw_code)
+            if not giveaway:
+                await _cb_answer("⚠️ هذا السحب لم يعد موجودًا.", show_alert=True)
+                return
+            text, entities = build_admgw_delete_confirm_message(giveaway)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admgw_delete_confirm_keyboard(gw_code, filt, page),
+            )
+            return
+
+        if query.data.startswith("admgw_delete_do:"):
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, gw_code, filt, page_str = query.data.split(":", 3)
+            page = int(page_str) if page_str.isdigit() else 1
+            delete_giveaway_admin(gw_code)
+            log_admin_action(
+                "delete_giveaway", query.from_user.id, details=f"كود السحب: {gw_code}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer("🗑️ تم حذف السحب بنجاح")
+            giveaways = _admgw_filter_giveaways(get_all_giveaways(), filt)
+            total_pages = max(1, -(-len(giveaways) // GW_LIST_PAGE_SIZE))
+            page = max(1, min(page, total_pages))
+            text, entities = build_admgw_list_message(filt, page, total_pages, len(giveaways))
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admgw_list_keyboard(giveaways, filt, page, total_pages),
+            )
+            return
+
+        if query.data == "admgw_stats":
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            stats = await asyncio.to_thread(get_giveaways_statistics)
+            text, entities = build_admgw_stats_message(stats)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admgw_stats_keyboard(),
+            )
+            return
+
+        if query.data == "admgw_noop":
+            await _cb_answer()
+            return
+
+        if query.data == "owner_contests_section":
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_contests_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_contests_section_keyboard(),
+            )
+            return
+
+        if query.data.startswith("admct_list:"):
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, filt, page_str = query.data.split(":", 2)
+            page = int(page_str) if page_str.isdigit() else 1
+            contests = _admct_filter_contests(get_all_contests(), filt)
+            total_pages = max(1, -(-len(contests) // GW_LIST_PAGE_SIZE))
+            page = max(1, min(page, total_pages))
+            text, entities = build_admct_list_message(filt, page, total_pages, len(contests))
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admct_list_keyboard(contests, filt, page, total_pages),
+            )
+            return
+
+        if query.data.startswith("admct_detail:"):
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, contest_code, filt, page_str = query.data.split(":", 3)
+            page = int(page_str) if page_str.isdigit() else 1
+            contest = get_contest(contest_code)
+            if not contest:
+                await _cb_answer("⚠️ هذه المسابقة لم تعد موجودة.", show_alert=True)
+                return
+            contests = _admct_filter_contests(get_all_contests(), filt)
+            index = next((i + 1 for i, c in enumerate(contests) if c["contest_code"] == contest_code), 0)
+            channel_title = get_chat_title_by_id(contest["chat_id"])
+            participants_total = count_contest_participants(contest_code)
+            channel_url = await build_contest_post_link(context, contest["chat_id"], contest.get("channel_message_id"))
+            text, entities = build_admct_detail_message(contest, index, channel_title, participants_total)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admct_detail_keyboard(contest_code, filt, page, channel_url=channel_url),
+            )
+            return
+
+        if query.data.startswith("admct_search:"):
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, filt, page_str = query.data.split(":", 2)
+            page = int(page_str) if page_str.isdigit() else 1
+            context.user_data["awaiting"] = "admct_search_lookup"
+            context.user_data["admct_search_filt"] = filt
+            context.user_data["admct_search_page"] = page
+            await query.edit_message_text(
+                "🔍 أرسل الآن كود المسابقة الذي تريد البحث عنها ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"admct_list:{filt}:{page}", style="danger",
+                                          **emoji_kwargs("back_section_btn")),
+                ]]),
+            )
+            return
+
+        if query.data.startswith("admct_delc:"):
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, contest_code, filt, page_str = query.data.split(":", 3)
+            page = int(page_str) if page_str.isdigit() else 1
+            contest = get_contest(contest_code)
+            if not contest:
+                await _cb_answer("⚠️ هذه المسابقة لم تعد موجودة.", show_alert=True)
+                return
+            text, entities = build_admct_delete_confirm_message(contest)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admct_delete_confirm_keyboard(contest_code, filt, page),
+            )
+            return
+
+        if query.data.startswith("admct_delete_do:"):
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, contest_code, filt, page_str = query.data.split(":", 3)
+            page = int(page_str) if page_str.isdigit() else 1
+            delete_contest_admin(contest_code)
+            log_admin_action(
+                "delete_contest", query.from_user.id, details=f"كود المسابقة: {contest_code}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer("🗑️ تم حذف المسابقة بنجاح")
+            contests = _admct_filter_contests(get_all_contests(), filt)
+            total_pages = max(1, -(-len(contests) // GW_LIST_PAGE_SIZE))
+            page = max(1, min(page, total_pages))
+            text, entities = build_admct_list_message(filt, page, total_pages, len(contests))
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admct_list_keyboard(contests, filt, page, total_pages),
+            )
+            return
+
+        if query.data == "admct_stats":
+            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            stats = await asyncio.to_thread(get_contests_statistics)
+            text, entities = build_admct_stats_message(stats)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admct_stats_keyboard(),
+            )
+            return
+
+        if query.data == "admct_noop":
+            await _cb_answer()
+            return
+
+        if query.data == "owner_quick_roulette_section":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_quick_roulette_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_quick_roulette_section_keyboard(),
+            )
+            return
+
+        if query.data.startswith("admrr_list:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, filt, page_str = query.data.split(":", 2)
+            page = int(page_str) if page_str.isdigit() else 1
+            roulettes = _admrr_filter_roulettes(get_all_quick_roulettes(), filt)
+            total_pages = max(1, -(-len(roulettes) // GW_LIST_PAGE_SIZE))
+            page = max(1, min(page, total_pages))
+            text, entities = build_admrr_list_message(filt, page, total_pages, len(roulettes))
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admrr_list_keyboard(roulettes, filt, page, total_pages),
+            )
+            return
+
+        if query.data.startswith("admrr_detail:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, rid_str, filt, page_str = query.data.split(":", 3)
+            roulette_id = int(rid_str)
+            page = int(page_str) if page_str.isdigit() else 1
+            roulette = get_roulette(roulette_id)
+            if not roulette:
+                await _cb_answer("⚠️ هذا السحب لم يعد موجودًا.", show_alert=True)
+                return
+            roulettes = _admrr_filter_roulettes(get_all_quick_roulettes(), filt)
+            index = next((i + 1 for i, r in enumerate(roulettes) if r["roulette_id"] == roulette_id), 0)
+            participants_total = count_participants(roulette_id)
+            text, entities = build_admrr_detail_message(roulette, index, participants_total)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admrr_detail_keyboard(roulette_id, filt, page),
+            )
+            return
+
+        if query.data.startswith("admrr_search:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, filt, page_str = query.data.split(":", 2)
+            page = int(page_str) if page_str.isdigit() else 1
+            context.user_data["awaiting"] = "admrr_search_lookup"
+            context.user_data["admrr_search_filt"] = filt
+            context.user_data["admrr_search_page"] = page
+            await query.edit_message_text(
+                "🔍 أرسل الآن كود السحب السريع الذي تريد البحث عنه ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"admrr_list:{filt}:{page}", style="danger",
+                                          **emoji_kwargs("back_section_btn")),
+                ]]),
+            )
+            return
+
+        if query.data.startswith("admrr_delc:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, rid_str, filt, page_str = query.data.split(":", 3)
+            roulette_id = int(rid_str)
+            page = int(page_str) if page_str.isdigit() else 1
+            roulette = get_roulette(roulette_id)
+            if not roulette:
+                await _cb_answer("⚠️ هذا السحب لم يعد موجودًا.", show_alert=True)
+                return
+            text, entities = build_admrr_delete_confirm_message(roulette)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admrr_delete_confirm_keyboard(roulette_id, filt, page),
+            )
+            return
+
+        if query.data.startswith("admrr_delete_do:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, rid_str, filt, page_str = query.data.split(":", 3)
+            roulette_id = int(rid_str)
+            page = int(page_str) if page_str.isdigit() else 1
+            delete_quick_roulette_admin(roulette_id)
+            log_admin_action(
+                "delete_quick_roulette", query.from_user.id, details=f"معرف السحب السريع: {roulette_id}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer("🗑️ تم حذف السحب السريع بنجاح")
+            roulettes = _admrr_filter_roulettes(get_all_quick_roulettes(), filt)
+            total_pages = max(1, -(-len(roulettes) // GW_LIST_PAGE_SIZE))
+            page = max(1, min(page, total_pages))
+            text, entities = build_admrr_list_message(filt, page, total_pages, len(roulettes))
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admrr_list_keyboard(roulettes, filt, page, total_pages),
+            )
+            return
+
+        if query.data == "admrr_stats":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            stats = await asyncio.to_thread(get_quick_roulette_statistics)
+            text, entities = build_admrr_stats_message(stats)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_admrr_stats_keyboard(),
+            )
+            return
+
+        if query.data == "admrr_noop":
+            await _cb_answer()
+            return
+
+        if query.data == "owner_broadcast_section":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_broadcast_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_broadcast_section_keyboard(),
+            )
+            return
+
+        if query.data == "broadcast_send_menu":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            # ⚠️ يجب أن تتم كل خطوات إعداد/تعديل الإذاعة من داخل محادثة المالك
+            # الخاصة مع البوت فقط، تجنبًا لأي التباس إذا وصلت هذه الرسالة بطريقة
+            # ما داخل مجموعة (حماية إضافية فوق قيد ChatType.PRIVATE على المعالجات).
+            if query.message and query.message.chat.type != "private":
+                await _cb_answer("⛔ إعداد الإذاعة متاح فقط من داخل محادثتك الخاصة مع البوت.", show_alert=True)
+                return
+            if _BROADCAST_STATE["running"]:
+                await _cb_answer("⚠️ توجد إذاعة قيد التنفيذ بالفعل، أوقفها أولاً إن أردت إرسال إذاعة جديدة.",
+                                   show_alert=True)
+                return
+            context.user_data["awaiting"] = "broadcast_await_content"
+            text, entities = build_broadcast_universal_prompt_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_broadcast_universal_prompt_keyboard(),
+            )
+            return
+
+        if query.data == "broadcast_confirm_send":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            if query.message and query.message.chat.type != "private":
+                await _cb_answer("⛔ إعداد الإذاعة متاح فقط من داخل محادثتك الخاصة مع البوت.", show_alert=True)
+                return
+            pending = context.user_data.get("broadcast_pending")
+            if not pending:
+                await _cb_answer("⚠️ لا توجد رسالة إذاعة قيد الانتظار (ربما انتهت صلاحيتها).", show_alert=True)
+                return
+            if _BROADCAST_STATE["running"]:
+                await _cb_answer("⚠️ توجد إذاعة قيد التنفيذ بالفعل.", show_alert=True)
+                return
+            context.user_data.pop("broadcast_pending", None)
+            await _cb_answer("📣 بدأت عملية الإذاعة الآن، سيصلك إشعار عند الانتهاء ”", show_alert=True)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            asyncio.create_task(run_broadcast(
+                context, pending["content_type"], query.from_user.id,
+                source_chat_id=pending["source_chat_id"], source_message_id=pending["source_message_id"],
+                text=pending.get("text"), caption=pending.get("caption"),
+            ))
+            return
+
+        if query.data == "broadcast_cancel_send":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            context.user_data.pop("broadcast_pending", None)
+            await _cb_answer("❌ تم إلغاء إرسال الإذاعة.")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+
+        if query.data == "broadcast_stop":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            if not _BROADCAST_STATE["running"]:
+                await _cb_answer("ℹ️ لا توجد إذاعة قيد التنفيذ حاليًا.", show_alert=True)
+            else:
+                _BROADCAST_STATE["stop_requested"] = True
+                await _cb_answer("⏹️ سيتم إيقاف الإذاعة خلال لحظات ”", show_alert=True)
+            return
+
+        if query.data == "broadcast_stats":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            stats = get_broadcast_stats()
+            text, entities = build_broadcast_stats_message(stats)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_broadcast_stats_keyboard(),
+            )
+            return
+
+        if query.data == "broadcast_logs:noop":
+            await _cb_answer()
+            return
+
+        if query.data.startswith("broadcast_logs:list:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            page_str = query.data.split(":", 2)[2]
+            page = int(page_str) if page_str.isdigit() else 1
+            rows = get_broadcast_logs()
+            text, entities = build_broadcast_logs_list_message(rows)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_broadcast_logs_list_keyboard(rows, page),
+            )
+            return
+
+        if query.data.startswith("broadcast_logs:pick:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, _, log_id, page_str = query.data.split(":", 3)
+            back_page = int(page_str) if page_str.isdigit() else 1
+            row = get_broadcast_log(log_id)
+            if not row:
+                await _cb_answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
+                return
+            text, entities = build_broadcast_log_detail_message(row)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_broadcast_log_detail_keyboard(log_id, back_page),
+            )
+            return
+
+        if query.data.startswith("broadcast_logs:edit:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            if query.message and query.message.chat.type != "private":
+                await _cb_answer("⛔ تعديل الإذاعة متاح فقط من داخل محادثتك الخاصة مع البوت.", show_alert=True)
+                return
+            _, _, log_id, page_str = query.data.split(":", 3)
+            back_page = int(page_str) if page_str.isdigit() else 1
+            row = get_broadcast_log(log_id)
+            if not row:
+                await _cb_answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "broadcast_log_edit_text"
+            context.user_data["broadcast_log_edit_id"] = log_id
+            context.user_data["broadcast_log_edit_back_page"] = back_page
+            await query.edit_message_text(
+                "✍️ أرسل الآن النص الجديد الذي سيحل محل النص/التعليق المؤرشف لهذا السجل.\n"
+                "⚠️ هذا يعدّل الأرشيف فقط ولا يعيد إرسال أي رسالة للمستخدمين ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data=f"broadcast_logs:pick:{log_id}:{back_page}", style="danger"),
+                ]]),
+            )
+            return
+
+        if query.data.startswith("broadcast_logs:delete_confirm:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, _, log_id, page_str = query.data.split(":", 3)
+            back_page = int(page_str) if page_str.isdigit() else 1
+            delete_broadcast_log(log_id)
+            log_admin_action(
+                "delete_broadcast_log", query.from_user.id, details=f"معرف السجل: {log_id}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer("🗑️ تم حذف السجل بنجاح")
+            rows = get_broadcast_logs()
+            text, entities = build_broadcast_logs_list_message(rows)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_broadcast_logs_list_keyboard(rows, back_page),
+            )
+            return
+
+        if query.data.startswith("broadcast_logs:delete:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, _, log_id, page_str = query.data.split(":", 3)
+            back_page = int(page_str) if page_str.isdigit() else 1
+            row = get_broadcast_log(log_id)
+            if not row:
+                await _cb_answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
+                return
+            text, entities = build_broadcast_log_delete_confirm_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_broadcast_log_delete_confirm_keyboard(log_id, back_page),
+            )
+            return
+
+        if query.data.startswith("broadcast_logs:delete_actual:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, _, log_id, page_str = query.data.split(":", 3)
+            back_page = int(page_str) if page_str.isdigit() else 1
+            row = get_broadcast_log(log_id)
+            if not row:
+                await _cb_answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
+                return
+            text, entities = build_broadcast_log_delete_actual_confirm_message(row)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_broadcast_log_delete_actual_confirm_keyboard(log_id, back_page),
+            )
+            return
+
+        if query.data.startswith("broadcast_logs:delete_actual_confirm:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            _, _, log_id, page_str = query.data.split(":", 3)
+            back_page = int(page_str) if page_str.isdigit() else 1
+            row = get_broadcast_log(log_id)
+            if not row:
+                await _cb_answer("⚠️ هذا السجل لم يعد موجودًا.", show_alert=True)
+                return
+            await _cb_answer("🚫 جاري حذف الرسائل من عند المستخدمين، قد يستغرق هذا بعض الوقت ”")
+            deleted, failed = await delete_broadcast_actual_messages(context, log_id)
+            log_admin_action(
+                "delete_broadcast_actual", query.from_user.id,
+                details=f"معرف السجل: {log_id} — نجح: {deleted} — تعذّر: {failed}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            row = get_broadcast_log(log_id)
+            text, entities = build_broadcast_log_detail_message(row)
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_broadcast_log_detail_keyboard(log_id, back_page),
+            )
+            return
+
+
+        if query.data == "points_settings":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
+                return
+            text, entities = build_points_settings_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_points_settings_keyboard(),
+            )
+            return
+
+        if query.data == "points_text_settings":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
+                return
+            text, entities = build_points_text_settings_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_points_text_settings_keyboard(),
+            )
+            return
+
+        if query.data == "points_restore_defaults":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
+                return
+            set_setting("points_title", DEFAULT_POINTS_TITLE)
+            set_setting("points_conditions", DEFAULT_POINTS_CONDITIONS)
+            log_admin_action(
+                "change_settings", query.from_user.id, details="إعادة نصوص قسم ربح للوضع الافتراضي",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer("✅ تمت إعادة نصوص قسم ربح للوضع الافتراضي.")
+            text, entities = build_points_text_settings_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_points_text_settings_keyboard(),
+            )
+            return
+
+        if query.data == "points_toggle":
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
+                return
+            new_value = "0" if get_setting("points_enabled") == "1" else "1"
+            set_setting("points_enabled", new_value)
+            log_admin_action(
+                "change_settings", query.from_user.id,
+                details=f"تفعيل قسم ربح: {'مفعّل' if new_value == '1' else 'معطّل'}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            text, entities = build_owner_points_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_points_section_keyboard(),
+            )
+            return
+
+        if query.data.startswith("points_edit:"):
+            if not is_owner(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
+                return
+            field = query.data.split(":", 1)[1]
+            labels = {
+                "points_per_user": "عدد النقاط لكل مستخدم جديد",
+                "points_required": "عدد النقاط المطلوبة للمكافأة",
+                "reward_type": "نوع أو عملة المكافأة",
+                "reward_value": "قيمة المكافأة",
+                "points_title": "عنوان قسم ربح",
+                "points_conditions": "شروط قسم ربح",
+            }
+            context.user_data["awaiting_setting"] = field
+            await query.edit_message_text(
+                f"✍️ أرسل الآن {labels.get(field, 'القيمة الجديدة')} ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="points_settings", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data == "remind_win":
+            enabled = toggle_remind_win(query.from_user.id)
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=build_main_keyboard(enabled, query.from_user.id)
+                )
+            except Exception:
+                pass
+            return
+
+        if query.data == "create_contest":
+            text, entities = build_contest_section_message()
+            await query.edit_message_text(
+                text=text,
+                entities=entities,
+                reply_markup=build_contest_section_keyboard(),
+            )
+            return
+
+        if query.data == "terms":
+            text, entities = build_terms_message()
+            await query.edit_message_text(
+                text=text,
+                entities=entities,
+                reply_markup=build_terms_keyboard(),
+            )
+            return
+
+        if query.data == "support_bot":
+            text, entities = build_support_bot_message()
+            await query.edit_message_text(
+                text=text,
+                entities=entities,
+                reply_markup=build_support_bot_keyboard(),
+            )
+            return
+
+        if query.data == "support_pay_stars":
+            await context.bot.send_invoice(
+                chat_id=query.message.chat_id,
+                title="دعم البوت ⭐",
+                description=(
+                    f"ادفع {SUPPORT_BOT_STARS_AMOUNT} نجوم تيليجرام لدعم تطوير البوت 💖\n\n"
+                    "كل نجمة تساعدنا في الاستمرار وتطوير ميزات جديدة!"
+                ),
+                payload="support_bot_stars",
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice("دعم البوت", SUPPORT_BOT_STARS_AMOUNT)],
+            )
+            return
+
+        replies = {}
+        if query.data in replies:
+            emoji_char, emoji_key = replies[query.data]
+            text, entities = build_under_development_message(emoji_key=emoji_key, emoji_char=emoji_char)
+            await query.message.reply_text(text=text, entities=entities)
+    finally:
+        # ضمان: إن لم يُرسَل أي رد على الضغطة داخل الفروع أعلاه (مثل فروع لا تعرض
+        # تنبيهًا وتعتمد على رد فارغ)، نرسل ردًا فارغًا هنا حتى لا يبقى الزر
+        # "معلّقًا" على تيليجرام. إن كان قد أُرسل رد بالفعل (خصوصًا تنبيه)، لا نكرره.
+        if not _cb_answered:
+            try:
+                await query.answer()
+            except Exception:
+                pass
 
 async def support_precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """يوافق تلقائيًا على أي طلب دفع بنجوم تيليجرام (XTR) قبل تأكيد الشراء النهائي."""
@@ -14128,6 +14202,60 @@ async def support_successful_payment_callback(update: Update, context: ContextTy
 async def get_id_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["awaiting"] = "emoji_id"
     _bt, _be = bold_notice("أرسل الآن الإيموجي المتحرك الذي تريد معرفة رقمه 👇")
+    await update.message.reply_text(text=_bt, entities=_be)
+
+async def reset_test_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر خاص بمالك البوت فقط: /reset_test @username أو /reset_test user_id
+    يحذف كل بيانات هذا المستخدم من Firestore (users + withdraw_requests) —
+    تمامًا مثل سكربت الحذف الخارجي — لكن الفارق الجوهري هنا أنه يُفرغ أيضًا
+    كاش المستخدم بالذاكرة (_USER_CACHE) *داخل نفس تشغيلة البوت الحيّة*.
+    ⚠️ هذا هو سبب عدم احتساب النقطة عند تجربتك السابقة عبر السكربت الخارجي:
+    ذلك السكربت يحذف من Firestore فعليًا، لكنه عملية منفصلة تمامًا عن عملية
+    البوت نفسها، فلا يمكنه لمس _USER_CACHE داخل ذاكرة البوت — يبقى البوت
+    "يتذكر" أن هذا المستخدم already `has_started`، فلا يُحتسَب كـ"مستخدم
+    جديد فعليًا" (is_genuinely_new) عند دخوله من جديد، وبالتالي لا تُمنح
+    نقطة صاحب السحب حتى مع تفعيل «منع الرشق». استخدام هذا الأمر من داخل
+    البوت نفسه يحل المشكلة دون الحاجة لإعادة تشغيل البوت بعد كل تجربة.
+    """
+    if not is_owner(update.effective_user.id):
+        return
+    if not context.args:
+        _bt, _be = bold_notice("الاستخدام: /reset_test @username أو /reset_test user_id")
+        await update.message.reply_text(text=_bt, entities=_be)
+        return
+
+    identifier = context.args[0].strip()
+    if identifier.lstrip("-").isdigit():
+        user_id = int(identifier)
+    else:
+        found = find_bot_user_by_username(identifier)
+        user_id = found.get("user_id") if found else None
+
+    if user_id is None:
+        _bt, _be = bold_notice(f"❌ لم يتم العثور على أي مستخدم بهذا اليوزر: {identifier}")
+        await update.message.reply_text(text=_bt, entities=_be)
+        return
+
+    withdraw_docs = list(
+        fs_db().collection("withdraw_requests").where("user_id", "==", user_id).stream()
+    )
+    for doc in withdraw_docs:
+        doc.reference.delete()
+
+    user_ref = _user_doc_ref(user_id)
+    existed = user_ref.get().exists
+    if existed:
+        user_ref.delete()
+
+    # 🔑 الخطوة الحاسمة: تفريغ الكاش الحيّ بالذاكرة لهذا المستخدم، وإلا
+    # سيبقى البوت يعامله كمستخدم قديم رغم حذف بياناته من قاعدة البيانات.
+    _invalidate_moderator_cache(user_id)
+
+    _bt, _be = bold_notice(
+        f"✅ تم حذف كل بيانات المستخدم {user_id} من القاعدة، "
+        "وتم تفريغ كاش الذاكرة الخاص به.\n"
+        "يمكنك الآن تجربة /start معه من جديد كأنه مستخدم جديد فعليًا."
+    )
     await update.message.reply_text(text=_bt, entities=_be)
 
 async def channel_forward_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15008,6 +15136,36 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             text=text, entities=entities,
             reply_markup=build_user_profile_keyboard(row),
+        )
+        return
+
+    if awaiting == "reset_test_user_lookup":
+        context.user_data.pop("awaiting", None)
+        if not is_owner(update.effective_user.id):
+            return
+        row, target_id = _resolve_admin_user_query(update.message.text)
+        if target_id is None:
+            await update.message.reply_text(
+                "⚠️ لم يتم التعرف على هذا المدخل. أرسل معرفًا رقميًا، أو يوزر مستخدم استخدم البوت من قبل ”",
+            )
+            return
+        # 🔑 حذف من قاعدة البيانات: طلبات السحب المرتبطة بهذا المستخدم +
+        # مستند المستخدم نفسه users/{id}.
+        withdraw_docs = list(
+            fs_db().collection("withdraw_requests").where("user_id", "==", target_id).stream()
+        )
+        for doc in withdraw_docs:
+            doc.reference.delete()
+        user_ref = _user_doc_ref(target_id)
+        if user_ref.get().exists:
+            user_ref.delete()
+        # 🔑 وتفريغ كاش الذاكرة الحيّ لنفس المستخدم — بدون هذه الخطوة يبقى
+        # البوت يعامله كمستخدم قديم رغم حذفه من القاعدة (هذا كان سبب عدم
+        # احتساب نقطة عند تجربته من جديد كمستخدم "جديد فعليًا").
+        _invalidate_moderator_cache(target_id)
+        await update.message.reply_text(
+            f"✅ تم حذف كل بيانات المستخدم {target_id} من القاعدة، وتفريغ كاش الذاكرة الخاص به.\n"
+            "يمكنك الآن تجربة /start معه من جديد كأنه مستخدم جديد فعليًا.",
         )
         return
 
@@ -16273,6 +16431,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("getid", get_id_prompt))
+    app.add_handler(CommandHandler("reset_test", reset_test_user_command))
 
     app.add_handler(CallbackQueryHandler(_go_to_quick_roulette, pattern=r"^quick_roulette_menu$"))
     app.add_handler(CallbackQueryHandler(_go_back_to_main, pattern=r"^back_to_main$"))
