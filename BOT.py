@@ -2293,7 +2293,11 @@ def build_contest_join_confirm_message(display_name: str) -> tuple:
     return build_text_with_emojis(parts)
 
 
-def build_contest_join_confirm_keyboard(contest_code: str) -> InlineKeyboardMarkup:
+def build_contest_join_confirm_keyboard(contest_code: str, is_genuinely_new: bool = False) -> InlineKeyboardMarkup:
+    # ⚡ is_genuinely_new تُمرَّر الآن ضمن callback_data (بدل إعادة حسابها لاحقًا
+    # في comp_confirm_join) — لأن المستخدم يكون قد سُجِّل بالفعل عبر start()
+    # قبل وصوله لهذه الشاشة، فإعادة استدعاء register_bot_user_and_check_new
+    # هناك كانت تُعيد False دومًا حتى لمستخدم جديد فعليًا.
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
@@ -2301,7 +2305,7 @@ def build_contest_join_confirm_keyboard(contest_code: str) -> InlineKeyboardMark
                 style="danger", **emoji_kwargs("remind_off"),
             ),
             InlineKeyboardButton(
-                "قبول", callback_data=f"comp_confirm_join:{contest_code}",
+                "قبول", callback_data=f"comp_confirm_join:{contest_code}:{1 if is_genuinely_new else 0}",
                 style="success", **emoji_kwargs("join_accept_btn"),
             ),
         ],
@@ -2381,14 +2385,17 @@ def build_contest_channel_gate_message() -> tuple:
     return build_text_with_emojis(parts)
 
 
-def build_contest_channel_gate_keyboard(contest_code: str, join_url: str) -> InlineKeyboardMarkup:
+def build_contest_channel_gate_keyboard(contest_code: str, join_url: str,
+                                         is_genuinely_new: bool = False) -> InlineKeyboardMarkup:
     """كيبورد بوابة شرط قناة المسابقة: زر «انضم إلى القناة» (إن توفّر رابط) +
     زر «تحقق ✅» الذي يعيد فحص العضوية فعليًا (بدون كاش) قبل إكمال المشاركة."""
     rows = []
     if join_url:
         rows.append([InlineKeyboardButton("📢 انضم إلى القناة", url=join_url)])
     rows.append([
-        InlineKeyboardButton("تحقق ✅", callback_data=f"compjoinchk:{contest_code}"),
+        InlineKeyboardButton(
+            "تحقق ✅", callback_data=f"compjoinchk:{contest_code}:{1 if is_genuinely_new else 0}",
+        ),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -4679,12 +4686,12 @@ async def get_required_channels_total_members(context: ContextTypes.DEFAULT_TYPE
     return total
 
 
-def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int) -> bool:
-    """يمنح النقاط مرة واحدة عالميًا بعد نجاح مشاركة السحب والكابتشا.
-
-    ⚡ موحَّد: منع الاحتساب المزدوج يعتمد الآن على حقل rewarded داخل مستند
-    المستخدم users/{id} نفسه (ضمن معاملة ذرية)، بدل مجموعة rewarded_users
-    منفصلة — نفس الضمان القديم (AlreadyExists) بدون مجموعة إضافية."""
+def _reward_new_user_once(user_id: int, owner_id: int, chat_id: int, source_fields: dict) -> bool:
+    """يمنح النقاط مرة واحدة عالميًا لأي مستخدم جديد فعليًا اجتاز منع الرشق —
+    سواء كان مصدره سحبًا أو مسابقة. منع الاحتساب المزدوج يعتمد على حقل
+    rewarded الذري داخل مستند المستخدم users/{id} نفسه (معاملة واحدة، قراءة/
+    كتابة واحدة)، فيُكافأ كل مستخدم مرة واحدة فقط عالميًا مهما تعدّدت
+    مشاركاته اللاحقة (في سحوبات أو مسابقات أخرى)."""
     if get_setting("points_enabled") != "1":
         return False
 
@@ -4701,9 +4708,9 @@ def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int
             "user_id": user_id,
             "rewarded": True,
             "rewarded_owner_id": owner_id,
-            "rewarded_gw_code": gw_code,
             "rewarded_at": datetime.now(timezone.utc).isoformat(),
         }
+        payload.update(source_fields)
         if snap.exists:
             transaction.update(ref, payload)
         else:
@@ -4727,6 +4734,18 @@ def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int
         "updated_at": datetime.now(timezone.utc).isoformat(),
     })
     return True
+
+
+def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int) -> bool:
+    """يمنح النقاط مرة واحدة عالميًا بعد نجاح مشاركة السحب والكابتشا."""
+    return _reward_new_user_once(user_id, owner_id, chat_id, {"rewarded_gw_code": gw_code})
+
+
+def reward_contest_new_participant(user_id: int, contest_code: str, owner_id: int, chat_id: int) -> bool:
+    """يمنح صاحب المسابقة نقاطًا مرة واحدة عالميًا عند مشاركة مستخدم جديد فعليًا
+    كمتسابق (بمعزل تام عن نقاط التصويت award_contest_owner_points) — بنفس
+    آلية وضمان reward_giveaway_user تمامًا."""
+    return _reward_new_user_once(user_id, owner_id, chat_id, {"rewarded_contest_code": contest_code})
 
 def award_contest_owner_points(owner_id: int) -> int:
     """يمنح صاحب المسابقة نقاطًا مقابل صوت واحد مكتمل الشروط (اشتراك + تحقق +
@@ -6623,11 +6642,7 @@ def build_points_settings_message() -> tuple:
 
 def build_points_settings_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ تفعيل" if get_setting("points_enabled") != "1" else "⛔ تعطيل",
-                                 callback_data="points_toggle", style="success" if get_setting("points_enabled") != "1" else "danger"),
-            InlineKeyboardButton("💎 لكل مستخدم", callback_data="points_edit:points_per_user", style="primary"),
-        ],
+        [InlineKeyboardButton("💎 لكل مستخدم", callback_data="points_edit:points_per_user", style="primary")],
         [InlineKeyboardButton("🎯 الحد الأدنى للسحب", callback_data="points_edit:points_required", style="primary")],
         [InlineKeyboardButton("📝 نصوص قسم ربح", callback_data="points_text_settings", style="primary")],
         [InlineKeyboardButton("↩️ العودة للوضع الافتراضي", callback_data="points_restore_defaults", style="success")],
@@ -6708,7 +6723,6 @@ def build_owner_withdraw_section_keyboard() -> InlineKeyboardMarkup:
             rows.append([InlineKeyboardButton(
                 f"📤 تم الإرسال: {name}", callback_data=f"wd_stars_complete:{req['request_id']}", style="success",
             )])
-    rows.append([InlineKeyboardButton("⭐ شروط سحب النجوم", callback_data="star_settings", style="primary")])
     rows.append([InlineKeyboardButton("📢 قناة استقبال السحب", callback_data="wd_channel_settings", style="primary")])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_points_section", style="danger",
                                        **emoji_kwargs("back_section_btn"))])
@@ -6721,7 +6735,7 @@ def build_star_settings_message() -> tuple:
         lines.append(f"⭐ {tier} نجمة  ←  💎 {get_star_cost(tier)} نقطة\n")
     return build_text_with_emojis([
         ([
-            ("⭐", EMOJI["star"]), " شروط سحب النجوم — إدارة المالك",
+            ("⭐", EMOJI["star"]), " سعر نجوم — إدارة المالك",
             "\n\n",
             (lines + ["اضغط على أي قيمة أدناه لتعديل عدد النقاط المطلوبة لها مباشرة ”"], "blockquote", None),
         ], "bold", None),
@@ -6734,7 +6748,7 @@ def build_star_settings_keyboard() -> InlineKeyboardMarkup:
         for tier in STAR_WITHDRAW_TIERS
     ]
     rows = pair_buttons(buttons)
-    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_withdraw_section", style="danger",
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_points_section", style="danger",
                                        **emoji_kwargs("back_section_btn"))])
     return InlineKeyboardMarkup(rows)
 
@@ -6964,13 +6978,19 @@ def build_owner_points_section_message() -> tuple:
 
 
 def build_owner_points_section_keyboard() -> InlineKeyboardMarkup:
+    points_on = get_setting("points_enabled") == "1"
     rows = pair_buttons([
         InlineKeyboardButton("⚙️ إعدادات", callback_data="points_settings",
                              style="primary", **emoji_kwargs("gear")),
         InlineKeyboardButton("💎 إدارة نقاط المستخدمين", callback_data="points_manage_section", style="primary"),
+        InlineKeyboardButton("⭐ سعر نجوم", callback_data="star_settings", style="primary"),
         InlineKeyboardButton("💳 سجلات طلبات السحب", callback_data="owner_withdraw_section", style="primary"),
         InlineKeyboardButton("📢 قناة استقبال السحب", callback_data="wd_channel_settings", style="primary"),
     ])
+    rows.append([InlineKeyboardButton(
+        "⛔ إيقاف ربح" if points_on else "✅ تفعيل ربح",
+        callback_data="points_toggle", style="danger" if points_on else "success",
+    )])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
                                       **emoji_kwargs("back_section_btn"))])
     return InlineKeyboardMarkup(rows)
@@ -8905,7 +8925,9 @@ async def _dispatch_start_arg(update: Update, context: ContextTypes.DEFAULT_TYPE
         await handle_roulette_entry(update, context, arg[len("rr_"):])
         return True
     if arg.startswith("compjoin_"):
-        await handle_contest_join_entry(update, context, arg[len("compjoin_"):])
+        await handle_contest_join_entry(
+            update, context, arg[len("compjoin_"):], is_genuinely_new=is_genuinely_new,
+        )
         return True
     if arg.startswith("compvote_"):
         await handle_contest_vote_entry(update, context, arg[len("compvote_"):])
@@ -9258,8 +9280,13 @@ def join_roulette(user_id: int, roulette_id: int, display_name: str = None):
         "target": target, "owner_id": owner_id, "status": status,
     }
 
-async def handle_contest_join_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, contest_code: str):
-    """يُستدعى عند فتح البوت عبر رابط ?start=compjoin_{contest_code} (زر المشاركة في المسابقة)."""
+async def handle_contest_join_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, contest_code: str,
+                                     is_genuinely_new: bool = False):
+    """يُستدعى عند فتح البوت عبر رابط ?start=compjoin_{contest_code} (زر المشاركة في المسابقة).
+    is_genuinely_new: مُحسَّبة مسبقًا مرة واحدة فقط في start() (أول تواصل فعلي
+    مع البوت) وتُمرَّر هنا كي تُبنى بها أزرار «تحقق»/«قبول» اللاحقة، بدل إعادة
+    حسابها لاحقًا (register_bot_user_and_check_new تُعيد False دومًا لو أُعيد
+    استدعاؤها لمستخدم سبق تسجيله في start() لتوّها)."""
     user = update.effective_user
 
     contest = get_contest(contest_code)
@@ -9298,7 +9325,7 @@ async def handle_contest_join_entry(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(
             text=gate_text,
             entities=gate_entities,
-            reply_markup=build_contest_channel_gate_keyboard(contest_code, join_url),
+            reply_markup=build_contest_channel_gate_keyboard(contest_code, join_url, is_genuinely_new),
         )
         return
 
@@ -9307,18 +9334,19 @@ async def handle_contest_join_entry(update: Update, context: ContextTypes.DEFAUL
     await update.message.reply_text(
         text=text,
         entities=entities,
-        reply_markup=build_contest_join_confirm_keyboard(contest_code),
+        reply_markup=build_contest_join_confirm_keyboard(contest_code, is_genuinely_new),
     )
 
 
 async def contest_channel_gate_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعالج ضغط زر «تحقق ✅» في بوابة شرط قناة المسابقة (compjoinchk:{contest_code}).
+    """يعالج ضغط زر «تحقق ✅» في بوابة شرط قناة المسابقة (compjoinchk:{contest_code}:{is_genuinely_new}).
     يعيد الفحص الفعلي (بدون كاش) لعضوية المستخدم في قناة المسابقة؛ فإن اجتازه
     تتحوّل نفس الرسالة إلى رسالة «تأكيد المشاركة» المعتادة، وإلا يبقى ممنوعًا
     من إكمال المشاركة مع تذكيره بالانضمام أولًا."""
     query = update.callback_query
     try:
-        contest_code = query.data.split(":", 1)[1]
+        _, contest_code, flag_raw = query.data.split(":", 2)
+        is_genuinely_new = flag_raw == "1"
     except (ValueError, IndexError):
         await query.answer("⚠️ طلب غير صالح.", show_alert=True)
         return
@@ -9362,12 +9390,12 @@ async def contest_channel_gate_check_callback(update: Update, context: ContextTy
     try:
         await query.edit_message_text(
             text=text, entities=entities,
-            reply_markup=build_contest_join_confirm_keyboard(contest_code),
+            reply_markup=build_contest_join_confirm_keyboard(contest_code, is_genuinely_new),
         )
     except Exception:
         await query.message.reply_text(
             text=text, entities=entities,
-            reply_markup=build_contest_join_confirm_keyboard(contest_code),
+            reply_markup=build_contest_join_confirm_keyboard(contest_code, is_genuinely_new),
         )
 
 
@@ -9400,9 +9428,11 @@ async def compjoin_button_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     user = query.from_user
-    if register_bot_user_and_check_new(user.id, user):
-        await _notify_new_user_join(context, user)
-
+    # ⚡ لا يُسجَّل تواصل المستخدم هنا: كل مسارات هذه الدالة تنتهي إما بتنبيه
+    # (return) أو بفتح البوت عبر رابط compjoin_ (query.answer(url=...))، وهناك
+    # start() هي من تسجّل أول تواصل فعلي وتحسب "هل هو مستخدم جديد فعليًا" —
+    # تسجيله هنا مسبقًا كان يجعل استدعاء start() اللاحق يُعيد False دومًا
+    # (لأنه صار مسجَّلاً بالفعل)، فتُفقَد نقاط المستخدم الجديد الحقيقي.
     existing = get_contest_participant(contest_code, user.id)
     if existing:
         await query.answer(
@@ -9920,8 +9950,13 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = query.from_user
-    if register_bot_user_and_check_new(user.id, user):
-        await _notify_new_user_join(context, user)
+    # ⚡ لا يُسجَّل تواصل المستخدم هنا مبكرًا: هذه الدالة قد تنتهي بفتح البوت
+    # (query.answer(url=...)) لإكمال شرط ناقص أو لعرض كابتشا منع الرشق —
+    # وفي الحالتين تستدعي start() لاحقًا register_bot_user_and_check_new من
+    # جديد، فتُعيد False دومًا لأنه صار مسجَّلاً هنا بالفعل، فتُفقَد نقطة كل
+    # مستخدم جديد فعليًا في كل سحب مفعّل عليه «منع الرشق» (هذا كان سبب المشكلة
+    # الأصلية). التسجيل الآن يحدث فقط أسفل الدالة، في الحالة الوحيدة التي لا
+    # تفتح فيها البوت لاحقًا (لا منع رشق ولا شرط ناقص).
     if is_giveaway_participant(gw_code, user.id):
         await query.answer("✅ أنت مسجّل بالفعل في هذا السحب.", show_alert=True)
         return
@@ -9966,7 +10001,15 @@ async def gw_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await finalize_giveaway_join(context, gw_code, giveaway, user, query.message)
+    # هنا فقط لا يوجد أي فتح لاحق للبوت — آمن الآن لتسجيل أول تواصل فعلي
+    # وحساب "هل هو مستخدم جديد فعليًا" دون أن يُستهلك الاستدعاء قبل الأوان.
+    is_genuinely_new = register_bot_user_and_check_new(user.id, user)
+    if is_genuinely_new:
+        await _notify_new_user_join(context, user)
+
+    await finalize_giveaway_join(
+        context, gw_code, giveaway, user, query.message, is_genuinely_new=is_genuinely_new,
+    )
     if vote_required:
         await query.answer("✅ تم اشتراكك في السحب", show_alert=True)
     else:
@@ -10936,9 +10979,14 @@ async def _contest_participation_callback_inner(update: Update, context: Context
         return
 
     if data.startswith("comp_confirm_join:"):
-        contest_code = data.split(":", 1)[1]
+        # ⚡ is_genuinely_new تُقرأ من callback_data (مُمرَّرة من start() عبر
+        # handle_contest_join_entry) بدل إعادة استدعاء register_bot_user_and_check_new
+        # هنا — فالمستخدم مسجَّل بالفعل منذ فتح البوت عبر رابط compjoin_، وإعادة
+        # الاستدعاء كانت تُعيد False دومًا فتُفقَد مكافأة كل مستخدم جديد فعليًا.
+        parts = data.split(":", 2)
+        contest_code = parts[1]
+        is_genuinely_new = len(parts) > 2 and parts[2] == "1"
         user = query.from_user
-        is_genuinely_new = register_bot_user_and_check_new(user.id, user)
         if is_genuinely_new:
             await _notify_new_user_join(context, user)
 
@@ -11021,6 +11069,15 @@ async def _contest_participation_callback_inner(update: Update, context: Context
                     bump_channel_new_users(contest["chat_id"])
                 except Exception:
                     logger.exception("تعذّر تحديث عدّاد المستخدمين الجدد لقناة المسابقة %s", contest.get("chat_id"))
+                # 💎 نفس آلية مكافأة "مستخدم جديد" المستخدمة في السحوبات (مرة واحدة
+                # عالميًا لكل مستخدم عبر حقل rewarded الذري)، مطبَّقة الآن أيضًا على
+                # مشاركة مستخدم جديد فعليًا في مسابقة — منح واحد فقط لصاحب المسابقة.
+                try:
+                    reward_contest_new_participant(
+                        user.id, contest_code, contest["owner_id"], contest["chat_id"],
+                    )
+                except Exception:
+                    logger.exception("تعذّر منح نقاط المستخدم الجديد لصاحب المسابقة %s", contest.get("owner_id"))
         except sqlite3.IntegrityError:
             existing = get_contest_participant(contest_code, user.id)
             if existing:
@@ -13970,10 +14027,10 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             details=f"تفعيل قسم ربح: {'مفعّل' if new_value == '1' else 'معطّل'}",
             actor_name=query.from_user.full_name, actor_username=query.from_user.username,
         )
-        text, entities = build_points_settings_message()
+        text, entities = build_owner_points_section_message()
         await query.edit_message_text(
             text=text, entities=entities,
-            reply_markup=build_points_settings_keyboard(),
+            reply_markup=build_owner_points_section_keyboard(),
         )
         return
 
