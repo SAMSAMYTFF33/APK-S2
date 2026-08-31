@@ -32,48 +32,36 @@ MODERATOR_PERMISSIONS = {
 
 
 def _moderator_doc_ref(user_id: int):
-    return fs_db().collection("bot_moderators").document(str(user_id))
-
-
-_MODERATOR_CACHE = {}
-MODERATOR_CACHE_TTL = 60  # ثانية
+    """⚡ موحَّد الآن: يشير لنفس مستند المستخدم users/{id} بدل مجموعة
+    bot_moderators منفصلة (انظر قسم «مستند المستخدم الموحّد» بالأسفل)."""
+    return _user_doc_ref(user_id)
 
 
 def _invalidate_moderator_cache(user_id: int = None) -> None:
-    """يُفرغ كاش المشرفين — لمستخدم واحد عند تمرير user_id، أو بالكامل إن لم
-    يُمرَّر (أبسط وأضمن عند حذف مشرف، بدل التأكد من كل مفتاح محتمل)."""
+    """يُفرغ كاش المستخدم الموحّد (_USER_CACHE) — لمستخدم واحد عند تمرير
+    user_id، أو بالكامل إن لم يُمرَّر (أبسط وأضمن عند حذف مشرف)."""
     if user_id is None:
-        _MODERATOR_CACHE.clear()
+        _USER_CACHE.clear()
     else:
-        _MODERATOR_CACHE.pop(user_id, None)
+        _USER_CACHE.pop(user_id, None)
 
 
 def get_moderator(user_id: int):
     """يعيد بيانات المشرف (FSRow) أو None إن لم يكن مشرفًا مسجّلًا.
 
-    ⚡ هذه الدالة (عبر is_moderator) كانت تُستدعى بقراءة Firestore مباشرة
-    وبدون أي كاش مع **كل تحديث يصل للبوت إطلاقًا** — كل رسالة وكل ضغطة زر من
-    أي مستخدم في أي محادثة خاصة/جروب/قناة، عبر بوابة الصيانة العامة
-    (_maintenance_gate_handler) المسجَّلة بأولوية أعلى من كل شيء آخر. هذا كان
-    على الأرجح السبب الأكبر في استهلاك حصة القراءة اليومية بسرعة، لأنه غير
-    مقيَّد بالمحادثة الخاصة فقط (بخلاف بوابة الاشتراك الإجباري) ويشمل أي
-    نشاط في أي جروب/قناة البوت عضو فيها. الآن يُقرأ من Firestore فعليًا مرة
-    واحدة لكل مستخدم كل MODERATOR_CACHE_TTL ثانية، مع تفريغ فوري للكاش عند
-    إضافة/حذف أي مشرف حتى تنعكس صلاحياته مباشرة."""
-    now = time.time()
-    cached = _MODERATOR_CACHE.get(user_id)
-    if cached is not None and now - cached["ts"] < MODERATOR_CACHE_TTL:
-        return cached["value"]
-    doc = _moderator_doc_ref(user_id).get()
-    if not doc.exists:
-        result = None
-    else:
-        data = doc.to_dict() or {}
-        data.setdefault("user_id", user_id)
-        data.setdefault("permissions", {})
-        result = FSRow(data)
-    _MODERATOR_CACHE[user_id] = {"value": result, "ts": now}
-    return result
+    ⚡ موحَّد: بيانات الإشراف أصبحت حقولًا (is_moderator/mod_*) داخل نفس
+    مستند المستخدم users/{id}، وتُقرأ عبر نفس الكاش الدائم بالذاكرة
+    (_USER_CACHE) المستخدم أيضًا للحظر/النقاط/الإحالة — أي قراءة واحدة
+    فعلية من Firestore لكل مستخدم طوال عمر التشغيلة، بدل قراءة منفصلة من
+    مجموعة bot_moderators مع كل تحديث يصل للبوت كما كان سابقًا."""
+    row = get_bot_user(user_id)
+    if not row or not row.get("is_moderator"):
+        return None
+    data = dict(row)
+    data["permissions"] = data.get("mod_permissions") or {}
+    data["added_by"] = data.get("mod_added_by")
+    data["added_at"] = data.get("mod_added_at")
+    return FSRow(data)
 
 
 def is_moderator(user_id: int) -> bool:
@@ -82,40 +70,49 @@ def is_moderator(user_id: int) -> bool:
 
 
 def list_moderators() -> list:
-    """يعيد كل المشرفين المسجَّلين، الأحدث إضافةً أولًا."""
-    docs = fs_db().collection("bot_moderators").stream()
+    """يعيد كل المشرفين المسجَّلين، الأحدث إضافةً أولًا. (استعلام واحد على
+    مستند users بشرط is_moderator == True، بدل مجموعة bot_moderators)."""
+    docs = fs_db().collection("users").where("is_moderator", "==", True).stream()
     rows = []
     for doc in docs:
         data = doc.to_dict() or {}
         data.setdefault("user_id", int(doc.id))
-        data.setdefault("permissions", {})
+        data["permissions"] = data.get("mod_permissions") or {}
+        data["added_at"] = data.get("mod_added_at")
         rows.append(FSRow(data))
     rows.sort(key=lambda r: r.get("added_at") or "", reverse=True)
     return rows
 
 
 def add_moderator(user_id: int, added_by: int, username: str = None, first_name: str = None) -> None:
-    """يضيف مشرفًا جديدًا بصلاحيات فارغة (كلها معطّلة افتراضيًا)."""
-    _moderator_doc_ref(user_id).set({
+    """يضيف مشرفًا جديدًا بصلاحيات فارغة (كلها معطّلة افتراضيًا). يعمل حتى
+    مع مستخدم لم يبدأ محادثة مع البوت من قبل — merge=True ينشئ مستند
+    users/{id} إن لم يكن موجودًا، دون المساس بأي حقول أخرى إن كان موجودًا."""
+    _user_doc_ref(user_id).set({
         "user_id": user_id,
-        "username": username or "",
-        "first_name": first_name or "",
-        "added_by": added_by,
-        "added_at": datetime.now(timezone.utc).isoformat(),
-        "permissions": {key: False for key in MODERATOR_PERMISSIONS},
-    })
+        "is_moderator": True,
+        "mod_username": username or "",
+        "mod_first_name": first_name or "",
+        "mod_added_by": added_by,
+        "mod_added_at": datetime.now(timezone.utc).isoformat(),
+        "mod_permissions": {key: False for key in MODERATOR_PERMISSIONS},
+    }, merge=True)
     _invalidate_moderator_cache(user_id)
 
 
 def remove_moderator(user_id: int) -> None:
-    """يحذف مشرفًا نهائيًا مع كل صلاحياته."""
-    _moderator_doc_ref(user_id).delete()
+    """يزيل صفة الإشراف عن مستخدم (بقية بياناته — الحظر/النقاط/الإحالة —
+    تبقى محفوظة في نفس المستند الموحّد، فقط حقول الإشراف تُطفأ)."""
+    _user_doc_ref(user_id).set({
+        "is_moderator": False,
+        "mod_permissions": {},
+    }, merge=True)
     _invalidate_moderator_cache(user_id)
 
 
 def set_moderator_permission(user_id: int, perm_key: str, value: bool) -> None:
     """يفعّل/يعطّل صلاحية واحدة لدى مشرف معيّن."""
-    _moderator_doc_ref(user_id).set({"permissions": {perm_key: value}}, merge=True)
+    _user_doc_ref(user_id).set({"mod_permissions": {perm_key: value}}, merge=True)
     _invalidate_moderator_cache(user_id)
 
 
@@ -274,6 +271,23 @@ DEFAULT_POINTS_CONDITIONS = (
 )
 TECH_SUPPORT_USERNAME = "y66vlBOT"
 SUPPORT_BOT_STARS_AMOUNT = 5
+
+# ---------------------------------------------------------------------------
+# ⭐ نظام سحب النجوم (Stars Withdrawal Tiers) — قيم سحب ثابتة (15/30/50/100/
+# 200/500/1000 نجمة)، كل قيمة لها تكلفة نقاط مستقلة يتحكم بها المالك بالكامل
+# من داخل البوت (star_cost_<tier> في settings) دون الحاجة لتعديل الكود.
+# القيم الافتراضية أدناه تُستخدم فقط أول مرة (init_db) أو إن حُذف الإعداد.
+# ---------------------------------------------------------------------------
+STAR_WITHDRAW_TIERS = [15, 30, 50, 100, 200, 500, 1000]
+DEFAULT_STAR_COSTS = {
+    15: 150,
+    30: 300,
+    50: 500,
+    100: 1000,
+    200: 2000,
+    500: 5000,
+    1000: 10000,
+}
 
 BRAND_NAME = "𝚁𝙾𝚄𝙻𝙴𝚃𝚃𝙴 𝚅𝙾𝚁𝚃𝙴𝚇"
 BRAND_URL = "https://t.me/NOP3BOT"
@@ -3780,6 +3794,47 @@ def _fs_row_or_none(doc) -> "FSRow | None":
 
 
 # ---------------------------------------------------------------------------
+# 👤 مستند المستخدم الموحّد (users/{user_id})
+# ---------------------------------------------------------------------------
+# قبل هذا التعديل، كانت بيانات "هوية" كل مستخدم مبعثرة على 6 مجموعات
+# منفصلة في Firestore: known_bot_users (الحظر/الاسم)، bot_moderators
+# (الإشراف)، owner_points (رصيد النقاط)، bot_referrals + referral_signups
+# (الإحالة)، remind_win (تذكير الفوز)، rewarded_users (مكافأة أول مشاركة).
+# أي شاشة تحتاج صورة كاملة عن مستخدم واحد (مثل تصفّح المستخدمين مع نقاطهم
+# وإحالاتهم) كانت تحتاج قراءات متفرقة من عدة مجموعات لكل مستخدم.
+#
+# الآن كل هذه البيانات حقول داخل مستند واحد فقط: users/{user_id}، وكلها
+# تُقرأ وتُخزَّن مؤقتًا معًا عبر نفس الكاش الدائم بالذاكرة (_USER_CACHE) —
+# قراءة Firestore واحدة فعلية لكل مستخدم طوال عمر تشغيلة البوت، بدل حتى 6
+# قراءات متفرقة. مجموعات غير مرتبطة بهوية مستخدم واحد (channel_points
+# مرتبطة بقناة لا بمستخدم، roulettes/contests/giveaways سجلات أحداث غير
+# محدودة) بقيت كما هي عمدًا — دمجها داخل مستند مستخدم يخاطر بتجاوز حد حجم
+# المستند (1MB) ولا يقلل الاستهلاك أصلًا لأنها لا تُقرأ مع كل رسالة.
+#
+# حقول مستند users/{id} (كلها اختيارية إلا user_id، تُقرأ بقيم افتراضية):
+#   user_id, username, username_lower, first_name, last_name,
+#   first_seen_at, last_seen_at, has_started (bool — أول /start فعلي),
+#   banned, ban_reason, banned_at, banned_by,
+#   is_moderator, mod_permissions, mod_added_by, mod_added_at,
+#   points (int),
+#   is_referrer, ref_active, ref_percentage, ref_added_by, ref_created_at,
+#   ref_referred_count, ref_points_earned, referred_by (منع احتساب إحالة
+#     نفس المستخدم مرتين — يغني عن مجموعة referral_signups المنفصلة),
+#   remind_win (0/1), rewarded, rewarded_owner_id, rewarded_gw_code,
+#   rewarded_at (يغني عن مجموعة rewarded_users المنفصلة).
+#
+# ⚠️ هذا تغيير في مخطط قاعدة البيانات: لن يقرأ الكود الجديد أي بيانات قديمة
+# من known_bot_users/bot_moderators/owner_points/bot_referrals/
+# referral_signups/remind_win/rewarded_users. يلزم تشغيل سكربت ترحيل مرة
+# واحدة قبل النشر لنقل البيانات الحالية إلى users/{id} — راجع ملاحظات
+# الترحيل المرفقة مع هذا الملف.
+# ---------------------------------------------------------------------------
+
+def _user_doc_ref(user_id: int):
+    return fs_db().collection("users").document(str(user_id))
+
+
+# ---------------------------------------------------------------------------
 # 📜 سجل العمليات الإدارية (Admin Operations Log) — يسجّل تلقائيًا كل عملية
 # إدارية حساسة تُنفَّذ من قسم المالك: حذف مسابقة/سحب/سحب سريع، إضافة/حذف
 # قناة، حظر/فك حظر مستخدم، إضافة/حذف مشرف، تغيير إعدادات، إرسال إذاعة.
@@ -3997,6 +4052,8 @@ def init_db():
         "withdraw_channel_username": "",
         "withdraw_channel_title": "",
     }
+    for tier, cost in DEFAULT_STAR_COSTS.items():
+        defaults[f"star_cost_{tier}"] = str(cost)
     for k, v in defaults.items():
         ref = client.collection("settings").document(k)
         if not ref.get().exists:
@@ -4112,10 +4169,11 @@ def get_participants_with_names(roulette_id: int):
     return [(r["user_id"], r.get("display_name") or str(r["user_id"])) for r in rows]
 
 def get_points(owner_id: int) -> int:
-    doc = fs_db().collection("owner_points").document(str(owner_id)).get()
-    if not doc.exists:
-        return 0
-    return doc.to_dict().get("points", 0) or 0
+    """⚡ موحَّد: يُقرأ من نفس مستند users/{id} (حقل points) عبر نفس الكاش
+    الدائم (_USER_CACHE)، بدل مجموعة owner_points منفصلة — فلا يستهلك أي
+    قراءة Firestore إضافية بعد أول تحميل لهذا المستخدم في التشغيلة الحالية."""
+    row = get_bot_user(owner_id)
+    return int(row.get("points") or 0) if row else 0
 
 def get_top_channel_points(limit: int = 5):
     """يعيد أعلى القنوات التي حصلت على نقاط فعلية من سحوبات منع الرشق.
@@ -4264,7 +4322,8 @@ _USER_CACHE = {}  # user_id -> dict بيانات المستخدم كاملة، �
 
 
 def _bot_user_doc_ref(user_id: int):
-    return fs_db().collection("known_bot_users").document(str(user_id))
+    """⚡ موحَّد الآن: يشير لنفس مستند المستخدم users/{id}."""
+    return _user_doc_ref(user_id)
 
 
 def _load_user_into_cache(user_id: int):
@@ -4300,26 +4359,33 @@ def register_bot_user_and_check_new(user_id: int, user=None) -> bool:
     cached = _USER_CACHE.get(user_id)
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    if cached is None:
-        # مستخدم جديد كليًا — كتابة واحدة ضرورية لإنشاء سجلّه لأول مرة.
-        new_data = {
+    # ⚡ has_started (وليس مجرد وجود المستند) هو ما يحدّد "مستخدم جديد فعليًا"
+    # الآن — لأن المستند users/{id} قد يكون أُنشئ مسبقًا بجزء من بياناته فقط
+    # (مثلاً مالك البوت أضافه كمشرف أو صاحب رابط إحالة أو منحه نقاطًا يدويًا
+    # قبل أن يبدأ محادثة مع البوت إطلاقًا)، فوجود مستند لا يعني أنه استخدم
+    # /start من قبل. بدون هذا التمييز كانت ستُحتسَب مكافآت "مستخدم جديد"
+    # (نقاط سحب/إحالة) خطأً كـ"مستخدم قديم" في هذه الحالة النادرة.
+    if cached is None or not cached.get("has_started"):
+        new_data = dict(cached or {})
+        new_data.update({
             "user_id": user_id,
-            "first_seen_at": now_iso,
+            "has_started": True,
+            "first_seen_at": new_data.get("first_seen_at") or now_iso,
             "last_seen_at": now_iso,
             "username": (user.username or "") if user is not None else "",
             "username_lower": ((user.username or "").lower()) if user is not None else "",
             "first_name": (user.first_name or "") if user is not None else "",
             "last_name": (user.last_name or "") if user is not None else "",
-        }
+        })
         try:
-            ref.set(new_data)
+            ref.set(new_data, merge=True)
         except Exception:
             logger.exception("تعذّر إنشاء سجل المستخدم %s", user_id)
         _USER_CACHE[user_id] = new_data
         return True
 
-    # مستخدم معروف مسبقًا — تحديث الكاش دائمًا، وكتابة Firestore فقط لو
-    # تغيّر اليوزر/الاسم فعليًا عن آخر نسخة مخزَّنة لدينا.
+    # مستخدم معروف مسبقًا وسبق أن بدأ محادثة فعليًا — تحديث الكاش دائمًا،
+    # وكتابة Firestore فقط لو تغيّر اليوزر/الاسم فعليًا عن آخر نسخة مخزَّنة.
     cached["last_seen_at"] = now_iso  # بالذاكرة فقط، بدون كتابة لـFirestore
     if user is not None:
         new_username = user.username or ""
@@ -4373,7 +4439,7 @@ def find_bot_user_by_username(username: str):
     if not normalized:
         return None
     docs = list(
-        fs_db().collection("known_bot_users")
+        fs_db().collection("users")
         .where("username_lower", "==", normalized)
         .limit(1)
         .stream()
@@ -4428,7 +4494,7 @@ def unban_bot_user(user_id: int) -> None:
 
 def get_banned_bot_users() -> list:
     """يعيد كل المستخدمين المحظورين، مرتّبين من الأحدث حظرًا للأقدم."""
-    docs = fs_db().collection("known_bot_users").where("banned", "==", True).stream()
+    docs = fs_db().collection("users").where("banned", "==", True).stream()
     rows = []
     for doc in docs:
         data = doc.to_dict() or {}
@@ -4493,8 +4559,12 @@ def get_full_bot_statistics(force_refresh: bool = False) -> dict:
     new_week = 0
     new_month = 0
 
-    for doc in fs_db().collection("known_bot_users").stream():
+    for doc in fs_db().collection("users").stream():
         data = doc.to_dict() or {}
+        if not data.get("has_started"):
+            # مستند وُجد بسبب إشراف/إحالة/نقاط يدوية دون أن يبدأ صاحبه
+            # محادثة فعلية مع البوت — لا يُحتسب ضمن إحصائيات "المستخدمين".
+            continue
         total_users += 1
         if data.get("banned"):
             banned_users += 1
@@ -4610,31 +4680,47 @@ async def get_required_channels_total_members(context: ContextTypes.DEFAULT_TYPE
 
 
 def reward_giveaway_user(user_id: int, gw_code: str, owner_id: int, chat_id: int) -> bool:
-    """يمنح النقاط مرة واحدة عالميًا بعد نجاح مشاركة السحب والكابتشا."""
-    client = fs_db()
+    """يمنح النقاط مرة واحدة عالميًا بعد نجاح مشاركة السحب والكابتشا.
+
+    ⚡ موحَّد: منع الاحتساب المزدوج يعتمد الآن على حقل rewarded داخل مستند
+    المستخدم users/{id} نفسه (ضمن معاملة ذرية)، بدل مجموعة rewarded_users
+    منفصلة — نفس الضمان القديم (AlreadyExists) بدون مجموعة إضافية."""
     if get_setting("points_enabled") != "1":
         return False
 
-    from google.api_core.exceptions import AlreadyExists
-    rewarded_ref = client.collection("rewarded_users").document(str(user_id))
-    try:
-        rewarded_ref.create({
+    ref = _user_doc_ref(user_id)
+    transaction = fs_db().transaction()
+
+    @firestore.transactional
+    def _txn(transaction):
+        snap = ref.get(transaction=transaction)
+        data = snap.to_dict() if snap.exists else {}
+        if data.get("rewarded"):
+            return False
+        payload = {
             "user_id": user_id,
-            "first_roulette_id": None,
-            "first_owner_id": owner_id,
-            "first_giveaway_code": gw_code,
+            "rewarded": True,
+            "rewarded_owner_id": owner_id,
+            "rewarded_gw_code": gw_code,
             "rewarded_at": datetime.now(timezone.utc).isoformat(),
-        })
-    except AlreadyExists:
+        }
+        if snap.exists:
+            transaction.update(ref, payload)
+        else:
+            transaction.set(ref, payload)
+        return True
+
+    if not _txn(transaction):
         return False
+    _USER_CACHE.pop(user_id, None)
 
     raw_value = get_setting("points_per_user")
     amount = max(int(raw_value) if raw_value and str(raw_value).isdigit() else 1, 0)
 
-    owner_ref = client.collection("owner_points").document(str(owner_id))
-    _fs_bump_counter(owner_ref, "points", amount, extra={"owner_id": owner_id})
+    _fs_bump_counter(_user_doc_ref(owner_id), "points", amount, extra={"user_id": owner_id})
+    _USER_CACHE.pop(owner_id, None)
 
-    channel_ref = client.collection("channel_points").document(str(chat_id))
+    channel_ref = fs_db().collection("channel_points").document(str(chat_id))
     _fs_bump_counter(channel_ref, "points", amount, extra={
         "chat_id": chat_id,
         "owner_id": owner_id,
@@ -4653,8 +4739,8 @@ def award_contest_owner_points(owner_id: int) -> int:
     amount = max(int(raw_value) if raw_value and str(raw_value).isdigit() else 1, 0)
     if amount <= 0:
         return 0
-    owner_ref = fs_db().collection("owner_points").document(str(owner_id))
-    _fs_bump_counter(owner_ref, "points", amount, extra={"owner_id": owner_id})
+    _fs_bump_counter(_user_doc_ref(owner_id), "points", amount, extra={"user_id": owner_id})
+    _USER_CACHE.pop(owner_id, None)
     return amount
 
 
@@ -4663,8 +4749,8 @@ def reverse_contest_owner_points(owner_id: int, amount: int) -> None:
     المصوّت من القنوات الإلزامية) — لا تنزل النقاط تحت الصفر أبدًا."""
     if not amount or amount <= 0 or not owner_id:
         return
-    owner_ref = fs_db().collection("owner_points").document(str(owner_id))
-    _fs_bump_counter(owner_ref, "points", -amount, extra={"owner_id": owner_id})
+    _fs_bump_counter(_user_doc_ref(owner_id), "points", -amount, extra={"user_id": owner_id})
+    _USER_CACHE.pop(owner_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -4678,8 +4764,8 @@ def add_points_to_user(user_id: int, amount: int) -> int:
     """يضيف نقاطًا يدويًا لرصيد مستخدم معيّن، ويعيد الرصيد الجديد."""
     if amount <= 0:
         return get_points(user_id)
-    owner_ref = fs_db().collection("owner_points").document(str(user_id))
-    _fs_bump_counter(owner_ref, "points", amount, extra={"owner_id": user_id})
+    _fs_bump_counter(_user_doc_ref(user_id), "points", amount, extra={"user_id": user_id})
+    _USER_CACHE.pop(user_id, None)
     invalidate_users_points_cache()
     return get_points(user_id)
 
@@ -4689,8 +4775,8 @@ def deduct_points_from_user(user_id: int, amount: int) -> int:
     بفضل _fs_bump_counter)، ويعيد الرصيد الجديد."""
     if amount <= 0:
         return get_points(user_id)
-    owner_ref = fs_db().collection("owner_points").document(str(user_id))
-    _fs_bump_counter(owner_ref, "points", -amount, extra={"owner_id": user_id})
+    _fs_bump_counter(_user_doc_ref(user_id), "points", -amount, extra={"user_id": user_id})
+    _USER_CACHE.pop(user_id, None)
     invalidate_users_points_cache()
     return get_points(user_id)
 
@@ -4717,40 +4803,29 @@ def get_all_known_users_with_points(sort_by_points: bool = True, force_refresh: 
     نقاطهم وإحالاتهم (قسم ربح، إدارة المستخدمين، أو أي قسم مستقبلي) —
     تُستهلك دائمًا عبر build_users_points_browse_message/keyboard أدناه.
 
-    ملاحظة أداء: بدل جلب النقاط والإحالات بطلب Firestore منفصل لكل مستخدم
-    (نمط N+1 كان يعني آلاف الطلبات المتسلسلة مع آلاف المستخدمين، وهو ما كان
-    يسبب البطء حتى في أول ضغطة)، تُجلب المجموعات الثلاث (known_bot_users،
-    owner_points، bot_referrals) كل واحدة بطلب واحد شامل فقط، ثم تُربط
-    القيم في الذاكرة عبر قواميس — 3 طلبات ثابتة بغض النظر عن عدد المستخدمين
-    بدل 1+2×العدد. النتيجة الكاملة تُخزَّن مؤقتًا (Cache) أيضًا لمدة
-    USERS_POINTS_CACHE_TTL ثانية حتى لا تتكرر حتى هذه الطلبات الثلاثة مع كل
-    تنقّل بين الصفحات (أقصى تأخر ممكن لظهور تحديث: مدة الـ TTL، أو فورًا عبر
-    force_refresh)."""
+    ⚡ موحَّد: بعد دمج known_bot_users/owner_points/bot_referrals في مستند
+    users/{id} واحد، أصبح جلب كل المستخدمين مع نقاطهم وإحالاتهم طلب Firestore
+    واحد فقط (مسح مجموعة users) بدل 3 طلبات منفصلة سابقًا. النتيجة الكاملة
+    تبقى مخزَّنة مؤقتًا (Cache) لمدة USERS_POINTS_CACHE_TTL ثانية حتى لا
+    تتكرر حتى هذا الطلب الواحد مع كل تنقّل بين الصفحات (أقصى تأخر ممكن
+    لظهور تحديث: مدة الـ TTL، أو فورًا عبر force_refresh)."""
     now = time.time()
     cached = _USERS_POINTS_CACHE["rows"]
     if not force_refresh and cached is not None and (now - _USERS_POINTS_CACHE["ts"]) < USERS_POINTS_CACHE_TTL:
         rows = cached
     else:
-        client = fs_db()
-
-        points_by_id = {}
-        for doc in client.collection("owner_points").stream():
-            points_by_id[doc.id] = (doc.to_dict() or {}).get("points", 0) or 0
-
-        referred_by_id = {}
-        for doc in client.collection("bot_referrals").stream():
-            referred_by_id[doc.id] = int((doc.to_dict() or {}).get("referred_count") or 0)
-
         rows = []
-        for doc in client.collection("known_bot_users").stream():
+        for doc in fs_db().collection("users").stream():
             data = doc.to_dict() or {}
+            if not data.get("has_started"):
+                continue
             uid = data.get("user_id") or int(doc.id)
             rows.append(FSRow({
                 "user_id": uid,
                 "username": data.get("username") or "",
                 "first_name": data.get("first_name") or "",
-                "points": points_by_id.get(str(uid), 0),
-                "referred_count": referred_by_id.get(str(uid), 0),
+                "points": data.get("points") or 0,
+                "referred_count": data.get("ref_referred_count") or 0,
             }))
         _USERS_POINTS_CACHE["rows"] = rows
         _USERS_POINTS_CACHE["ts"] = now
@@ -4778,7 +4853,8 @@ REFERRAL_DEFAULT_SIGNUP_POINTS = 5
 
 
 def _referral_doc_ref(user_id: int):
-    return fs_db().collection("bot_referrals").document(str(user_id))
+    """⚡ موحَّد الآن: يشير لنفس مستند المستخدم users/{id}."""
+    return _user_doc_ref(user_id)
 
 
 def get_referral_default_percentage() -> int:
@@ -4806,16 +4882,18 @@ def set_referral_signup_points(value: int) -> None:
 
 
 def get_referral(user_id: int):
-    """يعيد بيانات صاحب رابط دعوة (FSRow) أو None إن لم يكن مصرّحًا له بالإحالة."""
-    doc = _referral_doc_ref(user_id).get()
-    if not doc.exists:
+    """يعيد بيانات صاحب رابط دعوة (FSRow) أو None إن لم يكن مصرّحًا له بالإحالة.
+    ⚡ موحَّد: يُقرأ من نفس مستند users/{id} عبر نفس الكاش الدائم _USER_CACHE."""
+    row = get_bot_user(user_id)
+    if not row or not row.get("is_referrer"):
         return None
-    data = doc.to_dict() or {}
-    data.setdefault("user_id", user_id)
-    data.setdefault("percentage", get_referral_default_percentage())
-    data.setdefault("active", True)
-    data.setdefault("referred_count", 0)
-    data.setdefault("points_earned", 0)
+    data = dict(row)
+    data["percentage"] = data.get("ref_percentage")
+    if data["percentage"] is None:
+        data["percentage"] = get_referral_default_percentage()
+    data["active"] = bool(data.get("ref_active", True))
+    data["referred_count"] = data.get("ref_referred_count") or 0
+    data["points_earned"] = data.get("ref_points_earned") or 0
     return FSRow(data)
 
 
@@ -4826,15 +4904,16 @@ def is_referrer_active(user_id: int) -> bool:
 
 def list_referrers() -> list:
     """يعيد كل أصحاب روابط الدعوة المسجَّلين، الأحدث إضافةً أولًا."""
-    docs = fs_db().collection("bot_referrals").stream()
+    docs = fs_db().collection("users").where("is_referrer", "==", True).stream()
     rows = []
     for doc in docs:
         data = doc.to_dict() or {}
         data.setdefault("user_id", int(doc.id))
-        data.setdefault("percentage", get_referral_default_percentage())
-        data.setdefault("active", True)
-        data.setdefault("referred_count", 0)
-        data.setdefault("points_earned", 0)
+        data["percentage"] = data.get("ref_percentage") or get_referral_default_percentage()
+        data["active"] = bool(data.get("ref_active", True))
+        data["referred_count"] = data.get("ref_referred_count") or 0
+        data["points_earned"] = data.get("ref_points_earned") or 0
+        data["created_at"] = data.get("ref_created_at")
         rows.append(FSRow(data))
     rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     return rows
@@ -4846,33 +4925,35 @@ def add_referrer(user_id: int, added_by: int, percentage: int = None,
     pct = get_referral_default_percentage() if percentage is None else max(0, min(100, int(percentage)))
     _referral_doc_ref(user_id).set({
         "user_id": user_id,
-        "username": username or "",
-        "first_name": first_name or "",
-        "percentage": pct,
-        "active": True,
-        "added_by": added_by,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "referred_count": 0,
-        "points_earned": 0,
+        "is_referrer": True,
+        "ref_username": username or "",
+        "ref_first_name": first_name or "",
+        "ref_percentage": pct,
+        "ref_active": True,
+        "ref_added_by": added_by,
+        "ref_created_at": datetime.now(timezone.utc).isoformat(),
+        "ref_referred_count": 0,
+        "ref_points_earned": 0,
     }, merge=True)
+    _USER_CACHE.pop(user_id, None)
 
 
 def remove_referrer(user_id: int) -> None:
-    """يحذف صلاحية الإحالة نهائيًا من مستخدم (الإحصائيات السابقة تبقى محفوظة
-    ضمن referral_signups، لكنه يفقد إمكانية نشر رابط جديد فورًا)."""
-    _referral_doc_ref(user_id).delete()
+    """يزيل صلاحية الإحالة عن مستخدم (إحصائياته السابقة — عدد المُحالين
+    والنقاط المكتسبة — تبقى محفوظة في نفس مستنده، لكنه يفقد إمكانية نشر
+    رابط جديد فورًا)."""
+    _referral_doc_ref(user_id).set({"is_referrer": False, "ref_active": False}, merge=True)
+    _USER_CACHE.pop(user_id, None)
 
 
 def set_referrer_percentage(user_id: int, percentage: int) -> None:
-    _referral_doc_ref(user_id).set({"percentage": max(0, min(100, int(percentage)))}, merge=True)
+    _referral_doc_ref(user_id).set({"ref_percentage": max(0, min(100, int(percentage)))}, merge=True)
+    _USER_CACHE.pop(user_id, None)
 
 
 def set_referrer_active(user_id: int, active: bool) -> None:
-    _referral_doc_ref(user_id).set({"active": bool(active)}, merge=True)
-
-
-def _referral_signup_doc_ref(referred_user_id: int):
-    return fs_db().collection("referral_signups").document(str(referred_user_id))
+    _referral_doc_ref(user_id).set({"ref_active": bool(active)}, merge=True)
+    _USER_CACHE.pop(user_id, None)
 
 
 def process_referral_signup(referrer_id_raw: str, referred_user_id: int, referred_user=None) -> None:
@@ -4880,7 +4961,12 @@ def process_referral_signup(referrer_id_raw: str, referred_user_id: int, referre
     (t.me/Bot?start=ref_<ID>) بعد اجتيازه فعليًا شرط الاشتراك الإجباري بالقنوات
     (بوابة الحماية ضد الرشق/الوهمي مطبَّقة بالفعل قبل استدعاء هذه الدالة في
     start() وcheck_sub_status_callback). يمنح صاحب الرابط نقاط الإحالة حسب
-    نسبته الخاصة، ويحدّث عدّاد إحالاته. لا يُحتسب نفس المدعو مرتين أبدًا."""
+    نسبته الخاصة، ويحدّث عدّاد إحالاته. لا يُحتسب نفس المدعو مرتين أبدًا.
+
+    ⚡ موحَّد: منع الاحتساب المزدوج لم يعد يعتمد على مجموعة referral_signups
+    منفصلة، بل على حقل referred_by داخل مستند المُحال نفسه (users/{id})،
+    ضمن معاملة (transaction) ذرية — نفس الضمان القديم (AlreadyExists) لكن
+    بدون مجموعة إضافية."""
     if not referrer_id_raw or not referrer_id_raw.isdigit():
         return
     referrer_id = int(referrer_id_raw)
@@ -4890,27 +4976,36 @@ def process_referral_signup(referrer_id_raw: str, referred_user_id: int, referre
     if not row or not row.get("active"):
         return
 
-    from google.api_core.exceptions import AlreadyExists
-    signup_ref = _referral_signup_doc_ref(referred_user_id)
-    try:
-        signup_ref.create({
-            "referred_user_id": referred_user_id,
-            "referrer_id": referrer_id,
-            "joined_at": datetime.now(timezone.utc).isoformat(),
-        })
-    except AlreadyExists:
-        return  # هذا المستخدم مُحتسَب مسبقًا كإحالة — لا يُحتسب مرتين مهما أعاد فتح الرابط
+    referred_ref = _user_doc_ref(referred_user_id)
+    transaction = fs_db().transaction()
+
+    @firestore.transactional
+    def _txn(transaction):
+        snap = referred_ref.get(transaction=transaction)
+        data = snap.to_dict() if snap.exists else {}
+        if data.get("referred_by"):
+            return False  # هذا المستخدم مُحتسَب مسبقًا كإحالة — لا يُحتسب مرتين
+        payload = {"user_id": referred_user_id, "referred_by": referrer_id}
+        if snap.exists:
+            transaction.update(referred_ref, payload)
+        else:
+            transaction.set(referred_ref, payload)
+        return True
+
+    if not _txn(transaction):
+        return
+    _USER_CACHE.pop(referred_user_id, None)
 
     base_points = get_referral_signup_points()
     percentage = row.get("percentage", get_referral_default_percentage())
     earned = int(round(base_points * percentage / 100)) if base_points > 0 else 0
 
     referrer_ref = _referral_doc_ref(referrer_id)
-    _fs_bump_counter(referrer_ref, "referred_count", 1, extra={"user_id": referrer_id})
+    _fs_bump_counter(referrer_ref, "ref_referred_count", 1, extra={"user_id": referrer_id})
     if earned > 0:
-        _fs_bump_counter(referrer_ref, "points_earned", earned, extra={"user_id": referrer_id})
-        owner_ref = fs_db().collection("owner_points").document(str(referrer_id))
-        _fs_bump_counter(owner_ref, "points", earned, extra={"owner_id": referrer_id})
+        _fs_bump_counter(referrer_ref, "ref_points_earned", earned, extra={"user_id": referrer_id})
+        _fs_bump_counter(referrer_ref, "points", earned, extra={"user_id": referrer_id})
+    _USER_CACHE.pop(referrer_id, None)
 
 
 def get_referral_link(user_id: int) -> str:
@@ -4955,8 +5050,8 @@ def create_withdraw_request(user_id: int, display_name: str, username: str,
         "requested_at": datetime.now(timezone.utc).isoformat(),
         "completed_at": None,
     })
-    owner_ref = client.collection("owner_points").document(str(user_id))
-    _fs_bump_counter(owner_ref, "points", -points_amount, extra={"owner_id": user_id})
+    _fs_bump_counter(_user_doc_ref(user_id), "points", -points_amount, extra={"user_id": user_id})
+    _USER_CACHE.pop(user_id, None)
     return ref.id
 
 
@@ -5032,9 +5127,9 @@ def mark_withdraw_rejected(request_id: str) -> bool:
         "status": "rejected",
         "completed_at": datetime.now(timezone.utc).isoformat(),
     })
-    owner_ref = fs_db().collection("owner_points").document(str(data.get("user_id")))
-    _fs_bump_counter(owner_ref, "points", int(data.get("points_amount") or 0),
-                      extra={"owner_id": data.get("user_id")})
+    _fs_bump_counter(_user_doc_ref(data.get("user_id")), "points", int(data.get("points_amount") or 0),
+                      extra={"user_id": data.get("user_id")})
+    _USER_CACHE.pop(data.get("user_id"), None)
     invalidate_users_points_cache()
     return True
 
@@ -5055,8 +5150,9 @@ def get_all_withdraw_requests(limit: int = 30):
 def withdraw_status_label(status: str) -> str:
     """يحوّل قيمة حالة طلب السحب المخزّنة إلى نص عربي معروض للمستخدم/المالك."""
     return {
-        "pending": "🟡 قيد الانتظار",
-        "completed": "🟢 مقبول",
+        "pending": "🕐 تحت المراجعة",
+        "accepted": "🟢 مقبول",
+        "completed": "✅ مكتمل",
         "rejected": "🔴 مرفوض",
     }.get(status, status or "-")
 
@@ -5089,6 +5185,140 @@ def clear_withdraw_channel() -> None:
     set_setting("withdraw_channel_id", "")
     set_setting("withdraw_channel_username", "")
     set_setting("withdraw_channel_title", "")
+
+
+# ---------------------------------------------------------------------------
+# ⭐ تكلفة كل قيمة سحب نجوم (نقاط) — يتحكم بها المالك بالكامل من قسمه الخاص،
+# وتُقرأ من settings عبر get_setting/set_setting الموجودتين أصلًا (نفس آلية
+# باقي إعدادات البوت)، فلا حاجة لأي بنية بيانات إضافية.
+# ---------------------------------------------------------------------------
+
+def get_star_cost(tier: int) -> int:
+    """يعيد عدد النقاط المطلوبة لسحب قيمة نجوم معيّنة، أو القيمة الافتراضية
+    إن لم يُعدّلها المالك بعد."""
+    raw = get_setting(f"star_cost_{tier}")
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_STAR_COSTS.get(tier, 0)
+
+
+def set_star_cost(tier: int, value: int) -> None:
+    set_setting(f"star_cost_{tier}", str(max(0, int(value))))
+
+
+def get_all_star_costs() -> dict:
+    return {tier: get_star_cost(tier) for tier in STAR_WITHDRAW_TIERS}
+
+
+# ---------------------------------------------------------------------------
+# ⭐ طلبات سحب النجوم — تُخزَّن في نفس مجموعة withdraw_requests الحالية مع
+# type="stars" لتمييزها عن طلبات السحب القديمة (النظام الثابت السابق)، وتمر
+# بثلاث مراحل واضحة: pending (تحت المراجعة) ← accepted (مقبولة، بانتظار
+# تحويل النجوم فعليًا من المالك) ← completed (مكتملة). الخصم يتم فور إنشاء
+# الطلب عبر معاملة Firestore ذرية (transaction) تتحقق من كفاية الرصيد وتخصمه
+# وتُنشئ الطلب في نفس الخطوة — هذا يمنع أي استغلال بالضغط المتكرر على زر
+# السحب (لا يوجد سباق بين «تحقق من الرصيد» و«خصمه» كما في الأنظمة اليدوية).
+# ---------------------------------------------------------------------------
+
+def has_pending_withdraw_request_any(user_id: int) -> bool:
+    """يتحقق من وجود أي طلب سحب (نجوم) لم يُغلق بعد (قيد الانتظار أو مقبول
+    بانتظار التحويل) — يُستخدم لمنع إنشاء طلب جديد قبل إغلاق الحالي تمامًا،
+    بخلاف الاكتفاء بفحص آخر طلب فقط."""
+    for r in get_user_withdraw_requests(user_id):
+        if r.get("status") in ("pending", "accepted"):
+            return True
+    return False
+
+
+def create_star_withdraw_request(user_id: int, display_name: str, username: str,
+                                  stars_amount: int, points_cost: int):
+    """ينشئ طلب سحب نجوم جديد ويخصم تكلفته من رصيد المستخدم بذرية كاملة عبر
+    معاملة Firestore واحدة: تقرأ الرصيد الحالي، تتحقق من كفايته، ثم تخصمه
+    وتُنشئ مستند الطلب في نفس المعاملة. يعيد request_id عند النجاح، أو None
+    إن كان الرصيد غير كافٍ فعليًا لحظة التنفيذ (يمنع أي خصم مزدوج ناتج عن
+    ضغط متكرر أو سباق بين طلبين متزامنين)."""
+    client = fs_db()
+    owner_ref = _user_doc_ref(user_id)
+    req_ref = client.collection("withdraw_requests").document()
+    transaction = client.transaction()
+
+    @firestore.transactional
+    def _txn(transaction):
+        snap = owner_ref.get(transaction=transaction)
+        current = (snap.to_dict().get("points", 0) if snap.exists else 0) or 0
+        if current < points_cost:
+            return None
+        new_balance = current - points_cost
+        if snap.exists:
+            transaction.update(owner_ref, {"points": new_balance})
+        else:
+            transaction.set(owner_ref, {"points": new_balance, "user_id": user_id})
+        transaction.set(req_ref, {
+            "request_id": req_ref.id,
+            "user_id": user_id,
+            "display_name": display_name,
+            "username": username,
+            "type": "stars",
+            "stars_amount": stars_amount,
+            "points_amount": points_cost,
+            "status": "pending",
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "accepted_at": None,
+            "completed_at": None,
+        })
+        return req_ref.id
+
+    request_id = _txn(transaction)
+    if request_id:
+        _USER_CACHE.pop(user_id, None)
+        invalidate_users_points_cache()
+    return request_id
+
+
+def get_user_star_withdraw_requests(user_id: int) -> list:
+    """يعيد فقط طلبات سحب النجوم لمستخدم معيّن (الأحدث أولًا)."""
+    return [r for r in get_user_withdraw_requests(user_id) if r.get("type") == "stars"]
+
+
+def mark_star_withdraw_accepted(request_id: str) -> bool:
+    """المرحلة الأولى من القبول: يعلّم الطلب كـ«مقبول» (🟢) بانتظار أن يرسل
+    المالك النجوم فعليًا يدويًا ثم يعلّمه لاحقًا كمكتمل. يعيد True فقط إذا
+    كان الطلب لا يزال «قيد الانتظار» فعليًا (يمنع القبول المزدوج)."""
+    ref = fs_db().collection("withdraw_requests").document(request_id)
+    doc = ref.get()
+    if not doc.exists or doc.to_dict().get("status") != "pending":
+        return False
+    ref.update({"status": "accepted", "accepted_at": datetime.now(timezone.utc).isoformat()})
+    return True
+
+
+def mark_star_withdraw_completed(request_id: str) -> bool:
+    """المرحلة الثانية: يعلّم طلبًا «مقبولًا» بالفعل كـ«مكتمل» (✅) بعد إرسال
+    النجوم يدويًا. يعيد True فقط إذا كان الطلب بحالة «مقبول» فعليًا."""
+    ref = fs_db().collection("withdraw_requests").document(request_id)
+    doc = ref.get()
+    if not doc.exists or doc.to_dict().get("status") != "accepted":
+        return False
+    ref.update({"status": "completed", "completed_at": datetime.now(timezone.utc).isoformat()})
+    return True
+
+
+def mark_star_withdraw_rejected(request_id: str) -> bool:
+    """يرفض طلب سحب نجوم «قيد الانتظار» فقط، ويعيد النقاط المخصومة عند
+    الإنشاء فورًا إلى رصيد المستخدم. يعيد True فقط إذا كان الطلب لا يزال
+    قيد الانتظار فعليًا (يمنع الرفض المزدوج)."""
+    ref = fs_db().collection("withdraw_requests").document(request_id)
+    doc = ref.get()
+    data = doc.to_dict() if doc.exists else None
+    if not data or data.get("status") != "pending":
+        return False
+    ref.update({"status": "rejected", "completed_at": datetime.now(timezone.utc).isoformat()})
+    _fs_bump_counter(_user_doc_ref(data.get("user_id")), "points", int(data.get("points_amount") or 0),
+                      extra={"user_id": data.get("user_id")})
+    _USER_CACHE.pop(data.get("user_id"), None)
+    invalidate_users_points_cache()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -5168,22 +5398,24 @@ async def _notify_new_user_join(context: ContextTypes.DEFAULT_TYPE, user) -> Non
         logger.exception("تعذّر إرسال إشعار مستخدم جديد إلى قناة الإشعارات")
 
 def toggle_remind_win(user_id: int) -> bool:
-    ref = fs_db().collection("remind_win").document(str(user_id))
-    doc = ref.get()
-    now = datetime.now(timezone.utc).isoformat()
-    if not doc.exists:
-        ref.set({"user_id": user_id, "enabled": 1, "updated_at": now})
-        return True
-    current = doc.to_dict().get("enabled", 1)
+    """⚡ موحَّد: يقرأ/يكتب حقل remind_win داخل مستند users/{id} عبر نفس
+    الكاش الدائم، بدل مجموعة remind_win منفصلة."""
+    row = get_bot_user(user_id)
+    current = row.get("remind_win", 1) if row else 1
     new_value = 0 if current == 1 else 1
-    ref.update({"enabled": new_value, "updated_at": now})
+    _user_doc_ref(user_id).set({
+        "user_id": user_id,
+        "remind_win": new_value,
+        "remind_win_updated_at": datetime.now(timezone.utc).isoformat(),
+    }, merge=True)
+    _USER_CACHE.pop(user_id, None)
     return bool(new_value)
 
 def get_remind_win_state(user_id: int):
-    doc = fs_db().collection("remind_win").document(str(user_id)).get()
-    if not doc.exists:
+    row = get_bot_user(user_id)
+    if not row or "remind_win" not in row:
         return None
-    return bool(doc.to_dict().get("enabled"))
+    return bool(row.get("remind_win"))
 
 def save_registered_chat(chat_id: int, owner_id: int, chat_title: str, chat_type: str):
     ref = fs_db().collection("registered_chats").document(str(chat_id))
@@ -5960,7 +6192,7 @@ def giveaway_autospin_end_datetime(giveaway) -> datetime:
 
 def count_giveaway_new_rewarded(gw_code: str) -> int:
     """يعيد عدد المشاركين الجدد الذين احتُسبت نقاط لصاحب السحب بسبب مشاركتهم في هذا السحب تحديدًا."""
-    docs = fs_db().collection("rewarded_users").where("first_giveaway_code", "==", gw_code).stream()
+    docs = fs_db().collection("users").where("rewarded_gw_code", "==", gw_code).stream()
     return sum(1 for _ in docs)
 
 
@@ -6181,8 +6413,8 @@ async def bot_chat_status_update(update: Update, context: ContextTypes.DEFAULT_T
 
 
 def build_points_message(user_id: int) -> tuple:
-    """واجهة ربح مختصرة: كل المحتوى عريض والجمل الأساسية مقتبسة. يعرض أيضًا
-    حالة آخر طلب سحب للمستخدم إن وُجد (قيد الانتظار / مكتمل)."""
+    """واجهة ربح احترافية: رصيد النقاط بارز، ثم الشروط، ثم تنبيه واضح إن كان
+    للمستخدم طلب سحب نجوم لم يُغلق بعد (تفاصيله الكاملة في «سجل السحب»)."""
     pts = get_points(user_id)
     content = [
         ("🎁", EMOJI["star"]),
@@ -6190,8 +6422,6 @@ def build_points_message(user_id: int) -> tuple:
         "\n\n",
         ([
             f"💎 رصيدك الحالي: {pts} نقطة",
-            "\n",
-            f"🎯 المكافأة عند: {get_setting('points_required') or '0'} نقطة",
         ], "blockquote", None),
         "\n\n",
         ([
@@ -6200,43 +6430,104 @@ def build_points_message(user_id: int) -> tuple:
             "\n\n”",
         ], "blockquote", None),
     ]
-    latest = get_user_latest_withdraw_request(user_id)
-    if latest:
-        status_label = withdraw_status_label(latest.get("status"))
+    if has_pending_withdraw_request_any(user_id):
         content.append("\n\n")
         content.append(([
-            "📋 آخر طلب سحب لك:\n",
-            f"💎 عدد النقاط: {latest.get('points_amount', 0)}\n",
-            f"📌 الحالة: {status_label} ”",
+            "🕐 لديك طلب سحب نجوم قيد المعالجة حاليًا — تابع تفاصيله من «📋 سجل السحب» ”",
         ], "blockquote", None))
     content.extend(build_referral_info_block(user_id))
     return build_text_with_emojis([(content, "bold", None)])
 
 
 def build_points_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    """كيبورد قسم ربح: زر السحب يتغيّر حسب حالة المستخدم —
-    مقفل (رمادي/عادي) إن لم يصل بعد للحد المطلوب، أخضر واحترافي عند
-    الوصول إليه، أو تنبيه «قيد الانتظار» إن كان لديه طلب سابق لم يُستكمل."""
+    """كيبورد قسم ربح مرتّب: سجل السحب أولًا (لمتابعة الطلبات)، ثم زر سحب
+    النجوم الرئيسي، ثم الرجوع — بدون ازدحام."""
+    rows = [
+        [InlineKeyboardButton("📋 سجل السحب", callback_data="wd_history:1", style="primary")],
+        [InlineKeyboardButton("⭐ سحب نجوم", callback_data="wd_stars_menu", style="success")],
+        [InlineKeyboardButton(
+            "🔙 رجوع", callback_data="back_main_menu",
+            style="danger", **emoji_kwargs("back_section_btn"),
+        )],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+WITHDRAW_HISTORY_PAGE_SIZE = 6
+
+
+def build_stars_withdraw_menu_message(user_id: int) -> tuple:
+    pts = get_points(user_id)
+    return build_text_with_emojis([
+        ([
+            ("⭐", EMOJI["star"]), " سحب نجوم",
+            "\n\n",
+            ([
+                f"💎 رصيدك الحالي: {pts} نقطة\n",
+                "اختر قيمة النجوم التي تريد سحبها من الأزرار أدناه ”",
+            ], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_stars_withdraw_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """زر كل قيمة سحب يعكس حالتها فورًا: ✅ متاحة، 🔒 رصيد غير كافٍ، أو 🕐 إن
+    كان لدى المستخدم طلب سابق لم يُغلق بعد (يُمنع فتح طلب جديد حتى يُغلق)."""
+    pts = get_points(user_id)
+    blocked = has_pending_withdraw_request_any(user_id)
     rows = []
-    required = int(get_setting("points_required") or "0")
-    if required > 0:
-        pts = get_points(user_id)
-        if has_pending_withdraw_request(user_id):
-            rows.append([InlineKeyboardButton(
-                "🟡 طلب السحب قيد الانتظار", callback_data="withdraw_pending",
-            )])
-        elif pts >= required:
-            rows.append([InlineKeyboardButton(
-                f"✅ سحب {pts} نقطة", callback_data="withdraw_start", style="success",
-            )])
+    for tier in STAR_WITHDRAW_TIERS:
+        cost = get_star_cost(tier)
+        if blocked:
+            label, cb = f"🕐 ⭐ {tier} نجمة — طلب سابق قيد المعالجة", "withdraw_pending"
+        elif cost <= 0:
+            label, cb = f"⭐ {tier} نجمة (غير متاحة حاليًا)", "withdraw_locked"
+        elif pts >= cost:
+            label, cb = f"✅ ⭐ {tier} نجمة — {cost} نقطة", f"wd_stars_pick:{tier}"
         else:
-            rows.append([InlineKeyboardButton(
-                f"🔒 سحب ({pts}/{required} نقطة)", callback_data="withdraw_locked",
-            )])
-    rows.append([InlineKeyboardButton(
-        "🔙 رجوع", callback_data="back_main_menu",
-        style="danger", **emoji_kwargs("back_section_btn"),
-    )])
+            label, cb = f"🔒 ⭐ {tier} نجمة ({pts}/{cost} نقطة)", "withdraw_locked"
+        rows.append([InlineKeyboardButton(label, callback_data=cb)])
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="my_stats", style="danger",
+                                       **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_wd_history_message(user_id: int, page: int) -> tuple:
+    requests = get_user_star_withdraw_requests(user_id)
+    total_pages = max(1, (len(requests) + WITHDRAW_HISTORY_PAGE_SIZE - 1) // WITHDRAW_HISTORY_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * WITHDRAW_HISTORY_PAGE_SIZE
+    page_items = requests[start:start + WITHDRAW_HISTORY_PAGE_SIZE]
+
+    content = ["📋 سجل السحب", "\n\n"]
+    if not requests:
+        content.append(([
+            "📭 لا توجد أي طلبات سحب حتى الآن — استخدم «⭐ سحب نجوم» لإنشاء أول طلب لك ”",
+        ], "blockquote", None))
+    else:
+        content.append(([f"📄 صفحة {page}/{total_pages} — إجمالي الطلبات: {len(requests)} ”"], "blockquote", None))
+        content.append("\n\n")
+        for req in page_items:
+            block = [
+                f"🆔 الطلب: {req.get('request_id', '')[:8]}\n",
+                f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة\n",
+                f"💎 النقاط المخصومة: {req.get('points_amount', 0)}\n",
+                f"🕒 تاريخ الطلب: {(req.get('requested_at') or '')[:16]}\n",
+                f"📌 الحالة: {withdraw_status_label(req.get('status'))} ”",
+            ]
+            content.append((block, "blockquote", None))
+            content.append("\n\n")
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_wd_history_keyboard(user_id: int, page: int) -> InlineKeyboardMarkup:
+    requests = get_user_star_withdraw_requests(user_id)
+    total_pages = max(1, (len(requests) + WITHDRAW_HISTORY_PAGE_SIZE - 1) // WITHDRAW_HISTORY_PAGE_SIZE)
+    rows = []
+    if total_pages > 1:
+        rows.append(build_pager_nav_row(page, total_pages, "wd_history:{page}", "wd_history_noop"))
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="my_stats", style="danger",
+                                       **emoji_kwargs("back_section_btn"))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -6367,9 +6658,9 @@ def build_points_text_settings_keyboard() -> InlineKeyboardMarkup:
 
 
 def build_owner_withdraw_section_message() -> tuple:
-    """سجلات طلبات السحب — قسم المالك: يعرض سجل كامل بكل طلبات السحب (قيد
-    الانتظار/مقبولة/مرفوضة) مع اسم كل مستخدم ومعرّفه والمبلغ وتاريخ ووقت
-    الطلب وحالته، ليتمكن المالك من متابعة كل الطلبات وليس فقط الحالية."""
+    """سجلات طلبات السحب — قسم المالك: يعرض سجل كامل بكل طلبات السحب (تحت
+    المراجعة/مقبولة/مكتملة/مرفوضة، نجوم أو النظام القديم) مع اسم كل مستخدم
+    ومعرّفه والقيمة وتاريخ ووقت الطلب وحالته."""
     all_requests = get_all_withdraw_requests()
     content = [
         "💳 سجلات طلبات السحب",
@@ -6382,10 +6673,14 @@ def build_owner_withdraw_section_message() -> tuple:
             name = req.get("display_name") or str(req.get("user_id"))
             username = req.get("username")
             contact = f"@{username}" if username else "-"
+            if req.get("type") == "stars":
+                amount_line = f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة — 💎 {req.get('points_amount', 0)} نقطة"
+            else:
+                amount_line = f"💎 المبلغ: {req.get('points_amount', 0)} نقطة"
             content.append(([
                 f"👤 {name} (ID: {req.get('user_id')})\n",
                 f"🔗 يوزر: {contact}\n",
-                f"💎 المبلغ: {req.get('points_amount', 0)} نقطة\n",
+                f"{amount_line}\n",
                 f"🕒 وقت الطلب: {req.get('requested_at', '')[:16]}\n",
                 f"📌 الحالة: {withdraw_status_label(req.get('status'))} ”",
             ], "blockquote", None))
@@ -6394,18 +6689,52 @@ def build_owner_withdraw_section_message() -> tuple:
 
 
 def build_owner_withdraw_section_keyboard() -> InlineKeyboardMarkup:
-    """أزرار «قبول»/«رفض» تظهر فقط للطلبات التي لا تزال قيد الانتظار؛
-    الطلبات المقبولة أو المرفوضة تبقى في السجل أعلاه بدون أزرار إجراء."""
-    pending = get_pending_withdraw_requests()
+    """أزرار الإجراء تظهر فقط للطلبات المفتوحة: «قبول/رفض» لما هو تحت
+    المراجعة، و«تم الإرسال» لما تم قبوله بانتظار تأكيد تحويل النجوم فعليًا."""
+    open_requests = [r for r in get_all_withdraw_requests(limit=60) if r.get("status") in ("pending", "accepted")]
+    open_requests.sort(key=lambda r: r.get("requested_at") or "")
     rows = []
-    for req in pending:
-        name = (req.get("display_name") or str(req.get("user_id")))[:16]
-        rows.append([
-            InlineKeyboardButton(f"✅ قبول: {name}", callback_data=f"wd_complete:{req['request_id']}", style="success"),
-            InlineKeyboardButton(f"❌ رفض: {name}", callback_data=f"wd_reject:{req['request_id']}", style="danger"),
-        ])
+    for req in open_requests:
+        name = (req.get("display_name") or str(req.get("user_id")))[:14]
+        is_stars = req.get("type") == "stars"
+        if req.get("status") == "pending":
+            accept_cb = f"wd_stars_accept:{req['request_id']}" if is_stars else f"wd_complete:{req['request_id']}"
+            reject_cb = f"wd_stars_reject:{req['request_id']}" if is_stars else f"wd_reject:{req['request_id']}"
+            rows.append([
+                InlineKeyboardButton(f"✅ قبول: {name}", callback_data=accept_cb, style="success"),
+                InlineKeyboardButton(f"❌ رفض: {name}", callback_data=reject_cb, style="danger"),
+            ])
+        elif req.get("status") == "accepted":
+            rows.append([InlineKeyboardButton(
+                f"📤 تم الإرسال: {name}", callback_data=f"wd_stars_complete:{req['request_id']}", style="success",
+            )])
+    rows.append([InlineKeyboardButton("⭐ شروط سحب النجوم", callback_data="star_settings", style="primary")])
     rows.append([InlineKeyboardButton("📢 قناة استقبال السحب", callback_data="wd_channel_settings", style="primary")])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_points_section", style="danger",
+                                       **emoji_kwargs("back_section_btn"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_star_settings_message() -> tuple:
+    lines = []
+    for tier in STAR_WITHDRAW_TIERS:
+        lines.append(f"⭐ {tier} نجمة  ←  💎 {get_star_cost(tier)} نقطة\n")
+    return build_text_with_emojis([
+        ([
+            ("⭐", EMOJI["star"]), " شروط سحب النجوم — إدارة المالك",
+            "\n\n",
+            (lines + ["اضغط على أي قيمة أدناه لتعديل عدد النقاط المطلوبة لها مباشرة ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_star_settings_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(f"⭐ {tier} — 💎{get_star_cost(tier)}", callback_data=f"star_edit:{tier}", style="primary")
+        for tier in STAR_WITHDRAW_TIERS
+    ]
+    rows = pair_buttons(buttons)
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_withdraw_section", style="danger",
                                        **emoji_kwargs("back_section_btn"))])
     return InlineKeyboardMarkup(rows)
 
@@ -9882,9 +10211,9 @@ _BROADCAST_STATE = {
 def get_broadcast_target_user_ids() -> list:
     """يعيد معرفات كل مستخدمي البوت غير المحظورين — هدف الإذاعة."""
     ids = []
-    for doc in fs_db().collection("known_bot_users").stream():
+    for doc in fs_db().collection("users").stream():
         data = doc.to_dict() or {}
-        if data.get("banned"):
+        if not data.get("has_started") or data.get("banned"):
             continue
         try:
             ids.append(int(doc.id))
@@ -11826,39 +12155,72 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if query.data == "withdraw_locked":
-        required = int(get_setting("points_required") or "0")
-        pts = get_points(query.from_user.id)
         await query.answer(
-            f"🔒 تحتاج {required} نقطة على الأقل للسحب، رصيدك الحالي: {pts} نقطة.",
+            "🔒 رصيدك غير كافٍ لسحب هذه القيمة حاليًا، أو أن الخيار غير مفعّل من المالك بعد.",
             show_alert=True,
         )
         return
 
     if query.data == "withdraw_pending":
         await query.answer(
-            "🟡 لديك طلب سحب قيد الانتظار بالفعل، سيتم التواصل معك بعد مراجعته.",
+            "🕐 لديك طلب سحب قيد المعالجة بالفعل، انتظر إغلاقه أولاً — تابعه من «📋 سجل السحب».",
             show_alert=True,
         )
         return
 
-    if query.data == "withdraw_start":
+    if query.data == "wd_stars_menu":
+        if get_setting("points_enabled") != "1":
+            await query.answer("🚫 القسم غير متاح حاليًا.", show_alert=True)
+            return
+        text, entities = build_stars_withdraw_menu_message(query.from_user.id)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_stars_withdraw_menu_keyboard(query.from_user.id),
+        )
+        return
+
+    if query.data == "wd_history_noop":
+        await query.answer()
+        return
+
+    if query.data.startswith("wd_history:"):
+        page_str = query.data.split(":", 1)[1]
+        page = int(page_str) if page_str.isdigit() else 1
+        text, entities = build_wd_history_message(query.from_user.id, page)
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_wd_history_keyboard(query.from_user.id, page),
+        )
+        return
+
+    if query.data.startswith("wd_stars_pick:"):
         user = query.from_user
         if get_setting("points_enabled") != "1":
             await query.answer("🚫 القسم غير متاح حاليًا.", show_alert=True)
             return
-        required = int(get_setting("points_required") or "0")
-        pts = get_points(user.id)
-        if required <= 0:
-            await query.answer("⚠️ ميزة السحب غير مفعّلة حاليًا.", show_alert=True)
+        tier_str = query.data.split(":", 1)[1]
+        tier = int(tier_str) if tier_str.isdigit() else 0
+        if tier not in STAR_WITHDRAW_TIERS:
+            await query.answer("⚠️ خيار غير صالح.", show_alert=True)
             return
-        if has_pending_withdraw_request(user.id):
+        # مانع ضغط متكرر: قفل مؤقت في user_data يمنع تنفيذ طلبين من نفس
+        # المستخدم في نفس اللحظة قبل أن تُغلق المعاملة الذرية الأولى.
+        if context.user_data.get("wd_processing"):
+            await query.answer("⏳ جارٍ معالجة طلبك، فضلاً انتظر لحظة.", show_alert=True)
+            return
+        if has_pending_withdraw_request_any(user.id):
             await query.answer(
-                "🟡 لديك طلب سحب قيد الانتظار بالفعل، انتظر مراجعته أولاً.", show_alert=True,
+                "🕐 لديك طلب سحب قيد المعالجة بالفعل، انتظر إغلاقه أولاً.", show_alert=True,
             )
             return
-        if pts < required:
+        cost = get_star_cost(tier)
+        if cost <= 0:
+            await query.answer("⚠️ هذا الخيار غير مفعّل حاليًا من المالك.", show_alert=True)
+            return
+        pts = get_points(user.id)
+        if pts < cost:
             await query.answer(
-                f"🔒 تحتاج {required} نقطة على الأقل للسحب، رصيدك الحالي: {pts} نقطة.",
+                f"🔒 تحتاج {cost} نقطة على الأقل لسحب ⭐{tier}، رصيدك الحالي: {pts} نقطة.",
                 show_alert=True,
             )
             return
@@ -11868,16 +12230,29 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not user.username:
             await query.answer(
                 "⚠️ يجب إضافة اسم مستخدم (Username) في إعدادات تليجرام أولاً "
-                "حتى نتمكن من التواصل معك لإرسال مكافأتك، ثم اضغط على زر السحب مجددًا.",
+                "حتى نتمكن من التواصل معك، ثم اضغط على زر السحب مجددًا.",
                 show_alert=True,
             )
             return
 
-        display_name = user.first_name or user.username or str(user.id)
-        request_id = create_withdraw_request(user.id, display_name, user.username, pts)
+        context.user_data["wd_processing"] = True
+        try:
+            display_name = user.first_name or user.username or str(user.id)
+            request_id = await asyncio.to_thread(
+                create_star_withdraw_request, user.id, display_name, user.username, tier, cost,
+            )
+        finally:
+            context.user_data.pop("wd_processing", None)
+
+        if not request_id:
+            await query.answer(
+                "⚠️ رصيدك لم يعد كافيًا لهذا الطلب (ربما تغيّر للتو)، حدّث الصفحة وحاول مجددًا.",
+                show_alert=True,
+            )
+            return
 
         await query.answer(
-            f"✅ تم إرسال طلب سحبك بنجاح!\n💎 عدد النقاط: {pts}\n📌 الحالة: قيد الانتظار",
+            f"✅ تم إرسال طلب سحب ⭐{tier} بنجاح!\n💎 تم خصم {cost} نقطة.\n📌 الحالة: تحت المراجعة",
             show_alert=True,
         )
 
@@ -11891,14 +12266,15 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             pass
 
         wd_request_notify_markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ قبول", callback_data=f"wd_complete:{request_id}", style="success"),
-            InlineKeyboardButton("❌ رفض", callback_data=f"wd_reject:{request_id}", style="danger"),
+            InlineKeyboardButton("✅ قبول", callback_data=f"wd_stars_accept:{request_id}", style="success"),
+            InlineKeyboardButton("❌ رفض", callback_data=f"wd_stars_reject:{request_id}", style="danger"),
         ]])
         wd_request_notify_text = (
-            "💳 طلب سحب جديد\n\n"
+            "⭐ طلب سحب نجوم جديد\n\n"
             f"👤 المستخدم: {display_name} (ID: {user.id})\n"
             f"🔗 يوزر: @{user.username}\n"
-            f"💎 عدد النقاط: {pts}"
+            f"⭐ القيمة: {tier} نجمة\n"
+            f"💎 النقاط المخصومة: {cost}"
         )
 
         for owner_id in OWNER_IDS:
@@ -11921,6 +12297,92 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
             except Exception:
                 pass
+        return
+
+    if (query.data.startswith("wd_stars_accept:") or query.data.startswith("wd_stars_reject:")
+            or query.data.startswith("wd_stars_complete:")):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
+            return
+        action, request_id = query.data.split(":", 1)
+        req = get_withdraw_request(request_id)
+        notify_text = None
+        if not req:
+            await query.answer("⚠️ هذا الطلب غير موجود.", show_alert=True)
+        elif action == "wd_stars_reject":
+            if mark_star_withdraw_rejected(request_id):
+                await query.answer("❌ تم رفض الطلب وإعادة النقاط لرصيد المستخدم.")
+                notify_text = (
+                    "❌ تم رفض طلب سحب النجوم الخاص بك.\n\n"
+                    f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة\n"
+                    f"💎 النقاط: {req.get('points_amount', 0)}\n"
+                    "📌 الحالة: 🔴 مرفوض\n"
+                    "↩️ تمت إعادة النقاط إلى رصيدك."
+                )
+            else:
+                await query.answer("✅ تم إغلاق هذا الطلب مسبقًا.", show_alert=True)
+        elif action == "wd_stars_accept":
+            if mark_star_withdraw_accepted(request_id):
+                await query.answer("🟢 تم قبول الطلب. أرسل النجوم يدويًا ثم اضغط «📤 تم الإرسال».")
+                notify_text = (
+                    "🟢 تم قبول طلب سحب النجوم الخاص بك، وسيتم تحويلها قريبًا.\n\n"
+                    f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة"
+                )
+            else:
+                await query.answer("✅ تم إغلاق هذا الطلب مسبقًا.", show_alert=True)
+        else:  # wd_stars_complete
+            if mark_star_withdraw_completed(request_id):
+                await query.answer("✅ تم تعليم الطلب كمكتمل.")
+                notify_text = (
+                    "🎉 تم إرسال نجومك بنجاح!\n\n"
+                    f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة\n"
+                    "📌 الحالة: ✅ مكتمل"
+                )
+            else:
+                await query.answer("⚠️ تعذّر إتمام الطلب (يجب أن يكون بحالة «مقبول» أولًا).", show_alert=True)
+        if notify_text and req:
+            try:
+                await context.bot.send_message(chat_id=req["user_id"], text=notify_text)
+            except Exception:
+                pass
+        text, entities = build_owner_withdraw_section_message()
+        try:
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_withdraw_section_keyboard(),
+            )
+        except Exception:
+            pass
+        return
+
+    if query.data == "star_settings":
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        text, entities = build_star_settings_message()
+        await query.edit_message_text(
+            text=text, entities=entities,
+            reply_markup=build_star_settings_keyboard(),
+        )
+        return
+
+    if query.data.startswith("star_edit:"):
+        if not is_owner(query.from_user.id):
+            await query.answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+            return
+        tier_str = query.data.split(":", 1)[1]
+        tier = int(tier_str) if tier_str.isdigit() else 0
+        if tier not in STAR_WITHDRAW_TIERS:
+            await query.answer("⚠️ قيمة غير صالحة.", show_alert=True)
+            return
+        context.user_data["awaiting"] = "star_cost_edit"
+        context.user_data["star_cost_edit_tier"] = tier
+        await query.edit_message_text(
+            f"✍️ أرسل الآن عدد النقاط المطلوبة لسحب ⭐{tier} نجمة (رقم صحيح ≥ صفر) ”",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 رجوع", callback_data="star_settings", style="danger")
+            ]]),
+        )
         return
 
     if query.data == "owner_sub_section":
@@ -13952,6 +14414,29 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             text=text, entities=entities,
             reply_markup=build_broadcast_log_detail_keyboard(log_id, back_page),
+        )
+        return
+
+    if awaiting == "star_cost_edit":
+        if not is_owner(update.effective_user.id):
+            context.user_data.pop("awaiting", None)
+            context.user_data.pop("star_cost_edit_tier", None)
+            return
+        tier = context.user_data.pop("star_cost_edit_tier", None)
+        context.user_data.pop("awaiting", None)
+        value = update.message.text.strip()
+        if tier not in STAR_WITHDRAW_TIERS or not value.isdigit():
+            await update.message.reply_text("⚠️ أرسل رقمًا صحيحًا أكبر من أو يساوي صفر ”")
+            return
+        set_star_cost(tier, int(value))
+        log_admin_action(
+            "change_settings", update.effective_user.id, details=f"star_cost_{tier} = {value}",
+            actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+        )
+        text, entities = build_star_settings_message()
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_star_settings_keyboard(),
         )
         return
 
