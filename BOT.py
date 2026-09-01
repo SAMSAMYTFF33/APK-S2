@@ -386,6 +386,10 @@ EMOJI = {
     "gw_kick_btn": "5240241223632954241",
     "gw_atime_lightning": "5965286318001889755",
     "gw_atime_clock": "5852614259082530343",
+    "medal_gold": "6104641819025346583",
+    "medal_silver": "6105107973300818587",
+    "medal_bronze": "6104729414883348710",
+    "medal_other": "5098276216444552309",
 }
 
 CAPTCHA_EMOJIS = [
@@ -6657,11 +6661,24 @@ async def build_points_statistics_message(context: ContextTypes.DEFAULT_TYPE) ->
     ], "blockquote", None))
     content.append("\n\n")
 
+    # شارات الترتيب: ميداليات مخصّصة (custom emoji) للمراكز الثلاثة الأولى
+    # ذهبية/فضية/برونزية، وميدالية موحّدة للمركزين الرابع والخامس.
+    RANK_BADGES = [
+        ("🥇", EMOJI["medal_gold"]),
+        ("🥈", EMOJI["medal_silver"]),
+        ("🥉", EMOJI["medal_bronze"]),
+    ]
+
     if not rows:
         content.append((["لا توجد إحصائيات مسجّلة للقنوات حتى الآن ”"], "blockquote", None))
     else:
-        content.append([("🏆", EMOJI["trophy_win"]), " الأعلى نشاطًا"])
-        content.append("\n\n")
+        # ملاحظة: كانت هذه السطر تستخدم content.append([...]) فتُدرِج القائمة
+        # كعنصر واحد بدل دمج عناصرها ضمن content، فكانت تُطبَع كنص خام (repr)
+        # بدل تحويلها لإيموجي/تنسيق فعلي — تم إصلاحها هنا باستخدام extend.
+        content.extend([
+            ("🏆", EMOJI["trophy_win"]), " الأعلى نشاطًا", "\n",
+            "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "\n\n",
+        ])
         for index, row in enumerate(rows):
             title = row["chat_title"] or str(row["chat_id"])
             link = ""
@@ -6672,8 +6689,9 @@ async def build_points_statistics_message(context: ContextTypes.DEFAULT_TYPE) ->
             name_part = (title, "link", link) if link else title
             mc = member_counts.get(row["chat_id"])
             mc_text = f"{mc:,}" if isinstance(mc, int) else "—"
+            badge = RANK_BADGES[index] if index < len(RANK_BADGES) else ("🎖", EMOJI["medal_other"])
             block = [
-                f"#{index + 1:02d}  ", name_part, "\n",
+                badge, f"  #{index + 1:02d}   ", name_part, "\n",
                 "◈ مشتركون ", ([mc_text], "code", None), "   ",
                 "◈ نقاط ", ([f"{row['points']:,}"], "code", None), "\n",
                 "◈ روليت ", ([f"{row['roulette_count']:,}"], "code", None), "   ",
