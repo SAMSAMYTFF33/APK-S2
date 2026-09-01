@@ -390,6 +390,8 @@ EMOJI = {
     "medal_silver": "6105107973300818587",
     "medal_bronze": "6104729414883348710",
     "medal_other": "5098276216444552309",
+    "withdraw_rejected": "5161208387957950108",
+    "withdraw_accepted": "5384503132086625813",
 }
 
 CAPTCHA_EMOJIS = [
@@ -12484,6 +12486,33 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     pass
             return
 
+        def _build_withdraw_status_card(status_emoji_key: str, status_emoji_fallback: str, status_label: str, req: dict, footer: str = "") -> tuple:
+            """يبني بطاقة نصية مزخرفة موحّدة (نص + كيانات) لعرض حالة طلب سحب
+            النجوم، تحوي اسم صاحب الطلب، يوزره، آيديه، كمية النجوم، والحالة
+            الحالية، مع إيموجي مخصص (custom emoji) يعكس الحالة."""
+            display_name = req.get("display_name") or "—"
+            username = req.get("username")
+            username_line = f"@{username}" if username else "لا يوجد"
+            user_id_val = req.get("user_id", "—")
+            stars_amount = req.get("stars_amount", 0)
+            status_emoji_id = EMOJI.get(status_emoji_key, "0")
+            status_icon = (status_emoji_fallback, status_emoji_id) if status_emoji_id and status_emoji_id != "0" else status_emoji_fallback
+            parts = [
+                "┏━━━━━━━━━━━━━━━┓\n",
+                "┃   ", status_icon, "  طلب سحب نجوم   ┃\n",
+                "┗━━━━━━━━━━━━━━━┛\n",
+                "\n",
+                f"👤 ˹ الاسم ˺  ׃  {display_name}\n",
+                f"🔗 ˹ اليوزر ˺  ׃  {username_line}\n",
+                f"🆔 ˹ الآيدي ˺  ׃  {user_id_val}\n",
+                f"⭐ ˹ الكمية ˺  ׃  {stars_amount} نجمة\n",
+                "📌 ˹ الحالة ˺  ׃  ", status_icon, f" {status_label}\n",
+                "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
+            ]
+            if footer:
+                parts.append(f"\n{footer}")
+            return build_text_with_emojis(parts)
+
         if (query.data.startswith("wd_stars_accept:") or query.data.startswith("wd_stars_reject:")
                 or query.data.startswith("wd_stars_complete:")):
             if not is_owner(query.from_user.id):
@@ -12492,13 +12521,16 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             action, request_id = query.data.split(":", 1)
             req = get_withdraw_request(request_id)
             notify_text = None
+            admin_result_entities = []
             if not req:
                 admin_result_text = "⚠️ هذا الطلب غير موجود."
                 await _cb_answer(admin_result_text, show_alert=True)
             elif action == "wd_stars_reject":
                 if mark_star_withdraw_rejected(request_id):
-                    admin_result_text = "❌ تم رفض الطلب وإعادة النقاط لرصيد المستخدم."
-                    await _cb_answer(admin_result_text)
+                    admin_result_text, admin_result_entities = _build_withdraw_status_card(
+                        "withdraw_rejected", "🔴", "مرفوض", req, "↩️ تمت إعادة النقاط إلى رصيد المستخدم.",
+                    )
+                    await _cb_answer("❌ تم رفض الطلب وإعادة النقاط لرصيد المستخدم.")
                     notify_text = (
                         "❌ تم رفض طلب سحب النجوم الخاص بك.\n\n"
                         f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة\n"
@@ -12511,8 +12543,10 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     await _cb_answer(admin_result_text, show_alert=True)
             elif action == "wd_stars_accept":
                 if mark_star_withdraw_accepted(request_id):
-                    admin_result_text = "🟢 تم قبول الطلب. أرسل النجوم يدويًا ثم اضغط «📤 تم الإرسال»."
-                    await _cb_answer(admin_result_text)
+                    admin_result_text, admin_result_entities = _build_withdraw_status_card(
+                        "withdraw_accepted", "🟢", "مقبول", req,
+                    )
+                    await _cb_answer("🟢 تم قبول الطلب. أرسل النجوم يدويًا ثم اضغط «📤 تم الإرسال».")
                     notify_text = (
                         "🟢 تم قبول طلب سحب النجوم الخاص بك، وسيتم تحويلها قريبًا.\n\n"
                         f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة"
@@ -12522,8 +12556,10 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     await _cb_answer(admin_result_text, show_alert=True)
             else:  # wd_stars_complete
                 if mark_star_withdraw_completed(request_id):
-                    admin_result_text = "✅ تم تعليم الطلب كمكتمل."
-                    await _cb_answer(admin_result_text)
+                    admin_result_text, admin_result_entities = _build_withdraw_status_card(
+                        None, "✅", "مكتمل", req,
+                    )
+                    await _cb_answer("✅ تم تعليم الطلب كمكتمل.")
                     notify_text = (
                         "🎉 تم إرسال نجومك بنجاح!\n\n"
                         f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة\n"
@@ -12543,7 +12579,9 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_channel_msg = getattr(getattr(query.message, "chat", None), "type", None) == "channel"
             if is_channel_msg:
                 try:
-                    await query.edit_message_text(text=admin_result_text, reply_markup=None)
+                    await query.edit_message_text(
+                        text=admin_result_text, entities=admin_result_entities, reply_markup=None,
+                    )
                 except Exception:
                     pass
             else:
