@@ -6691,7 +6691,7 @@ async def build_points_statistics_message(context: ContextTypes.DEFAULT_TYPE) ->
             mc_text = f"{mc:,}" if isinstance(mc, int) else "—"
             badge = RANK_BADGES[index] if index < len(RANK_BADGES) else ("🎖", EMOJI["medal_other"])
             block = [
-                badge, f"  #{index + 1:02d}   ", name_part, "\n",
+                badge, "  ", name_part, "\n",
                 "◈ مشتركون ", ([mc_text], "code", None), "   ",
                 "◈ نقاط ", ([f"{row['points']:,}"], "code", None), "\n",
                 "◈ روليت ", ([f"{row['roulette_count']:,}"], "code", None), "   ",
