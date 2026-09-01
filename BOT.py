@@ -390,8 +390,8 @@ EMOJI = {
     "medal_silver": "6105107973300818587",
     "medal_bronze": "6104729414883348710",
     "medal_other": "5098276216444552309",
-    "withdraw_rejected": "5161208387957950108",
-    "withdraw_accepted": "5384503132086625813",
+    "withdraw_rejected": "5769630100739854545",
+    "withdraw_accepted": "5789577921727307070",
 }
 
 CAPTCHA_EMOJIS = [
@@ -12452,16 +12452,11 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"💎 النقاط المخصومة: {cost}"
             )
 
-            for owner_id in OWNER_IDS:
-                try:
-                    await context.bot.send_message(
-                        chat_id=owner_id,
-                        text=wd_request_notify_text,
-                        reply_markup=wd_request_notify_markup,
-                    )
-                except Exception:
-                    pass
-
+            # ⚠️ الطلبات تُرسل حصريًا إلى قناة استقبال السحوبات، وليس إلى
+            # المحادثة الخاصة لمالكي البوت — فلا يتحكم بالطلب أو حتى يراه
+            # سوى من هو موجود في القناة (مالكو البوت حصرًا، حسب فحص
+            # is_owner عند الضغط على الأزرار). النشر في المحادثة الخاصة
+            # يحدث فقط كخط احتياط إن لم تُحدَّد قناة سحوبات بعد.
             withdraw_channel = get_withdraw_channel()
             if withdraw_channel:
                 try:
@@ -12472,6 +12467,16 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     )
                 except Exception:
                     pass
+            else:
+                for owner_id in OWNER_IDS:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=owner_id,
+                            text=wd_request_notify_text,
+                            reply_markup=wd_request_notify_markup,
+                        )
+                    except Exception:
+                        pass
             return
 
         def _build_withdraw_status_card(status_emoji_key: str, status_emoji_fallback: str, status_label: str, req: dict, footer: str = "") -> tuple:
@@ -12514,7 +12519,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             elif action == "wd_stars_reject":
                 if mark_star_withdraw_rejected(request_id):
                     admin_result_text, admin_result_entities = _build_withdraw_status_card(
-                        "withdraw_rejected", "🔴", "مرفوض", req, "↩️ تمت إعادة النقاط إلى رصيد المستخدم.",
+                        "withdraw_rejected", "‼️", "مرفوض", req, "↩️ تمت إعادة النقاط إلى رصيد المستخدم.",
                     )
                     await _cb_answer("❌ تم رفض الطلب وإعادة النقاط لرصيد المستخدم.")
                     notify_text = (
@@ -12530,7 +12535,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             elif action == "wd_stars_accept":
                 if mark_star_withdraw_accepted(request_id):
                     admin_result_text, admin_result_entities = _build_withdraw_status_card(
-                        "withdraw_accepted", "🟢", "مقبول", req,
+                        "withdraw_accepted", "🏆", "مقبول", req,
                     )
                     await _cb_answer("🟢 تم قبول الطلب وتأكيد السحب.")
                     notify_text = (
