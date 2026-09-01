@@ -5493,11 +5493,20 @@ def save_registered_chat(chat_id: int, owner_id: int, chat_title: str, chat_type
     # (نقاط + عدد سحوبات + عنوان) من قراءة واحدة فقط لمجموعة channel_points،
     # دون الحاجة لقراءة إضافية من registered_chats لكل قناة مرشَّحة كما كان
     # سابقًا (كان هذا يُضاعف عدد القراءات تقريبًا).
+    # ⚡ إصلاح مهم: Firestore يستثني من أي استعلام order_by(field) كل مستند لا
+    # يملك ذلك الحقل أصلاً (وليس فقط من كانت قيمته 0). لذلك كانت شاشة
+    # الإحصائيات تُظهر «لا توجد إحصائيات مسجّلة للقنوات» رغم وجود عمليات
+    # روليت فعلية: القنوات المسجَّلة عبر save_registered_chat لم تكن تملك
+    # الحقلين roulette_count/points من البداية، فيستبعدها order_by بالكامل.
+    # firestore.Increment(0) يضمن وجود الحقل بقيمته الحالية (أو صفر إن لم
+    # يكن موجودًا) دون أي قراءة إضافية ودون التأثير على القيمة الفعلية.
     fs_db().collection("channel_points").document(str(chat_id)).set({
         "chat_id": chat_id,
         "chat_title": chat_title,
         "chat_type": chat_type,
         "active": True,
+        "roulette_count": firestore.Increment(0),
+        "points": firestore.Increment(0),
     }, merge=True)
 
 def remove_registered_chat(chat_id: int):
@@ -6665,9 +6674,10 @@ async def build_points_statistics_message(context: ContextTypes.DEFAULT_TYPE) ->
             mc_text = f"{mc:,}" if isinstance(mc, int) else "—"
             block = [
                 f"#{index + 1:02d}  ", name_part, "\n",
-                "◈ سحوبات ", ([f"{row['roulette_count']:,}"], "code", None), "   ",
                 "◈ مشتركون ", ([mc_text], "code", None), "   ",
-                "◈ نقاط ", ([f"{row['points']:,}"], "code", None),
+                "◈ نقاط ", ([f"{row['points']:,}"], "code", None), "\n",
+                "◈ روليت ", ([f"{row['roulette_count']:,}"], "code", None), "   ",
+                "◈ إحالات ", ([f"{row['new_users']:,}"], "code", None),
             ]
             if index < len(rows) - 1:
                 block.append("\n┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈")
@@ -14328,6 +14338,54 @@ async def reset_test_user_command(update: Update, context: ContextTypes.DEFAULT_
     )
     await update.message.reply_text(text=_bt, entities=_be)
 
+
+async def fix_channels_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر خاص بمالك البوت فقط: /fix_channels_stats
+    إصلاح لمرة واحدة لمشكلة «لا توجد إحصائيات مسجّلة للقنوات» في شاشة
+    الإحصائيات، رغم وجود عمليات روليت فعلية. السبب: Firestore يستثني من أي
+    استعلام order_by(field) كل مستند لا يملك ذلك الحقل أصلاً (وليس فقط من
+    كانت قيمته صفرًا). المستندات القديمة في channel_points (التي سُجِّلت قبل
+    إضافة هذا الإصلاح) لا تملك الحقلين roulette_count/points، فيستبعدها
+    order_by بالكامل ولا تظهر في الترتيب مهما بلغ نشاطها الفعلي.
+    هذا الأمر يمر مرة واحدة فقط على كل مستندات channel_points (قراءة واحدة
+    لكل مستند + كتابة فقط للناقص منها) ويضمن وجود الحقلين بقيمتهما الحالية
+    (Increment(0) لا يُغيّر القيمة، فقط يضمن وجود الحقل). بعدها لن تتكرر
+    المشكلة أبدًا لأي قناة، لأن save_registered_chat أصبح يضبط هذين الحقلين
+    منذ البداية على كل قناة جديدة.
+    """
+    if not is_owner(update.effective_user.id):
+        return
+    _bt, _be = bold_notice("⏳ جارٍ إصلاح بيانات القنوات القديمة...")
+    status_msg = await update.message.reply_text(text=_bt, entities=_be)
+
+    client = fs_db()
+    fixed = 0
+    scanned = 0
+    for doc in client.collection("channel_points").stream():
+        scanned += 1
+        data = doc.to_dict() or {}
+        patch = {}
+        if "roulette_count" not in data:
+            patch["roulette_count"] = firestore.Increment(0)
+        if "points" not in data:
+            patch["points"] = firestore.Increment(0)
+        if patch:
+            doc.reference.set(patch, merge=True)
+            fixed += 1
+
+    # الكاش المحلي لشاشة الإحصائيات قد يحمل نتيجة فارغة سابقة — نفرغه حتى
+    # تُقرأ البيانات المُصلَحة فورًا في أول فتح لشاشة الإحصائيات بعد الإصلاح.
+    _TOP_CHANNELS_STATS_CACHE["data"] = None
+    _TOP_CHANNELS_STATS_CACHE["ts"] = 0.0
+
+    _bt, _be = bold_notice(
+        f"✅ تم فحص {scanned} قناة، وإصلاح {fixed} منها كانت تفتقد "
+        "الحقول اللازمة لظهورها بشاشة الإحصائيات.\n"
+        "افتح «📊 لوحة الإحصائيات» الآن للتأكد."
+    )
+    await status_msg.edit_text(text=_bt, entities=_be)
+
+
 async def channel_forward_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     يلتقط رسالة مُعاد توجيهها من قناة إلى خاص البوت (الخطوة 2 في شاشة تسجيل القناة)،
@@ -16502,6 +16560,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("getid", get_id_prompt))
     app.add_handler(CommandHandler("reset_test", reset_test_user_command))
+    app.add_handler(CommandHandler("fix_channels_stats", fix_channels_stats_command))
 
     app.add_handler(CallbackQueryHandler(_go_to_quick_roulette, pattern=r"^quick_roulette_menu$"))
     app.add_handler(CallbackQueryHandler(_go_back_to_main, pattern=r"^back_to_main$"))
