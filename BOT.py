@@ -278,6 +278,14 @@ DEFAULT_POINTS_CONDITIONS = (
     "كل مستخدم جديد يجتاز منع الرشق ويشارك في السحب يمنح صاحب السحب نقاطًا مرة واحدة فقط."
 )
 TECH_SUPPORT_USERNAME = "y66vlBOT"
+
+
+def get_tech_support_username() -> str:
+    """يعيد يوزر حساب الدعم الفني الحالي — من إعدادات Firestore إن كان
+    المالك/المشرف قد غيّره من داخل البوت، وإلا فالقيمة الافتراضية الثابتة
+    في الكود (TECH_SUPPORT_USERNAME)."""
+    saved = get_setting("tech_support_username")
+    return saved or TECH_SUPPORT_USERNAME
 SUPPORT_BOT_STARS_AMOUNT = 5
 
 # ---------------------------------------------------------------------------
@@ -6940,7 +6948,7 @@ def build_owner_section_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton("🏁 المسابقات", callback_data="owner_contests_section", style="primary"),
         InlineKeyboardButton("⚡ السحب السريع", callback_data="owner_quick_roulette_section", style="primary"),
         InlineKeyboardButton("📣 الإذاعة", callback_data="owner_broadcast_section", style="primary"),
-        InlineKeyboardButton("👨‍💻 إدارة المشرفين", callback_data="owner_admins_section", style="primary"),
+        InlineKeyboardButton("👨‍💻 إدارة مشرف / دعم", callback_data="owner_admins_section", style="primary"),
         InlineKeyboardButton("🔗 إدارة روابط الدعوة", callback_data="owner_referrals_section", style="primary"),
         InlineKeyboardButton("📊 إحصائيات البوت", callback_data="owner_stats_section", style="primary"),
         InlineKeyboardButton("📜 سجل العمليات", callback_data="owner_logs:1", style="primary"),
@@ -7670,11 +7678,15 @@ def build_owner_users_stats_keyboard() -> InlineKeyboardMarkup:
 
 def build_owner_admins_section_message() -> tuple:
     count = len(list_moderators())
+    support_username = get_tech_support_username()
     return build_text_with_emojis([
         ([
-            "👨‍💻 إدارة المشرفين — إدارة المالك",
+            "👨‍💻 إدارة مشرف / دعم — إدارة المالك",
             "\n\n",
-            ([f"👥 عدد المشرفين الحاليين: {count}"], "blockquote", None),
+            ([
+                f"👥 عدد المشرفين الحاليين: {count}\n",
+                f"🎧 حساب الدعم الفني الحالي: @{support_username}",
+            ], "blockquote", None),
             "\n\n",
             (["اختر ما تريد فعله من الأزرار أدناه ”"], "blockquote", None),
         ], "bold", None),
@@ -7687,10 +7699,35 @@ def build_owner_admins_section_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton("📋 عرض المشرفين", callback_data="owner_admins_list:view:1", style="primary"),
         InlineKeyboardButton("🔐 صلاحيات مشرف", callback_data="owner_admins_list:perms:1", style="primary"),
         InlineKeyboardButton("🗑️ حذف مشرف", callback_data="owner_admins_list:remove:1", style="danger"),
+        InlineKeyboardButton("🎧 حساب الدعم الفني", callback_data="owner_admins_support_section", style="primary"),
     ])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
                                       **emoji_kwargs("back_section_btn"))])
     return InlineKeyboardMarkup(rows)
+
+
+def build_owner_admins_support_message() -> tuple:
+    support_username = get_tech_support_username()
+    return build_text_with_emojis([
+        ([
+            "🎧 حساب الدعم الفني",
+            "\n\n",
+            ([
+                f"الحساب الحالي: @{support_username}\n",
+                f"الرابط: https://t.me/{support_username}",
+            ], "blockquote", None),
+            "\n\n",
+            (["هذا الحساب هو من يظهر لكل مستخدمي البوت عند الضغط على زر «الدعم الفني» في القائمة الرئيسية ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_admins_support_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ تغيير حساب الدعم الفني", callback_data="owner_admins_support_set", style="success")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_admins_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
 
 
 ADMINS_PAGE_SIZE = 8
@@ -8920,7 +8957,7 @@ def build_main_keyboard(remind_state=None, user_id: int = None) -> InlineKeyboar
         [
             InlineKeyboardButton("دعم البوت", callback_data="support_bot",
                                   style="success", **emoji_kwargs("star")),
-            InlineKeyboardButton("الدعم الفني", url=f"https://t.me/{TECH_SUPPORT_USERNAME}",
+            InlineKeyboardButton("الدعم الفني", url=f"https://t.me/{get_tech_support_username()}",
                                   style="success", **emoji_kwargs("tech")),
         ],
         [
@@ -13109,6 +13146,30 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return
 
+        if query.data == "owner_admins_support_section":
+            if not is_owner_or_moderator(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_admins_support_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_admins_support_keyboard(),
+            )
+            return
+
+        if query.data == "owner_admins_support_set":
+            if not is_owner_or_moderator(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "admin_support_username_set"
+            await query.edit_message_text(
+                "✍️ أرسل الآن يوزر حساب الدعم الفني الجديد (مثال: @username أو رابط t.me/username) ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="owner_admins_support_section", style="danger")
+                ]]),
+            )
+            return
+
         if query.data.startswith("mod_add_confirm:"):
             if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
                 await _cb_answer("⛔ ليس لديك صلاحية إضافة مشرفين.", show_alert=True)
@@ -15104,6 +15165,25 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             text=text, entities=entities,
             reply_markup=build_owner_sub_channel_keyboard(channel),
+        )
+        return
+
+    if awaiting == "admin_support_username_set":
+        context.user_data.pop("awaiting", None)
+        if not is_owner_or_moderator(update.effective_user.id):
+            return
+        username = _normalize_channel_username(update.message.text)
+        if not username:
+            await update.message.reply_text(
+                "⚠️ أرسل يوزر صحيح (مثال: @username أو رابط t.me/username) ”",
+            )
+            return
+        set_setting("tech_support_username", username)
+        await update.message.reply_text(f"✅ تم تغيير حساب الدعم الفني إلى @{username} بنجاح.")
+        text, entities = build_owner_admins_support_message()
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_owner_admins_support_keyboard(),
         )
         return
 
