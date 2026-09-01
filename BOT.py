@@ -4175,10 +4175,18 @@ def get_participants_with_names(roulette_id: int):
     rows.sort(key=lambda r: r.get("counted_at") or "")
     return [(r["user_id"], r.get("display_name") or str(r["user_id"])) for r in rows]
 
-def get_points(owner_id: int) -> int:
+def get_points(owner_id: int, force_refresh: bool = False) -> int:
     """⚡ موحَّد: يُقرأ من نفس مستند users/{id} (حقل points) عبر نفس الكاش
     الدائم (_USER_CACHE)، بدل مجموعة owner_points منفصلة — فلا يستهلك أي
-    قراءة Firestore إضافية بعد أول تحميل لهذا المستخدم في التشغيلة الحالية."""
+    قراءة Firestore إضافية بعد أول تحميل لهذا المستخدم في التشغيلة الحالية.
+    force_refresh=True: يقرأ حيًّا من Firestore متجاوزًا الكاش تمامًا —
+    يُستخدم فقط في نقاط العرض/القرار الحرجة القليلة التكرار (زر «🎁 ربح»،
+    قائمة سحب النجوم، وتنفيذ طلب سحب فعلي) حتى يظهر الرصيد الصحيح 100%
+    دائمًا مهما حصل، بمعزل تام عن أي علة أو تأخير محتمل بآلية إبطال الكاش —
+    بلا أي كلفة إضافية على بقية البوت لأنها استدعاءات نادرة أصلًا (ضغطة
+    مستخدم يدوية، لا تتكرر في كل رسالة)."""
+    if force_refresh:
+        _load_user_into_cache(owner_id)
     row = get_bot_user(owner_id)
     return int(row.get("points") or 0) if row else 0
 
@@ -4192,40 +4200,85 @@ def get_top_channel_points(limit: int = 5):
     نقاطًا قد تكون غير نشطة أو ليست من نوع «قناة» فتُستبعد، مع التوقف فور
     الوصول للعدد المطلوب من القنوات الصالحة فعليًا — فيقل عدد قراءات
     registered_chats أيضًا إلى ما يُقارب 5 بدل قراءتها جميعًا.)"""
+    return _top_channels_by_field("points", limit)
+
+
+def get_top_channels_by_roulette_count(limit: int = 5):
+    """يعيد أعلى القنوات عدد عمليات «روليت» (سحوبات + مسابقات) — اعتمادًا على
+    عمود roulette_count المخصَّص على نفس مستند channel_points/{chat_id}، بدل
+    مسح مجموعتي giveaways وcontests بالكامل في كل مرة (كانت هذه هي العملية
+    المكلفة التي تستهلك مئات/آلاف قراءات Firestore عند كل ضغطة على شاشة
+    الإحصائيات). يُحدَّث هذا العمود تلقائيًا (+1) لحظة إنشاء كل سحب أو مسابقة
+    جديدة (bump_channel_roulette_count)، فتُصبح القراءة هنا استعلامًا واحدًا
+    فقط (order_by + limit) — تمامًا بنفس كفاءة get_top_channel_points."""
+    return _top_channels_by_field("roulette_count", limit)
+
+
+def _top_channels_by_field(field: str, limit: int = 5):
+    """⚡ قراءة واحدة فقط من مجموعة channel_points (بلا أي قراءة إضافية من
+    registered_chats): كل مستند قناة هناك يحمل الآن أيضًا chat_title/
+    chat_type/active مباشرة (مُزامَنة تلقائيًا من save_registered_chat/
+    remove_registered_chat). التوافق مع بيانات قديمة: أي مستند قناة سابق لم
+    يُسجَّل بعد بهذه الحقول (نادر، قبل هذا التحديث) يُستكمَل تلقائيًا بقراءة
+    احتياطية واحدة من registered_chats — وتُكتب النتيجة فورًا على نفس مستند
+    channel_points حتى لا تتكرر هذه القراءة الاحتياطية له مرة أخرى أبدًا."""
     client = fs_db()
     wanted = max(1, min(int(limit), 5))
     buffer_size = max(wanted * 6, 30)
     docs = (
         client.collection("channel_points")
-        .order_by("points", direction=firestore.Query.DESCENDING)
+        .order_by(field, direction=firestore.Query.DESCENDING)
         .limit(buffer_size)
         .stream()
     )
     candidates = []
     for d in docs:
         data = d.to_dict()
-        if (data.get("points") or 0) <= 0:
+        if (data.get(field) or 0) <= 0:
             continue
         chat_id = data.get("chat_id")
-        rc_doc = client.collection("registered_chats").document(str(chat_id)).get()
-        if not rc_doc.exists:
-            continue
-        rc = rc_doc.to_dict()
-        if rc.get("chat_type") != "channel":
-            continue
-        if not rc.get("active", True):
+        chat_type = data.get("chat_type")
+        active = data.get("active")
+        chat_title = data.get("chat_title")
+        if chat_type is None or active is None:
+            # مستند قديم بلا الحقول المُزامَنة — قراءة احتياطية نادرة لمرة
+            # واحدة فقط، ثم استكمال المستند حتى لا تتكرر لاحقًا.
+            rc_doc = client.collection("registered_chats").document(str(chat_id)).get()
+            if not rc_doc.exists:
+                continue
+            rc = rc_doc.to_dict()
+            chat_type = rc.get("chat_type")
+            active = rc.get("active", True)
+            chat_title = rc.get("chat_title") or chat_title
+            d.reference.set({
+                "chat_type": chat_type, "active": active, "chat_title": chat_title,
+            }, merge=True)
+        if chat_type != "channel" or not active:
             continue
         candidates.append(FSRow({
             "chat_id": chat_id,
             "owner_id": data.get("owner_id"),
-            "points": data.get("points"),
+            "points": data.get("points") or 0,
+            "roulette_count": data.get("roulette_count") or 0,
             "updated_at": data.get("updated_at"),
-            "chat_title": rc.get("chat_title") or f"قناة {chat_id}",
+            "chat_title": chat_title or f"قناة {chat_id}",
         }))
         if len(candidates) >= wanted:
             break
-    candidates.sort(key=lambda r: (r.get("points") or 0, r.get("updated_at") or ""), reverse=True)
-    return candidates[:max(1, min(int(limit), 5))]
+    candidates.sort(key=lambda r: (r.get(field) or 0, r.get("updated_at") or ""), reverse=True)
+    return candidates[:wanted]
+
+
+def bump_channel_roulette_count(chat_id: int) -> None:
+    """يزيد عمود roulette_count المخصَّص لهذه القناة على مستند
+    channel_points/{chat_id} بمقدار واحد فور إنشاء سحب أو مسابقة جديدة فيها —
+    قراءة/كتابة واحدة فقط، بدل الاعتماد لاحقًا على مسح كامل لمجموعتي
+    giveaways وcontests لحساب هذا الرقم عند فتح شاشة الإحصائيات."""
+    if not chat_id:
+        return
+    ref = fs_db().collection("channel_points").document(str(chat_id))
+    _fs_bump_counter(ref, "roulette_count", 1, extra={"chat_id": chat_id})
+
 
 
 def bump_channel_new_users(chat_id: int) -> None:
@@ -4236,23 +4289,6 @@ def bump_channel_new_users(chat_id: int) -> None:
         return
     ref = fs_db().collection("channel_new_users").document(str(chat_id))
     _fs_bump_counter(ref, "new_users", 1, extra={"chat_id": chat_id})
-
-
-def get_channel_roulette_counts() -> dict:
-    """يحسب عدد عمليات «الروليت» (سحوبات + مسابقات) التي استُضيفت في كل قناة،
-    بتجميع وثائق مجموعتي giveaways وcontests حسب chat_id. لا يشمل الروليت
-    السريع لأن بنية بياناته غير مرتبطة بأي قناة محددة (يُنشر عبر البحث
-    المضمّن Inline داخل أي محادثة)."""
-    counts = {}
-    for doc in fs_db().collection("giveaways").stream():
-        chat_id = doc.to_dict().get("chat_id")
-        if chat_id:
-            counts[chat_id] = counts.get(chat_id, 0) + 1
-    for doc in fs_db().collection("contests").stream():
-        chat_id = doc.to_dict().get("chat_id")
-        if chat_id:
-            counts[chat_id] = counts.get(chat_id, 0) + 1
-    return counts
 
 
 _CHANNEL_NEW_USERS_CACHE = {"data": None, "ts": 0.0}
@@ -4284,27 +4320,28 @@ _TOP_CHANNELS_STATS_CACHE = {"data": None, "ts": 0.0}
 
 
 def get_top_channels_full_stats(limit: int = 5, force_refresh: bool = False) -> list:
-    """يجمع لكل قناة من أعلى القنوات نقاطًا: عدد عمليات الروليت (سحوبات +
-    مسابقات) المستضافة فيها، وعدد المستخدمين الجدد القادمين للبوت عبرها،
-    إضافة للنقاط المكتسبة منها — تُستخدم في شاشة «📊 الإحصائيات» العامة.
-    مُخزَّنة مؤقتًا (كاش) لتفادي إعادة قراءة channel_points وgiveaways
-    وcontests كاملة عند كل ضغطة، وهذه العملية هي السبب الرئيسي في بطء هذه
-    الشاشة عند وجود عدد كبير من القنوات/السحوبات/المسابقات السابقة."""
+    """يجمع لكل قناة من أعلى القنوات عدد عمليات «روليت» (سحوبات + مسابقات):
+    اسمها، عدد الروليت، عدد المستخدمين الجدد عبرها، ونقاطها — تُستخدم في
+    شاشة «📊 الإحصائيات» العامة. الترتيب الآن اعتمادًا على عمود
+    roulette_count المخصَّص مباشرة (استعلام واحد فقط عبر
+    get_top_channels_by_roulette_count)، بدل مسح مجموعتي giveaways
+    وcontests بالكامل في كل مرة — وهذا كان السبب الرئيسي في استهلاك مئات/آلاف
+    قراءات Firestore عند فتح هذه الشاشة سابقًا. النتيجة الكاملة مُخزَّنة
+    مؤقتًا (كاش) أيضًا فوق ذلك لتقليل القراءات أكثر."""
     now_ts = time.time()
     cached = _TOP_CHANNELS_STATS_CACHE["data"]
     if not force_refresh and cached is not None and now_ts - _TOP_CHANNELS_STATS_CACHE["ts"] < STATS_SCREEN_CACHE_TTL:
         return cached
-    top_points = get_top_channel_points(limit)
-    roulette_counts = get_channel_roulette_counts()
+    top_roulette = get_top_channels_by_roulette_count(limit)
     new_user_counts = get_channel_new_users_counts(force_refresh=force_refresh)
     result = []
-    for row in top_points:
+    for row in top_roulette:
         chat_id = row["chat_id"]
         result.append({
             "chat_id": chat_id,
             "chat_title": row["chat_title"],
             "points": row.get("points") or 0,
-            "roulette_count": roulette_counts.get(chat_id, 0),
+            "roulette_count": row.get("roulette_count") or 0,
             "new_users": new_user_counts.get(chat_id, 0),
         })
     _TOP_CHANNELS_STATS_CACHE["data"] = result
@@ -5451,6 +5488,17 @@ def save_registered_chat(chat_id: int, owner_id: int, chat_title: str, chat_type
         "active": True,
         "removed_at": None,
     })
+    # ⚡ نسخ الحقول الوصفية (العنوان/النوع/الفعالية) أيضًا على نفس مستند
+    # channel_points/{chat_id} — حتى تُقرأ شاشة الإحصائيات كل بيانات القناة
+    # (نقاط + عدد سحوبات + عنوان) من قراءة واحدة فقط لمجموعة channel_points،
+    # دون الحاجة لقراءة إضافية من registered_chats لكل قناة مرشَّحة كما كان
+    # سابقًا (كان هذا يُضاعف عدد القراءات تقريبًا).
+    fs_db().collection("channel_points").document(str(chat_id)).set({
+        "chat_id": chat_id,
+        "chat_title": chat_title,
+        "chat_type": chat_type,
+        "active": True,
+    }, merge=True)
 
 def remove_registered_chat(chat_id: int):
     """حذف ناعم: يُبقي القناة/الجروب في السجل موسومًا كغير نشط (active=False)
@@ -5458,6 +5506,11 @@ def remove_registered_chat(chat_id: int):
     fs_db().collection("registered_chats").document(str(chat_id)).set({
         "active": False,
         "removed_at": datetime.now(timezone.utc).isoformat(),
+    }, merge=True)
+    # نفس المزامنة أعلاه، بالاتجاه المعاكس (تعطيل)، حتى لا تظهر قناة أُزيلت
+    # ضمن أعلى 5 قنوات بشاشة الإحصائيات رغم عدم وجودها فعليًا.
+    fs_db().collection("channel_points").document(str(chat_id)).set({
+        "active": False,
     }, merge=True)
 
 def get_registered_chats(owner_id: int):
@@ -5639,6 +5692,7 @@ def create_contest(contest_code: str, owner_id: int, chat_id: int, cliche_text: 
     _CONTEST_VOTES_LOADED.add(contest_code)
     _CONTEST_PARTICIPANTS_CACHE[contest_code] = {}
     _CONTEST_PARTICIPANTS_LOADED.add(contest_code)
+    bump_channel_roulette_count(chat_id)
 
 
 def get_contest(contest_code: str):
@@ -6113,6 +6167,7 @@ def create_giveaway(gw_code: str, owner_id: int, chat_id: int, cliche_text: str,
         "autospin_minutes": autospin_minutes,
         "autospin_ends_at": autospin_ends_at,
     })
+    bump_channel_roulette_count(chat_id)
 
 
 def get_giveaway(gw_code: str):
@@ -6434,7 +6489,7 @@ async def bot_chat_status_update(update: Update, context: ContextTypes.DEFAULT_T
 def build_points_message(user_id: int) -> tuple:
     """واجهة ربح احترافية: رصيد النقاط بارز، ثم الشروط، ثم تنبيه واضح إن كان
     للمستخدم طلب سحب نجوم لم يُغلق بعد (تفاصيله الكاملة في «سجل السحب»)."""
-    pts = get_points(user_id)
+    pts = get_points(user_id, force_refresh=True)
     content = [
         ("🎁", EMOJI["star"]),
         " ", get_setting("points_title") or "ربح من البوت",
@@ -6476,7 +6531,7 @@ WITHDRAW_HISTORY_PAGE_SIZE = 6
 
 
 def build_stars_withdraw_menu_message(user_id: int) -> tuple:
-    pts = get_points(user_id)
+    pts = get_points(user_id, force_refresh=True)
     return build_text_with_emojis([
         ([
             ("⭐", EMOJI["star"]), " سحب نجوم",
@@ -6492,7 +6547,7 @@ def build_stars_withdraw_menu_message(user_id: int) -> tuple:
 def build_stars_withdraw_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """زر كل قيمة سحب يعكس حالتها فورًا: ✅ متاحة، 🔒 رصيد غير كافٍ، أو 🕐 إن
     كان لدى المستخدم طلب سابق لم يُغلق بعد (يُمنع فتح طلب جديد حتى يُغلق)."""
-    pts = get_points(user_id)
+    pts = get_points(user_id, force_refresh=True)
     blocked = has_pending_withdraw_request_any(user_id)
     rows = []
     for tier in STAR_WITHDRAW_TIERS:
@@ -6551,10 +6606,13 @@ def build_wd_history_keyboard(user_id: int, page: int) -> InlineKeyboardMarkup:
 
 
 async def build_points_statistics_message(context: ContextTypes.DEFAULT_TYPE) -> tuple:
-    """لوحة إحصائيات عامة احترافية: تعرض أعلى 5 قنوات نشاطًا (وفق النقاط
-    المسجَّلة فعليًا)، ولكل قناة اسمها كرابط قابل للضغط، وعدد عمليات «الروليت»
-    التي استضافتها (سحوبات + مسابقات)، وعدد المستخدمين الجدد الذين دخلوا
-    البوت عبرها، ونقاطها. تُذيَّل بملخّص عام يشمل الروليت السريع أيضًا."""
+    """لوحة إحصائيات عامة احترافية: تعرض أعلى 5 قنوات عدد عمليات «روليت»
+    (سحوبات + مسابقات) — الترتيب اعتمادًا على عمود roulette_count المخصَّص
+    (استعلام واحد فقط بدل مسح كامل)، ولكل قناة اسمها كرابط قابل للضغط، وعدد
+    السحوبات/المسابقات المستضافة فيها، وعدد المشتركين الفعلي بها (يُقرأ حيًّا
+    من تيليجرام مباشرة لـ5 قنوات فقط — استدعاء API عادي لا يكلّف أي قراءة من
+    حصة Firestore المجانية)، وعدد المستخدمين الجدد عبرها، ونقاطها. تُذيَّل
+    بملخّص عام يشمل الروليت السريع أيضًا."""
     # كل هذه الاستدعاءات تقرأ من Firestore بشكل متزامن (blocking)؛ تُنفَّذ عبر
     # asyncio.to_thread في خيط منفصل حتى لا تُجمِّد حلقة أحداث البوت وتُعلِّق
     # باقي المستخدمين — خصوصًا أن هذه الشاشة يفتحها كل مستخدمي البوت وليس
@@ -6569,23 +6627,32 @@ async def build_points_statistics_message(context: ContextTypes.DEFAULT_TYPE) ->
     grand_new_users = await asyncio.to_thread(get_channel_new_users_counts)
     total_new_via_channels = sum(grand_new_users.values()) if grand_new_users else 0
 
+    # عدد المشتركين الفعلي: استدعاء مباشر لتيليجرام (وليس Firestore) لكل
+    # قناة من الـ5 الظاهرة فقط — لا يُخزَّن ولا يُكرَّر لبقية القنوات، فلا يزيد
+    # أي استهلاك على قاعدة البيانات إطلاقًا، ويبقى الرقم حيًّا ودقيقًا دائمًا.
+    member_counts = {}
+    for row in rows:
+        try:
+            member_counts[row["chat_id"]] = await context.bot.get_chat_member_count(row["chat_id"])
+        except Exception:
+            member_counts[row["chat_id"]] = None
+
     content = [
-        ("📊", EMOJI["chart"]), " لوحة الإحصائيات",
-        "\n", "⟡▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬⟡", "\n\n",
+        ("📊", EMOJI["chart"]), " لوحة الإحصائيات", "\n",
+        "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈", "\n\n",
     ]
 
     content.append(([
-        ("🎡", EMOJI["roulette"]), " إجمالي عمليات الروليت: ", f"{total_roulette_ops}", "\n",
-        ("👥", EMOJI["people"]), " إجمالي المستخدمين الجدد عبر القنوات: ", f"{total_new_via_channels}",
+        "◈ عمليات الروليت الكلي  ", ([f"{total_roulette_ops:,}"], "code", None), "\n",
+        "◈ الإحالات عبر القنوات  ", ([f"{total_new_via_channels:,}"], "code", None),
     ], "blockquote", None))
     content.append("\n\n")
 
     if not rows:
-        content.append((["📭 لا توجد إحصائيات مسجّلة للقنوات حتى الآن ”"], "blockquote", None))
+        content.append((["لا توجد إحصائيات مسجّلة للقنوات حتى الآن ”"], "blockquote", None))
     else:
-        content.append(([("🏆", EMOJI["trophy_win"]), " الصدارة — أعلى 5 قنوات أداءً ”"], "blockquote", None))
+        content.append([("🏆", EMOJI["trophy_win"]), " الأعلى نشاطًا"])
         content.append("\n\n")
-        medals = ["🥇", "🥈", "🥉", "🏅", "🎖️"]
         for index, row in enumerate(rows):
             title = row["chat_title"] or str(row["chat_id"])
             link = ""
@@ -6594,26 +6661,28 @@ async def build_points_statistics_message(context: ContextTypes.DEFAULT_TYPE) ->
             except Exception:
                 link = ""
             name_part = (title, "link", link) if link else title
+            mc = member_counts.get(row["chat_id"])
+            mc_text = f"{mc:,}" if isinstance(mc, int) else "—"
             block = [
-                f"{medals[index]} ", name_part, "\n",
-                "⟡ ", ("🎡", EMOJI["roulette"]), f" عمليات الروليت: {row['roulette_count']}\n",
-                "⟡ ", ("👥", EMOJI["people"]), f" مستخدمون جدد: {row['new_users']}\n",
-                "⟡ ", ("💎", EMOJI["star"]), f" النقاط: {row['points']}",
+                f"#{index + 1:02d}  ", name_part, "\n",
+                "◈ سحوبات ", ([f"{row['roulette_count']:,}"], "code", None), "   ",
+                "◈ مشتركون ", ([mc_text], "code", None), "   ",
+                "◈ نقاط ", ([f"{row['points']:,}"], "code", None),
             ]
             if index < len(rows) - 1:
-                block.append("\n⟡▬▬▬▬▬▬▬▬▬▬▬▬▬")
+                block.append("\n┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈")
             content.append((block, "blockquote", None))
             content.append("\n\n" if index < len(rows) - 1 else "\n")
 
     content.append(([
-        "📌 الترتيب والنقاط يُحتسبان من المشاركات المؤكدة في سحوبات منع الرشق، "
-        "وعدّاد الروليت يشمل السحوبات والمسابقات معًا لكل قناة ”"
+        "الترتيب اعتمادًا على عدد السحوبات/المسابقات المستضافة بكل قناة، "
+        "والنقاط تُحتسب من المشاركات المؤكدة في سحوبات منع الرشق ”"
     ], "blockquote", None))
     if quick_stats["total"]:
         content.append("\n")
         content.append(([
-            ("⚡", EMOJI["roulette"]),
-            f" الروليت السريع (غير مرتبط بقناة محددة): {quick_stats['total']} عملية",
+            "◈ الروليت السريع (غير مرتبط بقناة محددة)  ",
+            ([f"{quick_stats['total']:,}"], "code", None),
         ], "blockquote", None))
     return build_text_with_emojis([(content, "bold", None)])
 
@@ -11988,6 +12057,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_text(
                 text=text, entities=entities,
                 reply_markup=build_points_statistics_keyboard(),
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
             return
 
@@ -12304,7 +12374,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if cost <= 0:
                 await _cb_answer("⚠️ هذا الخيار غير مفعّل حاليًا من المالك.", show_alert=True)
                 return
-            pts = get_points(user.id)
+            pts = get_points(user.id, force_refresh=True)
             if pts < cost:
                 await _cb_answer(
                     f"🔒 تحتاج {cost} نقطة على الأقل لسحب ⭐{tier}، رصيدك الحالي: {pts} نقطة.",
