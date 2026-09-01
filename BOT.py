@@ -4785,6 +4785,7 @@ def _reward_new_user_once(user_id: int, owner_id: int, chat_id: int, source_fiel
 
     _fs_bump_counter(_user_doc_ref(owner_id), "points", amount, extra={"user_id": owner_id})
     _USER_CACHE.pop(owner_id, None)
+    apply_referral_commission(owner_id, amount)
 
     channel_ref = fs_db().collection("channel_points").document(str(chat_id))
     _fs_bump_counter(channel_ref, "points", amount, extra={
@@ -4819,6 +4820,7 @@ def award_contest_owner_points(owner_id: int) -> int:
         return 0
     _fs_bump_counter(_user_doc_ref(owner_id), "points", amount, extra={"user_id": owner_id})
     _USER_CACHE.pop(owner_id, None)
+    apply_referral_commission(owner_id, amount)
     return amount
 
 
@@ -4839,12 +4841,15 @@ def reverse_contest_owner_points(owner_id: int, amount: int) -> None:
 # ---------------------------------------------------------------------------
 
 def add_points_to_user(user_id: int, amount: int) -> int:
-    """يضيف نقاطًا يدويًا لرصيد مستخدم معيّن، ويعيد الرصيد الجديد."""
+    """يضيف نقاطًا يدويًا لرصيد مستخدم معيّن، ويعيد الرصيد الجديد. إن كان
+    هذا المستخدم مُحالًا عبر رابط إحالة نشط، يأخذ صاحب الرابط نسبته من هذه
+    النقاط تلقائيًا أيضًا (عبر apply_referral_commission)."""
     if amount <= 0:
         return get_points(user_id)
     _fs_bump_counter(_user_doc_ref(user_id), "points", amount, extra={"user_id": user_id})
     _USER_CACHE.pop(user_id, None)
     invalidate_users_points_cache()
+    apply_referral_commission(user_id, amount)
     return get_points(user_id)
 
 
@@ -5084,6 +5089,33 @@ def process_referral_signup(referrer_id_raw: str, referred_user_id: int, referre
         _fs_bump_counter(referrer_ref, "ref_points_earned", earned, extra={"user_id": referrer_id})
         _fs_bump_counter(referrer_ref, "points", earned, extra={"user_id": referrer_id})
     _USER_CACHE.pop(referrer_id, None)
+
+
+def apply_referral_commission(earner_user_id: int, amount: int) -> None:
+    """في كل مرة يكسب فيها مستخدم مُحال نقاطًا فعلية — أيًا كان مصدرها
+    (منح يدوي من المالك، مكافأة سحب/مسابقة، أو أي مصدر ربح آخر يستدعي هذه
+    الدالة) — يأخذ صاحب رابط الإحالة الذي أحاله (إن وُجد وكان نشطًا) نسبته
+    المخصّصة من نفس هذه النقاط تلقائيًا وباستمرار، وليس فقط مرة واحدة عند
+    التسجيل كما كان سابقًا. لا تُطبَّق العمولة على نقاط صاحب الرابط نفسه أو
+    بأثر رجعي على عمليات الخصم، تجنّبًا لأي تسلسل إحالات متعدد المستويات."""
+    if not amount or amount <= 0:
+        return
+    row = get_bot_user(earner_user_id)
+    referrer_id = row.get("referred_by") if row else None
+    if not referrer_id or referrer_id == earner_user_id:
+        return
+    referral = get_referral(referrer_id)
+    if not referral or not referral.get("active"):
+        return
+    percentage = referral.get("percentage", get_referral_default_percentage())
+    commission = int(round(amount * percentage / 100))
+    if commission <= 0:
+        return
+    referrer_ref = _referral_doc_ref(referrer_id)
+    _fs_bump_counter(referrer_ref, "ref_points_earned", commission, extra={"user_id": referrer_id})
+    _fs_bump_counter(referrer_ref, "points", commission, extra={"user_id": referrer_id})
+    _USER_CACHE.pop(referrer_id, None)
+    invalidate_users_points_cache()
 
 
 def get_referral_link(user_id: int) -> str:
