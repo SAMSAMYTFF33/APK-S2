@@ -5276,11 +5276,12 @@ def get_all_star_costs() -> dict:
 # ---------------------------------------------------------------------------
 # ⭐ طلبات سحب النجوم — تُخزَّن في نفس مجموعة withdraw_requests الحالية مع
 # type="stars" لتمييزها عن طلبات السحب القديمة (النظام الثابت السابق)، وتمر
-# بثلاث مراحل واضحة: pending (تحت المراجعة) ← accepted (مقبولة، بانتظار
-# تحويل النجوم فعليًا من المالك) ← completed (مكتملة). الخصم يتم فور إنشاء
-# الطلب عبر معاملة Firestore ذرية (transaction) تتحقق من كفاية الرصيد وتخصمه
-# وتُنشئ الطلب في نفس الخطوة — هذا يمنع أي استغلال بالضغط المتكرر على زر
-# السحب (لا يوجد سباق بين «تحقق من الرصيد» و«خصمه» كما في الأنظمة اليدوية).
+# بمرحلتين فقط: pending (تحت المراجعة) ← completed (تم القبول والتأكيد
+# بضغطة واحدة، سواء من القناة أو من قسم المالك، بلا مرحلة وسيطة). الخصم يتم
+# فور إنشاء الطلب عبر معاملة Firestore ذرية (transaction) تتحقق من كفاية
+# الرصيد وتخصمه وتُنشئ الطلب في نفس الخطوة — هذا يمنع أي استغلال بالضغط
+# المتكرر على زر السحب (لا يوجد سباق بين «تحقق من الرصيد» و«خصمه» كما في
+# الأنظمة اليدوية).
 # ---------------------------------------------------------------------------
 
 def has_pending_withdraw_request_any(user_id: int) -> bool:
@@ -5344,25 +5345,16 @@ def get_user_star_withdraw_requests(user_id: int) -> list:
 
 
 def mark_star_withdraw_accepted(request_id: str) -> bool:
-    """المرحلة الأولى من القبول: يعلّم الطلب كـ«مقبول» (🟢) بانتظار أن يرسل
-    المالك النجوم فعليًا يدويًا ثم يعلّمه لاحقًا كمكتمل. يعيد True فقط إذا
-    كان الطلب لا يزال «قيد الانتظار» فعليًا (يمنع القبول المزدوج)."""
+    """يعلّم طلب سحب النجوم كمقبول ومكتمل فورًا بضغطة واحدة (سواء من القناة
+    أو من قسم المالك) — لا توجد مرحلة وسيطة ولا حاجة لتأكيد ثانٍ لاحقًا.
+    يعيد True فقط إذا كان الطلب لا يزال «قيد الانتظار» فعليًا (يمنع القبول
+    المزدوج)."""
     ref = fs_db().collection("withdraw_requests").document(request_id)
     doc = ref.get()
     if not doc.exists or doc.to_dict().get("status") != "pending":
         return False
-    ref.update({"status": "accepted", "accepted_at": datetime.now(timezone.utc).isoformat()})
-    return True
-
-
-def mark_star_withdraw_completed(request_id: str) -> bool:
-    """المرحلة الثانية: يعلّم طلبًا «مقبولًا» بالفعل كـ«مكتمل» (✅) بعد إرسال
-    النجوم يدويًا. يعيد True فقط إذا كان الطلب بحالة «مقبول» فعليًا."""
-    ref = fs_db().collection("withdraw_requests").document(request_id)
-    doc = ref.get()
-    if not doc.exists or doc.to_dict().get("status") != "accepted":
-        return False
-    ref.update({"status": "completed", "completed_at": datetime.now(timezone.utc).isoformat()})
+    now_iso = datetime.now(timezone.utc).isoformat()
+    ref.update({"status": "completed", "accepted_at": now_iso, "completed_at": now_iso})
     return True
 
 
@@ -6803,9 +6795,9 @@ def build_owner_withdraw_section_message() -> tuple:
 
 
 def build_owner_withdraw_section_keyboard() -> InlineKeyboardMarkup:
-    """أزرار الإجراء تظهر فقط للطلبات المفتوحة: «قبول/رفض» لما هو تحت
-    المراجعة، و«تم الإرسال» لما تم قبوله بانتظار تأكيد تحويل النجوم فعليًا."""
-    open_requests = [r for r in get_all_withdraw_requests(limit=60) if r.get("status") in ("pending", "accepted")]
+    """أزرار الإجراء تظهر فقط للطلبات «تحت المراجعة»: «قبول/رفض» — والقبول
+    يؤكد السحب فورًا بضغطة واحدة، بلا أي مرحلة أو تأكيد إضافي لاحقًا."""
+    open_requests = [r for r in get_all_withdraw_requests(limit=60) if r.get("status") == "pending"]
     open_requests.sort(key=lambda r: r.get("requested_at") or "")
     rows = []
     for req in open_requests:
@@ -6818,10 +6810,6 @@ def build_owner_withdraw_section_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(f"✅ قبول: {name}", callback_data=accept_cb, style="success"),
                 InlineKeyboardButton(f"❌ رفض: {name}", callback_data=reject_cb, style="danger"),
             ])
-        elif req.get("status") == "accepted":
-            rows.append([InlineKeyboardButton(
-                f"📤 تم الإرسال: {name}", callback_data=f"wd_stars_complete:{req['request_id']}", style="success",
-            )])
     rows.append([InlineKeyboardButton("📢 قناة استقبال السحب", callback_data="wd_channel_settings", style="primary")])
     rows.append([InlineKeyboardButton("🔙 رجوع", callback_data="owner_points_section", style="danger",
                                        **emoji_kwargs("back_section_btn"))])
@@ -12489,7 +12477,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         def _build_withdraw_status_card(status_emoji_key: str, status_emoji_fallback: str, status_label: str, req: dict, footer: str = "") -> tuple:
             """يبني بطاقة نصية مزخرفة موحّدة (نص + كيانات) لعرض حالة طلب سحب
             النجوم، تحوي اسم صاحب الطلب، يوزره، آيديه، كمية النجوم، والحالة
-            الحالية، مع إيموجي مخصص (custom emoji) يعكس الحالة."""
+            الحالية، مع إيموجي مخصص (custom emoji) يعكس الحالة — بلا إطار."""
             display_name = req.get("display_name") or "—"
             username = req.get("username")
             username_line = f"@{username}" if username else "لا يوجد"
@@ -12498,10 +12486,8 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             status_emoji_id = EMOJI.get(status_emoji_key, "0")
             status_icon = (status_emoji_fallback, status_emoji_id) if status_emoji_id and status_emoji_id != "0" else status_emoji_fallback
             parts = [
-                "┏━━━━━━━━━━━━━━━┓\n",
-                "┃   ", status_icon, "  طلب سحب نجوم   ┃\n",
-                "┗━━━━━━━━━━━━━━━┛\n",
-                "\n",
+                status_icon, "  طلب سحب نجوم\n",
+                "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n",
                 f"👤 ˹ الاسم ˺  ׃  {display_name}\n",
                 f"🔗 ˹ اليوزر ˺  ׃  {username_line}\n",
                 f"🆔 ˹ الآيدي ˺  ׃  {user_id_val}\n",
@@ -12546,28 +12532,17 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     admin_result_text, admin_result_entities = _build_withdraw_status_card(
                         "withdraw_accepted", "🟢", "مقبول", req,
                     )
-                    await _cb_answer("🟢 تم قبول الطلب. أرسل النجوم يدويًا ثم اضغط «📤 تم الإرسال».")
+                    await _cb_answer("🟢 تم قبول الطلب وتأكيد السحب.")
                     notify_text = (
-                        "🟢 تم قبول طلب سحب النجوم الخاص بك، وسيتم تحويلها قريبًا.\n\n"
+                        "🎉 تم قبول طلب سحب النجوم الخاص بك وتأكيده!\n\n"
                         f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة"
                     )
                 else:
                     admin_result_text = "✅ تم إغلاق هذا الطلب مسبقًا."
                     await _cb_answer(admin_result_text, show_alert=True)
-            else:  # wd_stars_complete
-                if mark_star_withdraw_completed(request_id):
-                    admin_result_text, admin_result_entities = _build_withdraw_status_card(
-                        None, "✅", "مكتمل", req,
-                    )
-                    await _cb_answer("✅ تم تعليم الطلب كمكتمل.")
-                    notify_text = (
-                        "🎉 تم إرسال نجومك بنجاح!\n\n"
-                        f"⭐ القيمة: {req.get('stars_amount', 0)} نجمة\n"
-                        "📌 الحالة: ✅ مكتمل"
-                    )
-                else:
-                    admin_result_text = "⚠️ تعذّر إتمام الطلب (يجب أن يكون بحالة «مقبول» أولًا)."
-                    await _cb_answer(admin_result_text, show_alert=True)
+            else:  # wd_stars_complete (زر قديم من رسائل سابقة، لم يعد له داعٍ)
+                admin_result_text = "✅ هذا الطلب تم تأكيده بالفعل عند القبول."
+                await _cb_answer(admin_result_text, show_alert=True)
             if notify_text and req:
                 try:
                     await context.bot.send_message(chat_id=req["user_id"], text=notify_text)
