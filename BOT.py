@@ -85,9 +85,11 @@ def list_moderators() -> list:
 
 
 def add_moderator(user_id: int, added_by: int, username: str = None, first_name: str = None) -> None:
-    """يضيف مشرفًا جديدًا بصلاحيات فارغة (كلها معطّلة افتراضيًا). يعمل حتى
-    مع مستخدم لم يبدأ محادثة مع البوت من قبل — merge=True ينشئ مستند
-    users/{id} إن لم يكن موجودًا، دون المساس بأي حقول أخرى إن كان موجودًا."""
+    """يضيف مشرفًا جديدًا بكامل الصلاحيات مفعّلة افتراضيًا (نفس تحكم المالك)،
+    دون الحاجة لاختيارها يدويًا. يعمل حتى مع مستخدم لم يبدأ محادثة مع البوت
+    من قبل — merge=True ينشئ مستند users/{id} إن لم يكن موجودًا، دون المساس
+    بأي حقول أخرى إن كان موجودًا. يمكن للمالك لاحقًا تعطيل صلاحيات محددة من
+    شاشة «🔐 صلاحيات مشرف» إن أراد تقييد مشرف بعينه."""
     _user_doc_ref(user_id).set({
         "user_id": user_id,
         "is_moderator": True,
@@ -95,7 +97,7 @@ def add_moderator(user_id: int, added_by: int, username: str = None, first_name:
         "mod_first_name": first_name or "",
         "mod_added_by": added_by,
         "mod_added_at": datetime.now(timezone.utc).isoformat(),
-        "mod_permissions": {key: False for key in MODERATOR_PERMISSIONS},
+        "mod_permissions": {key: True for key in MODERATOR_PERMISSIONS},
     }, merge=True)
     _invalidate_moderator_cache(user_id)
 
@@ -125,6 +127,12 @@ def moderator_can(user_id: int, perm_key: str) -> bool:
     if not row:
         return False
     return bool(row.get("permissions", {}).get(perm_key))
+
+
+def is_owner_or_moderator(user_id: int) -> bool:
+    """يتحقق مما إذا كان المستخدم مالكًا أو مشرفًا مسجّلًا — يُستخدم لإظهار
+    زر «👑 قسم المالك» في القائمة الرئيسية لكل من المالك والمشرفين."""
+    return is_owner(user_id) or is_moderator(user_id)
 
 
 REQUIRED_CHANNEL_USERNAME = "w33lv"
@@ -7796,6 +7804,31 @@ def build_moderator_delete_confirm_keyboard(user_id: int) -> InlineKeyboardMarku
     ])
 
 
+def build_moderator_add_confirm_message(display_name: str, user_id: int) -> tuple:
+    """رسالة تأكيد إضافة مشرف جديد — تُعرض فور إرسال المالك ليوزر/آيدي
+    المستخدم، دون أي شاشة لاختيار الصلاحيات، لأن المشرف الجديد يُمنح
+    تلقائيًا كامل صلاحيات التحكم فور التأكيد."""
+    content = [
+        "➕ تأكيد إضافة مشرف",
+        "\n\n",
+        ([
+            f"المستخدم: {display_name}\n",
+            f"المعرف: {user_id}\n\n",
+            "سيُمنح هذا المشرف تلقائيًا كامل صلاحيات التحكم بالبوت فور التأكيد ”",
+        ], "blockquote", None),
+    ]
+    return build_text_with_emojis([(content, "bold", None)])
+
+
+def build_moderator_add_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ تأكيد الإضافة", callback_data=f"mod_add_confirm:{user_id}",
+                               style="success")],
+        [InlineKeyboardButton("🔙 إلغاء", callback_data="mod_add_cancel", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
 # ---------------------------------------------------------------------------
 # 🔗 واجهات إدارة روابط الدعوة (قسم المالك)
 # ---------------------------------------------------------------------------
@@ -8895,7 +8928,7 @@ def build_main_keyboard(remind_state=None, user_id: int = None) -> InlineKeyboar
                                   style="primary", **emoji_kwargs("trophy_contest")),
         ],
     ]
-    if user_id is not None and is_owner(user_id):
+    if user_id is not None and is_owner_or_moderator(user_id):
         keyboard.append([InlineKeyboardButton(
             "👑 قسم المالك", callback_data="owner_section",
             style="danger", **emoji_kwargs("gear"),
@@ -11997,7 +12030,7 @@ async def handle_setting_input(update: Update, context: ContextTypes.DEFAULT_TYP
     if not field:
         return
     value = update.message.text.strip()
-    if not is_owner(update.effective_user.id) and (
+    if not is_owner_or_moderator(update.effective_user.id) and (
         field.startswith("points_") or field.startswith("required_channel_")
     ):
         context.user_data.pop("awaiting_setting", None)
@@ -12080,7 +12113,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_section":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_owner_section_message()
@@ -12091,7 +12124,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_points_section":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_owner_points_section_message()
@@ -12102,7 +12135,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "points_manage_section":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_points_manage_section_message()
@@ -12113,7 +12146,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data in ("points_manage_add_lookup", "points_manage_deduct_lookup"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             action = "add" if query.data == "points_manage_add_lookup" else "deduct"
@@ -12143,7 +12176,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             (p for p in BROWSE_LIST_PREFIXES if query.data.startswith(f"{p}:list:")), None,
         )
         if _browse_list_prefix:
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             page_str = query.data.split(":", 2)[2]
@@ -12163,7 +12196,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             (p for p in BROWSE_LIST_PREFIXES if query.data.startswith(f"{p}:pick:")), None,
         )
         if _browse_pick_prefix:
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, _, uid_str, page_str = query.data.split(":", 3)
@@ -12191,7 +12224,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("points_manual_add:") or query.data.startswith("points_manual_deduct:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             action = "add" if query.data.startswith("points_manual_add:") else "deduct"
@@ -12216,7 +12249,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_withdraw_section":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_owner_withdraw_section_message()
@@ -12227,7 +12260,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("wd_complete:") or query.data.startswith("wd_reject:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
                 return
             is_reject = query.data.startswith("wd_reject:")
@@ -12288,7 +12321,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "wd_channel_settings":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_withdraw_channel_settings_message()
@@ -12299,7 +12332,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "wd_channel_set":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             context.user_data["awaiting"] = "withdraw_channel_set"
@@ -12313,7 +12346,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "wd_channel_clear":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             clear_withdraw_channel()
@@ -12506,7 +12539,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         if (query.data.startswith("wd_stars_accept:") or query.data.startswith("wd_stars_reject:")
                 or query.data.startswith("wd_stars_complete:")):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
                 return
             action, request_id = query.data.split(":", 1)
@@ -12576,7 +12609,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "star_settings":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_star_settings_message()
@@ -12587,7 +12620,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("star_edit:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             tier_str = query.data.split(":", 1)[1]
@@ -12606,7 +12639,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_sub_section":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_owner_sub_section_message()
@@ -12617,7 +12650,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_sub_add":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             context.user_data["awaiting"] = "admin_channel_add_username"
@@ -12630,7 +12663,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data in ("owner_sub_add_autodel_yes", "owner_sub_add_autodel_no"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             username = context.user_data.pop("admin_new_channel_username", None)
@@ -12663,7 +12696,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_sub_list:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             page = int(query.data.split(":", 1)[1])
@@ -12676,7 +12709,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_sub_check_target_now:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             channel_id = int(query.data.split(":", 1)[1])
@@ -12710,7 +12743,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_sub_edit_button_text:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             channel_id = int(query.data.split(":", 1)[1])
@@ -12726,7 +12759,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_sub_edit_username:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             channel_id = int(query.data.split(":", 1)[1])
@@ -12741,7 +12774,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_sub_edit_link:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             channel_id = int(query.data.split(":", 1)[1])
@@ -12756,7 +12789,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_sub_edit_target:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             channel_id = int(query.data.split(":", 1)[1])
@@ -12771,7 +12804,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_sub_toggle_autodel:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             channel_id = int(query.data.split(":", 1)[1])
@@ -12791,7 +12824,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_sub_toggle_enabled:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             channel_id = int(query.data.split(":", 1)[1])
@@ -12811,7 +12844,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_sub_channel_stats:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             channel_id = int(query.data.split(":", 1)[1])
@@ -12827,7 +12860,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_sub_delete_confirm:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             channel_id = int(query.data.split(":", 1)[1])
@@ -12849,7 +12882,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_sub_delete:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             channel_id = int(query.data.split(":", 1)[1])
@@ -12865,7 +12898,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_sub_channel:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             channel_id = int(query.data.split(":", 1)[1])
@@ -12881,7 +12914,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_sub_reorder":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             channels = get_required_channels()
@@ -12893,7 +12926,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_sub_move_up:") or query.data.startswith("owner_sub_move_down:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             channel_id = int(query.data.split(":", 1)[1])
@@ -12909,7 +12942,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_sub_stats_all":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = await build_owner_sub_stats_all_message(context)
@@ -12924,7 +12957,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_users_section":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_owner_users_section_message()
@@ -12935,7 +12968,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data in ("owner_users_search", "owner_users_view"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             context.user_data["awaiting"] = "admin_user_lookup"
@@ -12948,7 +12981,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_users_ban":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             context.user_data["awaiting"] = "admin_user_ban_lookup"
@@ -12961,7 +12994,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_users_unban":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             context.user_data["awaiting"] = "admin_user_unban_lookup"
@@ -12974,7 +13007,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_users_banned:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             page = int(query.data.split(":", 1)[1])
@@ -12987,7 +13020,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_users_stats":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             stats = get_bot_users_stats()
@@ -12999,7 +13032,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_users_profile_ban:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             target_id = int(query.data.split(":", 1)[1])
@@ -13017,7 +13050,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_users_profile_unban:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             target_id = int(query.data.split(":", 1)[1])
@@ -13036,7 +13069,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_users_profile:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             target_id = int(query.data.split(":", 1)[1])
@@ -13053,7 +13086,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_admins_section":
-            if not is_owner(query.from_user.id):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_owner_admins_section_message()
@@ -13064,7 +13097,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_admins_add":
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
                 await _cb_answer("⛔ ليس لديك صلاحية إضافة مشرفين.", show_alert=True)
                 return
             context.user_data["awaiting"] = "mod_add_lookup"
@@ -13076,13 +13109,51 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return
 
+        if query.data.startswith("mod_add_confirm:"):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
+                await _cb_answer("⛔ ليس لديك صلاحية إضافة مشرفين.", show_alert=True)
+                return
+            target_id = int(query.data.split(":", 1)[1])
+            pending = context.user_data.pop("mod_add_pending", None)
+            if not pending or pending.get("target_id") != target_id:
+                await _cb_answer("⚠️ انتهت صلاحية هذا الطلب، أعد المحاولة من جديد.", show_alert=True)
+                return
+            if is_owner(target_id) or is_moderator(target_id):
+                await _cb_answer("ℹ️ هذا المستخدم مشرف أو مالك بالفعل.", show_alert=True)
+                return
+            add_moderator(
+                target_id, added_by=query.from_user.id,
+                username=pending.get("username"), first_name=pending.get("first_name"),
+            )
+            log_admin_action(
+                "add_admin", query.from_user.id, details=f"معرف المشرف الجديد: {target_id}",
+                actor_name=query.from_user.full_name, actor_username=query.from_user.username,
+            )
+            await _cb_answer("✅ تمت إضافة المشرف بكامل الصلاحيات")
+            text, entities = build_owner_admins_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_admins_section_keyboard(),
+            )
+            return
+
+        if query.data == "mod_add_cancel":
+            context.user_data.pop("mod_add_pending", None)
+            await _cb_answer("❌ تم إلغاء العملية")
+            text, entities = build_owner_admins_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_admins_section_keyboard(),
+            )
+            return
+
         if query.data.startswith("owner_admins_list:"):
             _, mode, page_str = query.data.split(":", 2)
             needs_owner = mode in ("perms", "remove")
-            if needs_owner and not is_owner(query.from_user.id):
+            if needs_owner and not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
                 return
-            if not needs_owner and not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
+            if not needs_owner and not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             page = int(page_str) if page_str.isdigit() else 1
@@ -13102,10 +13173,10 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             _, mode, uid_str = query.data.split(":", 2)
             target_id = int(uid_str)
             if mode == "view":
-                if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
+                if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
                     await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                     return
-            elif not is_owner(query.from_user.id):
+            elif not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
                 return
             row = get_moderator(target_id)
@@ -13133,7 +13204,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_admins_toggle:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, uid_str, perm_key = query.data.split(":", 2)
@@ -13153,7 +13224,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_admins_remove_do:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
                 return
             target_id = int(query.data.split(":", 1)[1])
@@ -13172,7 +13243,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_referrals_section":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_owner_referrals_section_message()
@@ -13183,7 +13254,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_referrals_add":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             context.user_data["awaiting"] = "referral_add_lookup"
@@ -13196,7 +13267,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_referrals_search":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             context.user_data["awaiting"] = "referral_search_lookup"
@@ -13209,7 +13280,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_referrals_stats":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             await _cb_answer()
@@ -13221,7 +13292,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_referrals_settings":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_owner_referrals_settings_message()
@@ -13232,7 +13303,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_referrals_edit_default_pct":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             context.user_data["awaiting"] = "referral_default_pct"
@@ -13245,7 +13316,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_referrals_edit_signup_points":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             context.user_data["awaiting"] = "referral_signup_points"
@@ -13262,7 +13333,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_referrals_list:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, mode, page_str = query.data.split(":", 2)
@@ -13276,7 +13347,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_referrals_pick:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, mode, uid_str = query.data.split(":", 2)
@@ -13300,7 +13371,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_referrals_toggle:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             target_id = int(query.data.split(":", 1)[1])
@@ -13324,7 +13395,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_referrals_edit_pct:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             target_id = int(query.data.split(":", 1)[1])
@@ -13342,7 +13413,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_referrals_remove_do:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا الإجراء خاص بمالك البوت فقط.", show_alert=True)
                 return
             target_id = int(query.data.split(":", 1)[1])
@@ -13361,7 +13432,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_stats_section":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             await _cb_answer()
@@ -13383,7 +13454,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("owner_logs:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             await _cb_answer()
@@ -13401,7 +13472,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_maintenance_section":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             await _cb_answer()
@@ -13413,7 +13484,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_maintenance_toggle":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             new_state = not is_maintenance_mode()
@@ -13432,7 +13503,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_maintenance_speedtest":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             await _cb_answer("⏳ جاري فحص السرعة ”")
@@ -13450,7 +13521,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_maintenance_status":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             await _cb_answer()
@@ -13462,7 +13533,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_reset_test_user":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             await _cb_answer()
@@ -13480,7 +13551,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_new_user_notify_section":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             await _cb_answer()
@@ -13492,7 +13563,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_newuser_toggle":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             if not is_new_user_notify_enabled():
@@ -13517,7 +13588,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_newuser_channel_set":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             context.user_data["awaiting"] = "new_user_notify_channel_set"
@@ -13531,7 +13602,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_newuser_channel_clear":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             clear_new_user_notify_channel()
@@ -13556,7 +13627,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_draws_section":
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_owner_draws_section_message()
@@ -13567,7 +13638,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admgw_list:"):
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, filt, page_str = query.data.split(":", 2)
@@ -13583,7 +13654,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admgw_detail:"):
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, gw_code, filt, page_str = query.data.split(":", 3)
@@ -13605,7 +13676,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admgw_search:"):
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, filt, page_str = query.data.split(":", 2)
@@ -13623,7 +13694,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admgw_delc:"):
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, gw_code, filt, page_str = query.data.split(":", 3)
@@ -13640,7 +13711,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admgw_delete_do:"):
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, gw_code, filt, page_str = query.data.split(":", 3)
@@ -13662,7 +13733,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "admgw_stats":
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_giveaways")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             stats = await asyncio.to_thread(get_giveaways_statistics)
@@ -13678,7 +13749,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_contests_section":
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_owner_contests_section_message()
@@ -13689,7 +13760,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admct_list:"):
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, filt, page_str = query.data.split(":", 2)
@@ -13705,7 +13776,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admct_detail:"):
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, contest_code, filt, page_str = query.data.split(":", 3)
@@ -13727,7 +13798,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admct_search:"):
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, filt, page_str = query.data.split(":", 2)
@@ -13745,7 +13816,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admct_delc:"):
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, contest_code, filt, page_str = query.data.split(":", 3)
@@ -13762,7 +13833,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admct_delete_do:"):
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, contest_code, filt, page_str = query.data.split(":", 3)
@@ -13784,7 +13855,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "admct_stats":
-            if not (is_owner(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
+            if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "delete_contests")):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             stats = await asyncio.to_thread(get_contests_statistics)
@@ -13800,7 +13871,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_quick_roulette_section":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_owner_quick_roulette_section_message()
@@ -13811,7 +13882,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admrr_list:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, filt, page_str = query.data.split(":", 2)
@@ -13827,7 +13898,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admrr_detail:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, rid_str, filt, page_str = query.data.split(":", 3)
@@ -13848,7 +13919,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admrr_search:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, filt, page_str = query.data.split(":", 2)
@@ -13866,7 +13937,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admrr_delc:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, rid_str, filt, page_str = query.data.split(":", 3)
@@ -13884,7 +13955,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("admrr_delete_do:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, rid_str, filt, page_str = query.data.split(":", 3)
@@ -13907,7 +13978,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "admrr_stats":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             stats = await asyncio.to_thread(get_quick_roulette_statistics)
@@ -13923,7 +13994,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "owner_broadcast_section":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             text, entities = build_owner_broadcast_section_message()
@@ -13934,7 +14005,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "broadcast_send_menu":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             # ⚠️ يجب أن تتم كل خطوات إعداد/تعديل الإذاعة من داخل محادثة المالك
@@ -13956,7 +14027,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "broadcast_confirm_send":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             if query.message and query.message.chat.type != "private":
@@ -13983,7 +14054,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "broadcast_cancel_send":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             context.user_data.pop("broadcast_pending", None)
@@ -13995,7 +14066,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "broadcast_stop":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             if not _BROADCAST_STATE["running"]:
@@ -14006,7 +14077,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "broadcast_stats":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             stats = get_broadcast_stats()
@@ -14022,7 +14093,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("broadcast_logs:list:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             page_str = query.data.split(":", 2)[2]
@@ -14036,7 +14107,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("broadcast_logs:pick:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, _, log_id, page_str = query.data.split(":", 3)
@@ -14053,7 +14124,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("broadcast_logs:edit:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             if query.message and query.message.chat.type != "private":
@@ -14078,7 +14149,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("broadcast_logs:delete_confirm:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, _, log_id, page_str = query.data.split(":", 3)
@@ -14098,7 +14169,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("broadcast_logs:delete:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, _, log_id, page_str = query.data.split(":", 3)
@@ -14115,7 +14186,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("broadcast_logs:delete_actual:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, _, log_id, page_str = query.data.split(":", 3)
@@ -14132,7 +14203,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("broadcast_logs:delete_actual_confirm:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
                 return
             _, _, log_id, page_str = query.data.split(":", 3)
@@ -14158,7 +14229,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
         if query.data == "points_settings":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
                 return
             text, entities = build_points_settings_message()
@@ -14169,7 +14240,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "points_text_settings":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
                 return
             text, entities = build_points_text_settings_message()
@@ -14180,7 +14251,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "points_restore_defaults":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
                 return
             set_setting("points_title", DEFAULT_POINTS_TITLE)
@@ -14198,7 +14269,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data == "points_toggle":
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
                 return
             new_value = "0" if get_setting("points_enabled") == "1" else "1"
@@ -14216,7 +14287,7 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         if query.data.startswith("points_edit:"):
-            if not is_owner(query.from_user.id):
+            if not is_owner_or_moderator(query.from_user.id):
                 await _cb_answer("⛔ هذا القسم خاص بالمشرف.", show_alert=True)
                 return
             field = query.data.split(":", 1)[1]
@@ -14333,7 +14404,7 @@ async def reset_test_user_command(update: Update, context: ContextTypes.DEFAULT_
     نقطة صاحب السحب حتى مع تفعيل «منع الرشق». استخدام هذا الأمر من داخل
     البوت نفسه يحل المشكلة دون الحاجة لإعادة تشغيل البوت بعد كل تجربة.
     """
-    if not is_owner(update.effective_user.id):
+    if not is_owner_or_moderator(update.effective_user.id):
         return
     if not context.args:
         _bt, _be = bold_notice("الاستخدام: /reset_test @username أو /reset_test user_id")
@@ -14389,7 +14460,7 @@ async def fix_channels_stats_command(update: Update, context: ContextTypes.DEFAU
     المشكلة أبدًا لأي قناة، لأن save_registered_chat أصبح يضبط هذين الحقلين
     منذ البداية على كل قناة جديدة.
     """
-    if not is_owner(update.effective_user.id):
+    if not is_owner_or_moderator(update.effective_user.id):
         return
     _bt, _be = bold_notice("⏳ جارٍ إصلاح بيانات القنوات القديمة...")
     status_msg = await update.message.reply_text(text=_bt, entities=_be)
@@ -14660,7 +14731,7 @@ async def handle_broadcast_content_input(update: Update, context: ContextTypes.D
     awaiting = context.user_data.get("awaiting")
     if awaiting != "broadcast_await_content":
         return
-    if not is_owner(update.effective_user.id):
+    if not is_owner_or_moderator(update.effective_user.id):
         context.user_data.pop("awaiting", None)
         return
     # ⚠️ حماية إضافية: تجهيز الإذاعة لا يُقبل إلا من داخل محادثة المالك الخاصة
@@ -14714,7 +14785,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if awaiting == "broadcast_await_content":
-        if not is_owner(update.effective_user.id):
+        if not is_owner_or_moderator(update.effective_user.id):
             context.user_data.pop("awaiting", None)
             return
         if _BROADCAST_STATE["running"]:
@@ -14745,7 +14816,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if awaiting == "broadcast_log_edit_text":
-        if not is_owner(update.effective_user.id):
+        if not is_owner_or_moderator(update.effective_user.id):
             context.user_data.pop("awaiting", None)
             return
         log_id = context.user_data.get("broadcast_log_edit_id")
@@ -14767,7 +14838,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if awaiting == "star_cost_edit":
-        if not is_owner(update.effective_user.id):
+        if not is_owner_or_moderator(update.effective_user.id):
             context.user_data.pop("awaiting", None)
             context.user_data.pop("star_cost_edit_tier", None)
             return
@@ -14790,7 +14861,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if awaiting == "withdraw_channel_set":
-        if not is_owner(update.effective_user.id):
+        if not is_owner_or_moderator(update.effective_user.id):
             context.user_data.pop("awaiting", None)
             return
         username = _normalize_channel_username(update.message.text)
@@ -14836,7 +14907,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if awaiting == "new_user_notify_channel_set":
-        if not is_owner(update.effective_user.id):
+        if not is_owner_or_moderator(update.effective_user.id):
             context.user_data.pop("awaiting", None)
             return
         username = _normalize_channel_username(update.message.text)
@@ -15038,7 +15109,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if awaiting == "mod_add_lookup":
         context.user_data.pop("awaiting", None)
-        if not (is_owner(update.effective_user.id) or moderator_can(update.effective_user.id, "add_admins")):
+        if not (is_owner_or_moderator(update.effective_user.id) or moderator_can(update.effective_user.id, "add_admins")):
             return
         row, target_id = _resolve_admin_user_query(update.message.text)
         if target_id is None:
@@ -15054,28 +15125,24 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         username = row.get("username") if row else None
         first_name = row.get("first_name") if row else None
-        add_moderator(target_id, added_by=update.effective_user.id, username=username, first_name=first_name)
-        log_admin_action(
-            "add_admin", update.effective_user.id, details=f"معرف المشرف الجديد: {target_id}",
-            actor_name=update.effective_user.full_name, actor_username=update.effective_user.username,
+        # ⚡ لا يُضاف المشرف فورًا هنا — تُعرض فقط شاشة تأكيد صغيرة (بدون أي
+        # اختيار صلاحيات)، والإضافة الفعلية تتم عند الضغط على «✅ تأكيد
+        # الإضافة» في مُعالِج mod_add_confirm:، حيث يُمنح المشرف تلقائيًا
+        # كامل صلاحيات التحكم بالبوت.
+        context.user_data["mod_add_pending"] = {
+            "target_id": target_id, "username": username, "first_name": first_name,
+        }
+        display = f"@{username}" if username else (first_name or str(target_id))
+        text, entities = build_moderator_add_confirm_message(display, target_id)
+        await update.message.reply_text(
+            text=text, entities=entities,
+            reply_markup=build_moderator_add_confirm_keyboard(target_id),
         )
-        new_row = get_moderator(target_id)
-        if is_owner(update.effective_user.id):
-            await update.message.reply_text("✅ تمت إضافة المشرف بنجاح. الآن حدّد صلاحياته:")
-            text, entities = build_moderator_perms_message(new_row)
-            await update.message.reply_text(
-                text=text, entities=entities,
-                reply_markup=build_moderator_perms_keyboard(new_row),
-            )
-        else:
-            await update.message.reply_text(
-                "✅ تمت إضافة المشرف بنجاح. سيقوم مالك البوت بتحديد صلاحياته.",
-            )
         return
 
     if awaiting == "referral_add_lookup":
         context.user_data.pop("awaiting", None)
-        if not is_owner(update.effective_user.id):
+        if not is_owner_or_moderator(update.effective_user.id):
             return
         row, target_id = _resolve_admin_user_query(update.message.text)
         if target_id is None:
@@ -15101,7 +15168,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = context.user_data.pop("referral_target_id", None)
         username = context.user_data.pop("referral_target_username", None)
         first_name = context.user_data.pop("referral_target_first_name", None)
-        if not target_id or not is_owner(update.effective_user.id):
+        if not target_id or not is_owner_or_moderator(update.effective_user.id):
             return
         raw = (update.message.text or "").strip()
         if raw == "-":
@@ -15130,7 +15197,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if awaiting == "referral_search_lookup":
         context.user_data.pop("awaiting", None)
-        if not is_owner(update.effective_user.id):
+        if not is_owner_or_moderator(update.effective_user.id):
             return
         _, target_id = _resolve_admin_user_query(update.message.text)
         if target_id is None:
@@ -15152,7 +15219,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if awaiting == "referral_edit_percentage":
         target_id = context.user_data.pop("referral_target_id", None)
         context.user_data.pop("awaiting", None)
-        if not target_id or not is_owner(update.effective_user.id):
+        if not target_id or not is_owner_or_moderator(update.effective_user.id):
             return
         raw = (update.message.text or "").strip()
         if not raw.isdigit() or not (0 <= int(raw) <= 100):
@@ -15177,7 +15244,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if awaiting == "referral_default_pct":
         context.user_data.pop("awaiting", None)
-        if not is_owner(update.effective_user.id):
+        if not is_owner_or_moderator(update.effective_user.id):
             return
         raw = (update.message.text or "").strip()
         if not raw.isdigit() or not (0 <= int(raw) <= 100):
@@ -15197,7 +15264,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if awaiting == "referral_signup_points":
         context.user_data.pop("awaiting", None)
-        if not is_owner(update.effective_user.id):
+        if not is_owner_or_moderator(update.effective_user.id):
             return
         raw = (update.message.text or "").strip()
         if not raw.isdigit():
@@ -15217,7 +15284,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if awaiting in ("points_manual_add_lookup", "points_manual_deduct_lookup"):
         context.user_data.pop("awaiting", None)
-        if not is_owner(update.effective_user.id):
+        if not is_owner_or_moderator(update.effective_user.id):
             return
         action = "add" if awaiting == "points_manual_add_lookup" else "deduct"
         row, target_id = _resolve_admin_user_query(update.message.text)
@@ -15243,7 +15310,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         back_page = context.user_data.pop("points_manual_back_page", 1)
         browse_prefix = context.user_data.pop("points_manual_browse_prefix", "points_browse")
         context.user_data.pop("awaiting", None)
-        if not target_id or not is_owner(update.effective_user.id):
+        if not target_id or not is_owner_or_moderator(update.effective_user.id):
             return
         raw = (update.message.text or "").strip()
         if not raw.isdigit() or int(raw) <= 0:
@@ -15305,7 +15372,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if awaiting == "reset_test_user_lookup":
         context.user_data.pop("awaiting", None)
-        if not is_owner(update.effective_user.id):
+        if not is_owner_or_moderator(update.effective_user.id):
             return
         row, target_id = _resolve_admin_user_query(update.message.text)
         if target_id is None:
