@@ -6981,6 +6981,7 @@ def build_owner_section_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton("⚡ السحب السريع", callback_data="owner_quick_roulette_section", style="primary"),
         InlineKeyboardButton("📣 الإذاعة", callback_data="owner_broadcast_section", style="primary"),
         InlineKeyboardButton("👨‍💻 إدارة مشرف / دعم", callback_data="owner_admins_section", style="primary"),
+        InlineKeyboardButton("📩 الإيداع", callback_data="owner_deposit_section", style="primary"),
         InlineKeyboardButton("🔗 إدارة روابط الدعوة", callback_data="owner_referrals_section", style="primary"),
         InlineKeyboardButton("📊 إحصائيات البوت", callback_data="owner_stats_section", style="primary"),
         InlineKeyboardButton("📜 سجل العمليات", callback_data="owner_logs:1", style="primary"),
@@ -7759,6 +7760,41 @@ def build_owner_admins_support_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✏️ تغيير حساب الدعم الفني", callback_data="owner_admins_support_set", style="success")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="owner_admins_section", style="danger",
                               **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+# ---------------------------------------------------------------------------
+# 📩 الإيداع — مراسلة خاصة بين المالك/المشرف وأي مستخدم عبر البوت (خاص
+# بالمالك والمشرفين فقط للبدء). يرسل المالك/المشرف رسالة لمستخدم محدد
+# (بيوزره أو معرفه)، فتصل له مع زر «↩️ إرسال رد»، وأي رد يرسله يصل للمُرسِل
+# بوضوح موسومًا باسم المستخدم الذي ردّ — ويستمر التبادل بنفس الآلية بلا حد،
+# فتتكوّن محادثة خاصة كاملة بين الطرفين عبر البوت.
+# ---------------------------------------------------------------------------
+
+def build_owner_deposit_section_message() -> tuple:
+    return build_text_with_emojis([
+        ([
+            "📩 الإيداع — مراسلة خاصة",
+            "\n\n",
+            (["أرسل رسالة خاصة مباشرة لأي مستخدم عبر البوت. سيصل ردّه إليك بشكل"
+              " واضح وموسوم باسمه، وتقدر تكمل الحديث معه بنفس الطريقة ”"], "blockquote", None),
+        ], "bold", None),
+    ])
+
+
+def build_owner_deposit_section_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✍️ إرسال إيداع لمستخدم", callback_data="owner_deposit_start", style="success")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="owner_section", style="danger",
+                              **emoji_kwargs("back_section_btn"))],
+    ])
+
+
+def build_dm_relay_reply_keyboard(other_id: int) -> InlineKeyboardMarkup:
+    """زر «↩️ إرسال رد» الذي يظهر مع كل رسالة إيداع/رد — يعمل بنفس الآلية
+    باتجاهين، فيسمح باستمرار المحادثة الخاصة بين الطرفين عبر البوت."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("↩️ إرسال رد", callback_data=f"dm_relay_reply:{other_id}", style="primary")],
     ])
 
 
@@ -13202,6 +13238,40 @@ async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return
 
+        if query.data == "owner_deposit_section":
+            if not is_owner_or_moderator(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            text, entities = build_owner_deposit_section_message()
+            await query.edit_message_text(
+                text=text, entities=entities,
+                reply_markup=build_owner_deposit_section_keyboard(),
+            )
+            return
+
+        if query.data == "owner_deposit_start":
+            if not is_owner_or_moderator(query.from_user.id):
+                await _cb_answer("⛔ هذا القسم خاص بمالك البوت فقط.", show_alert=True)
+                return
+            context.user_data["awaiting"] = "owner_deposit_target_lookup"
+            await query.edit_message_text(
+                "✍️ أرسل الآن معرف المستخدم (ID) أو يوزره (@username) الذي تريد إرسال رسالة خاصة له ”",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 رجوع", callback_data="owner_deposit_section", style="danger")
+                ]]),
+            )
+            return
+
+        if query.data.startswith("dm_relay_reply:"):
+            other_id = int(query.data.split(":", 1)[1])
+            context.user_data["awaiting"] = "dm_relay_reply_text"
+            context.user_data["dm_relay_other_id"] = other_id
+            await query.message.reply_text(
+                "✍️ اكتب ردك الآن، وسيصل مباشرة للطرف الآخر ”",
+            )
+            await _cb_answer("")
+            return
+
         if query.data.startswith("mod_add_confirm:"):
             if not (is_owner_or_moderator(query.from_user.id) or moderator_can(query.from_user.id, "add_admins")):
                 await _cb_answer("⛔ ليس لديك صلاحية إضافة مشرفين.", show_alert=True)
@@ -15217,6 +15287,75 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=text, entities=entities,
             reply_markup=build_owner_admins_support_keyboard(),
         )
+        return
+
+    if awaiting == "owner_deposit_target_lookup":
+        context.user_data.pop("awaiting", None)
+        if not is_owner_or_moderator(update.effective_user.id):
+            return
+        row, target_id = _resolve_admin_user_query(update.message.text)
+        if not row:
+            await update.message.reply_text(
+                "⚠️ لم يتم العثور على هذا المستخدم — يجب أن يكون قد بدأ محادثة مع"
+                " البوت من قبل حتى يمكن مراسلته ”",
+                reply_markup=build_owner_deposit_section_keyboard(),
+            )
+            return
+        context.user_data["owner_deposit_target_id"] = target_id
+        context.user_data["awaiting"] = "owner_deposit_message_text"
+        display = f"@{row.get('username')}" if row.get("username") else (row.get("first_name") or str(target_id))
+        await update.message.reply_text(
+            f"✍️ اكتب الآن نص الرسالة التي تريد إرسالها إلى {display}:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 إلغاء", callback_data="owner_deposit_section", style="danger")
+            ]]),
+        )
+        return
+
+    if awaiting == "owner_deposit_message_text":
+        context.user_data.pop("awaiting", None)
+        if not is_owner_or_moderator(update.effective_user.id):
+            return
+        target_id = context.user_data.pop("owner_deposit_target_id", None)
+        if not target_id:
+            await update.message.reply_text("⚠️ انتهت صلاحية هذا الطلب، أعد المحاولة من جديد.")
+            return
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=f"📩 رسالة خاصة من إدارة البوت:\n\n{update.message.text}\n\n"
+                     f"يمكنك الرد مباشرة عبر الزر أدناه، وسيصل ردك بشكل واضح ”",
+                reply_markup=build_dm_relay_reply_keyboard(update.effective_user.id),
+            )
+        except Exception:
+            await update.message.reply_text(
+                "⚠️ تعذّر إرسال الرسالة — قد يكون المستخدم حظر البوت.",
+                reply_markup=build_owner_deposit_section_keyboard(),
+            )
+            return
+        await update.message.reply_text(
+            "✅ تم إرسال الرسالة بنجاح. أي رد يرسله سيصلك هنا بشكل واضح ”",
+            reply_markup=build_owner_deposit_section_keyboard(),
+        )
+        return
+
+    if awaiting == "dm_relay_reply_text":
+        context.user_data.pop("awaiting", None)
+        other_id = context.user_data.pop("dm_relay_other_id", None)
+        if not other_id:
+            return
+        sender = update.effective_user
+        sender_label = f"@{sender.username}" if sender.username else (sender.full_name or str(sender.id))
+        try:
+            await context.bot.send_message(
+                chat_id=other_id,
+                text=f"↩️ رد جديد من {sender_label} (ID: {sender.id}):\n\n{update.message.text}",
+                reply_markup=build_dm_relay_reply_keyboard(sender.id),
+            )
+        except Exception:
+            await update.message.reply_text("⚠️ تعذّر إيصال ردك — قد يكون الطرف الآخر حظر البوت.")
+            return
+        await update.message.reply_text("✅ تم إرسال ردك بنجاح ”")
         return
 
     if awaiting == "mod_add_lookup":
