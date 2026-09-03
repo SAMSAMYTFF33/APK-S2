@@ -4052,8 +4052,20 @@ def _fs_create_or_integrity_error(doc_ref, data: dict) -> None:
 
 
 def _fs_bump_counter(doc_ref, field: str, amount: int, extra: dict = None) -> None:
-    """يزيد قيمة حقل رقمي بشكل ذري داخل معاملة (transaction) لتفادي تعارض التحديثات المتزامنة.
-    القيمة النهائية لا تنزل تحت الصفر أبدًا (مهم عند خصم نقاط ملغاة)."""
+    """يزيد قيمة حقل رقمي.
+
+    ⚡ الحالة الشائعة (amount >= 0 — كسب نقاط، عدّاد إحالات، عدّاد مستخدمين
+    جدد...) تستخدم Increment الذرية الأصلية من Firestore: كتابة واحدة فقط
+    بدون أي قراءة قبلها إطلاقًا (زيادة رقم غير سالب لن تجعله سالبًا أبدًا،
+    فالقراءة للتأكد من عدم النزول تحت الصفر غير لازمة هنا). الحالة النادرة
+    فقط (amount < 0 — خصم نقاط قد يوصل تحت الصفر) تستخدم المعاملة القديمة
+    (قراءة + كتابة) للتأكد من عدم النزول تحت الصفر."""
+    if amount >= 0:
+        payload = dict(extra or {})
+        payload[field] = firestore.Increment(amount)
+        doc_ref.set(payload, merge=True)
+        return
+
     client = fs_db()
     transaction = client.transaction()
 
@@ -4069,6 +4081,18 @@ def _fs_bump_counter(doc_ref, field: str, amount: int, extra: dict = None) -> No
             transaction.set(doc_ref, payload)
 
     _txn(transaction)
+
+
+def _bump_cache_field(user_id: int, field: str, delta: int) -> None:
+    """يحدّث حقلًا رقميًا بكاش المستخدم (_USER_CACHE) مباشرة بنفس القيمة التي
+    كُتبت فعليًا في Firestore عبر _fs_bump_counter، بدل إفراغ الكاش وإجبار
+    قراءة جديدة كاملة من Firestore عند أول استخدام تالٍ لبيانات هذا المستخدم
+    (نفس ضمان عدم النزول تحت الصفر). لا تفعل شيئًا إن لم يكن هذا المستخدم
+    محمَّلًا بالكاش أصلًا — سيُقرأ بكل حقوله الصحيحة عند أول احتياج فعلي له."""
+    cached = _USER_CACHE.get(user_id)
+    if cached is None:
+        return
+    cached[field] = max(0, (cached.get(field) or 0) + delta)
 
 
 def _next_roulette_id() -> int:
@@ -4205,27 +4229,65 @@ def set_roulette_status(roulette_id: int, status: str):
 def _counted_user_doc_id(user_id: int, roulette_id: int) -> str:
     return f"{roulette_id}_{user_id}"
 
+
+# ---------------------------------------------------------------------------
+# ⚡ كاش مشاركي السحب السريع بالذاكرة — نفس أسلوب _load_contest_participants
+# تمامًا: كل عملية سحب سريع تُقرأ مشاركوها من Firestore مرة واحدة فقط طول
+# عمر التشغيلة (أول استدعاء)، وبعدها كل تحقق/عدّ/مشاركة جديدة يعمل من
+# الذاكرة مباشرة بدون أي قراءة إضافية. قبل هذا التعديل كانت count_participants
+# تمسح مجموعة counted_users بالكامل (قراءة واحدة لكل مشارك مسجَّل) في كل مرة
+# — أي أن سحبًا فيه 500 مشارك كان يكلّف 500 قراءة إضافية مع كل مشارك جديد.
+# ---------------------------------------------------------------------------
+_ROULETTE_COUNTED_CACHE = {}   # roulette_id -> {user_id: counted_dict}
+_ROULETTE_COUNTED_LOADED = set()
+
+
+def _load_roulette_counted(roulette_id: int) -> dict:
+    if roulette_id not in _ROULETTE_COUNTED_LOADED:
+        counted = {}
+        for d in fs_db().collection("counted_users").where("roulette_id", "==", roulette_id).stream():
+            data = d.to_dict() or {}
+            uid = data.get("user_id")
+            if uid is not None:
+                counted[uid] = data
+        _ROULETTE_COUNTED_CACHE[roulette_id] = counted
+        _ROULETTE_COUNTED_LOADED.add(roulette_id)
+    return _ROULETTE_COUNTED_CACHE.setdefault(roulette_id, {})
+
+
+def _evict_roulette_cache(roulette_id: int) -> None:
+    """يفرّغ كاش عملية سحب سريع معيّنة من الذاكرة كليًا (بعد الحذف النهائي)."""
+    _ROULETTE_COUNTED_CACHE.pop(roulette_id, None)
+    _ROULETTE_COUNTED_LOADED.discard(roulette_id)
+
+
 def is_user_counted(user_id: int, roulette_id: int) -> bool:
-    doc = fs_db().collection("counted_users").document(_counted_user_doc_id(user_id, roulette_id)).get()
-    return doc.exists
+    return user_id in _load_roulette_counted(roulette_id)
+
 
 def count_user(user_id: int, roulette_id: int, display_name: str = None):
+    counted = _load_roulette_counted(roulette_id)
+    if user_id in counted:
+        return
     ref = fs_db().collection("counted_users").document(_counted_user_doc_id(user_id, roulette_id))
-    if not ref.get().exists:
-        ref.set({
-            "user_id": user_id,
-            "roulette_id": roulette_id,
-            "display_name": display_name,
-            "counted_at": datetime.now(timezone.utc).isoformat(),
-        })
+    new_data = {
+        "user_id": user_id,
+        "roulette_id": roulette_id,
+        "display_name": display_name,
+        "counted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    ref.set(new_data)
+    # حدث مشاركة فعلي — يُحدَّث الكاش مباشرة بالذاكرة، بدون أي قراءة إضافية.
+    counted[user_id] = new_data
+
 
 def count_participants(roulette_id: int) -> int:
-    docs = fs_db().collection("counted_users").where("roulette_id", "==", roulette_id).stream()
-    return sum(1 for _ in docs)
+    return len(_load_roulette_counted(roulette_id))
+
 
 def get_participants_with_names(roulette_id: int):
-    docs = list(fs_db().collection("counted_users").where("roulette_id", "==", roulette_id).stream())
-    rows = [d.to_dict() for d in docs]
+    counted = _load_roulette_counted(roulette_id)
+    rows = list(counted.values())
     rows.sort(key=lambda r: r.get("counted_at") or "")
     return [(r["user_id"], r.get("display_name") or str(r["user_id"])) for r in rows]
 
@@ -4786,6 +4848,12 @@ def _reward_new_user_once(user_id: int, owner_id: int, chat_id: int, source_fiel
     if get_setting("points_enabled") != "1":
         return False
 
+    # ⚡ لو هذا المستخدم محمَّل بالفعل بالكاش (سجّل /start لتوّه بنفس الطلب)
+    # ومكافأته مُسجَّلة مسبقًا، نتوقف فورًا بدون أي قراءة/معاملة من Firestore.
+    cached_pre = _USER_CACHE.get(user_id)
+    if cached_pre is not None and cached_pre.get("rewarded"):
+        return False
+
     ref = _user_doc_ref(user_id)
     transaction = fs_db().transaction()
 
@@ -4810,13 +4878,17 @@ def _reward_new_user_once(user_id: int, owner_id: int, chat_id: int, source_fiel
 
     if not _txn(transaction):
         return False
-    _USER_CACHE.pop(user_id, None)
+    cached = _USER_CACHE.get(user_id) or {"user_id": user_id}
+    cached["rewarded"] = True
+    cached["rewarded_owner_id"] = owner_id
+    cached.update(source_fields)
+    _USER_CACHE[user_id] = cached
 
     raw_value = get_setting("points_per_user")
     amount = max(int(raw_value) if raw_value and str(raw_value).isdigit() else 1, 0)
 
     _fs_bump_counter(_user_doc_ref(owner_id), "points", amount, extra={"user_id": owner_id})
-    _USER_CACHE.pop(owner_id, None)
+    _bump_cache_field(owner_id, "points", amount)
     apply_referral_commission(owner_id, amount)
 
     channel_ref = fs_db().collection("channel_points").document(str(chat_id))
@@ -4851,7 +4923,7 @@ def award_contest_owner_points(owner_id: int) -> int:
     if amount <= 0:
         return 0
     _fs_bump_counter(_user_doc_ref(owner_id), "points", amount, extra={"user_id": owner_id})
-    _USER_CACHE.pop(owner_id, None)
+    _bump_cache_field(owner_id, "points", amount)
     apply_referral_commission(owner_id, amount)
     return amount
 
@@ -4862,7 +4934,7 @@ def reverse_contest_owner_points(owner_id: int, amount: int) -> None:
     if not amount or amount <= 0 or not owner_id:
         return
     _fs_bump_counter(_user_doc_ref(owner_id), "points", -amount, extra={"user_id": owner_id})
-    _USER_CACHE.pop(owner_id, None)
+    _bump_cache_field(owner_id, "points", -amount)
 
 
 # ---------------------------------------------------------------------------
@@ -4879,7 +4951,7 @@ def add_points_to_user(user_id: int, amount: int) -> int:
     if amount <= 0:
         return get_points(user_id)
     _fs_bump_counter(_user_doc_ref(user_id), "points", amount, extra={"user_id": user_id})
-    _USER_CACHE.pop(user_id, None)
+    _bump_cache_field(user_id, "points", amount)
     invalidate_users_points_cache()
     apply_referral_commission(user_id, amount)
     return get_points(user_id)
@@ -4891,7 +4963,7 @@ def deduct_points_from_user(user_id: int, amount: int) -> int:
     if amount <= 0:
         return get_points(user_id)
     _fs_bump_counter(_user_doc_ref(user_id), "points", -amount, extra={"user_id": user_id})
-    _USER_CACHE.pop(user_id, None)
+    _bump_cache_field(user_id, "points", -amount)
     invalidate_users_points_cache()
     return get_points(user_id)
 
@@ -5079,9 +5151,11 @@ def process_referral_signup(referrer_id_raw: str, referred_user_id: int, referre
     نسبته الخاصة، ويحدّث عدّاد إحالاته. لا يُحتسب نفس المدعو مرتين أبدًا.
 
     ⚡ موحَّد: منع الاحتساب المزدوج لم يعد يعتمد على مجموعة referral_signups
-    منفصلة، بل على حقل referred_by داخل مستند المُحال نفسه (users/{id})،
-    ضمن معاملة (transaction) ذرية — نفس الضمان القديم (AlreadyExists) لكن
-    بدون مجموعة إضافية."""
+    منفصلة، بل على حقل referred_by داخل مستند المُحال نفسه (users/{id}).
+    الفحص أصبح من الكاش بالذاكرة مباشرة بدل قراءة Firestore من جديد — لأن
+    هذه الدالة تُستدعى دائمًا مباشرة بعد register_bot_user_and_check_new لنفس
+    المستخدم بنفس الطلب، فبيانات المستخدم محمَّلة بالفعل وحديثة 100%، فلا
+    داعي لأي قراءة إضافية أو معاملة (transaction) للتحقق."""
     if not referrer_id_raw or not referrer_id_raw.isdigit():
         return
     referrer_id = int(referrer_id_raw)
@@ -5091,25 +5165,17 @@ def process_referral_signup(referrer_id_raw: str, referred_user_id: int, referre
     if not row or not row.get("active"):
         return
 
+    cached = _USER_CACHE.get(referred_user_id)
+    if cached is None:
+        cached = _load_user_into_cache(referred_user_id) or {"user_id": referred_user_id}
+    if cached.get("referred_by"):
+        return  # هذا المستخدم مُحتسَب مسبقًا كإحالة — لا يُحتسب مرتين
+
     referred_ref = _user_doc_ref(referred_user_id)
-    transaction = fs_db().transaction()
-
-    @firestore.transactional
-    def _txn(transaction):
-        snap = referred_ref.get(transaction=transaction)
-        data = snap.to_dict() if snap.exists else {}
-        if data.get("referred_by"):
-            return False  # هذا المستخدم مُحتسَب مسبقًا كإحالة — لا يُحتسب مرتين
-        payload = {"user_id": referred_user_id, "referred_by": referrer_id}
-        if snap.exists:
-            transaction.update(referred_ref, payload)
-        else:
-            transaction.set(referred_ref, payload)
-        return True
-
-    if not _txn(transaction):
-        return
-    _USER_CACHE.pop(referred_user_id, None)
+    payload = {"user_id": referred_user_id, "referred_by": referrer_id}
+    referred_ref.set(payload, merge=True)
+    cached.update(payload)
+    _USER_CACHE[referred_user_id] = cached
 
     base_points = get_referral_signup_points()
     percentage = row.get("percentage", get_referral_default_percentage())
@@ -5117,10 +5183,12 @@ def process_referral_signup(referrer_id_raw: str, referred_user_id: int, referre
 
     referrer_ref = _referral_doc_ref(referrer_id)
     _fs_bump_counter(referrer_ref, "ref_referred_count", 1, extra={"user_id": referrer_id})
+    _bump_cache_field(referrer_id, "ref_referred_count", 1)
     if earned > 0:
         _fs_bump_counter(referrer_ref, "ref_points_earned", earned, extra={"user_id": referrer_id})
         _fs_bump_counter(referrer_ref, "points", earned, extra={"user_id": referrer_id})
-    _USER_CACHE.pop(referrer_id, None)
+        _bump_cache_field(referrer_id, "ref_points_earned", earned)
+        _bump_cache_field(referrer_id, "points", earned)
 
 
 def apply_referral_commission(earner_user_id: int, amount: int) -> None:
@@ -5146,7 +5214,8 @@ def apply_referral_commission(earner_user_id: int, amount: int) -> None:
     referrer_ref = _referral_doc_ref(referrer_id)
     _fs_bump_counter(referrer_ref, "ref_points_earned", commission, extra={"user_id": referrer_id})
     _fs_bump_counter(referrer_ref, "points", commission, extra={"user_id": referrer_id})
-    _USER_CACHE.pop(referrer_id, None)
+    _bump_cache_field(referrer_id, "ref_points_earned", commission)
+    _bump_cache_field(referrer_id, "points", commission)
     invalidate_users_points_cache()
 
 
@@ -5193,7 +5262,7 @@ def create_withdraw_request(user_id: int, display_name: str, username: str,
         "completed_at": None,
     })
     _fs_bump_counter(_user_doc_ref(user_id), "points", -points_amount, extra={"user_id": user_id})
-    _USER_CACHE.pop(user_id, None)
+    _bump_cache_field(user_id, "points", -points_amount)
     return ref.id
 
 
@@ -5271,7 +5340,7 @@ def mark_withdraw_rejected(request_id: str) -> bool:
     })
     _fs_bump_counter(_user_doc_ref(data.get("user_id")), "points", int(data.get("points_amount") or 0),
                       extra={"user_id": data.get("user_id")})
-    _USER_CACHE.pop(data.get("user_id"), None)
+    _bump_cache_field(data.get("user_id"), "points", int(data.get("points_amount") or 0))
     invalidate_users_points_cache()
     return True
 
@@ -5450,7 +5519,7 @@ def mark_star_withdraw_rejected(request_id: str) -> bool:
     ref.update({"status": "rejected", "completed_at": datetime.now(timezone.utc).isoformat()})
     _fs_bump_counter(_user_doc_ref(data.get("user_id")), "points", int(data.get("points_amount") or 0),
                       extra={"user_id": data.get("user_id")})
-    _USER_CACHE.pop(data.get("user_id"), None)
+    _bump_cache_field(data.get("user_id"), "points", int(data.get("points_amount") or 0))
     invalidate_users_points_cache()
     return True
 
@@ -5542,7 +5611,9 @@ def toggle_remind_win(user_id: int) -> bool:
         "remind_win": new_value,
         "remind_win_updated_at": datetime.now(timezone.utc).isoformat(),
     }, merge=True)
-    _USER_CACHE.pop(user_id, None)
+    cached = _USER_CACHE.get(user_id) or {"user_id": user_id}
+    cached["remind_win"] = new_value
+    _USER_CACHE[user_id] = cached
     return bool(new_value)
 
 def get_remind_win_state(user_id: int):
@@ -6270,9 +6341,37 @@ def set_giveaway_status(gw_code: str, status: str):
     fs_db().collection("giveaways").document(gw_code).update({"status": status})
 
 
+# ---------------------------------------------------------------------------
+# ⚡ كاش مشاركي السحوبات بالذاكرة — نفس أسلوب _load_contest_participants:
+# كل سحب يُقرأ مشاركوه من Firestore مرة واحدة فقط طول عمر التشغيلة، وبعدها
+# كل تحقق/عدّ/مشاركة جديدة من الذاكرة مباشرة بدون أي قراءة إضافية. قبل هذا
+# التعديل كانت count_giveaway_participants تمسح المجموعة بالكامل في كل مرة.
+# ---------------------------------------------------------------------------
+_GIVEAWAY_PARTICIPANTS_CACHE = {}   # gw_code -> {user_id: participant_dict}
+_GIVEAWAY_PARTICIPANTS_LOADED = set()
+
+
+def _load_giveaway_participants(gw_code: str) -> dict:
+    if gw_code not in _GIVEAWAY_PARTICIPANTS_LOADED:
+        parts = {}
+        for d in fs_db().collection("giveaway_participants").where("gw_code", "==", gw_code).stream():
+            data = d.to_dict() or {}
+            uid = data.get("user_id")
+            if uid is not None:
+                parts[uid] = data
+        _GIVEAWAY_PARTICIPANTS_CACHE[gw_code] = parts
+        _GIVEAWAY_PARTICIPANTS_LOADED.add(gw_code)
+    return _GIVEAWAY_PARTICIPANTS_CACHE.setdefault(gw_code, {})
+
+
+def _evict_giveaway_cache(gw_code: str) -> None:
+    """يفرّغ كاش سحب معيّن من الذاكرة كليًا (بعد الحذف النهائي)."""
+    _GIVEAWAY_PARTICIPANTS_CACHE.pop(gw_code, None)
+    _GIVEAWAY_PARTICIPANTS_LOADED.discard(gw_code)
+
+
 def count_giveaway_participants(gw_code: str) -> int:
-    docs = fs_db().collection("giveaway_participants").where("gw_code", "==", gw_code).stream()
-    return sum(1 for _ in docs)
+    return len(_load_giveaway_participants(gw_code))
 
 
 def _giveaway_participant_doc_id(gw_code: str, user_id: int) -> str:
@@ -6280,34 +6379,41 @@ def _giveaway_participant_doc_id(gw_code: str, user_id: int) -> str:
 
 
 def is_giveaway_participant(gw_code: str, user_id: int) -> bool:
-    doc = fs_db().collection("giveaway_participants").document(_giveaway_participant_doc_id(gw_code, user_id)).get()
-    return doc.exists
+    return user_id in _load_giveaway_participants(gw_code)
 
 
 def add_giveaway_participant(gw_code: str, user_id: int, display_name: str, username: str = None) -> bool:
     """يضيف مشاركًا جديدًا؛ يُعيد False إن كان مسجّلاً بالفعل."""
     from google.api_core.exceptions import AlreadyExists
-    ref = fs_db().collection("giveaway_participants").document(_giveaway_participant_doc_id(gw_code, user_id))
-    try:
-        ref.create({
-            "gw_code": gw_code,
-            "user_id": user_id,
-            "display_name": display_name,
-            "username": username,
-            "joined_at": datetime.now(timezone.utc).isoformat(),
-        })
-        return True
-    except AlreadyExists:
+    parts = _load_giveaway_participants(gw_code)
+    if user_id in parts:
         return False
+    ref = fs_db().collection("giveaway_participants").document(_giveaway_participant_doc_id(gw_code, user_id))
+    new_data = {
+        "gw_code": gw_code,
+        "user_id": user_id,
+        "display_name": display_name,
+        "username": username,
+        "joined_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        ref.create(new_data)
+    except AlreadyExists:
+        parts[user_id] = new_data
+        return False
+    # حدث مشاركة فعلي — يُحدَّث الكاش مباشرة بالذاكرة، بدون أي قراءة إضافية.
+    parts[user_id] = new_data
+    return True
 
 
 def remove_giveaway_participant(gw_code: str, user_id: int):
     fs_db().collection("giveaway_participants").document(_giveaway_participant_doc_id(gw_code, user_id)).delete()
+    _load_giveaway_participants(gw_code).pop(user_id, None)
 
 
 def get_giveaway_participants(gw_code: str):
-    docs = list(fs_db().collection("giveaway_participants").where("gw_code", "==", gw_code).stream())
-    rows = [d.to_dict() for d in docs]
+    parts = _load_giveaway_participants(gw_code)
+    rows = list(parts.values())
     rows.sort(key=lambda r: r.get("joined_at") or "")
     return [(r["user_id"], r.get("display_name") or str(r["user_id"])) for r in rows]
 
@@ -6375,6 +6481,7 @@ def delete_giveaway_admin(gw_code: str) -> None:
     for doc in fs_db().collection("giveaway_participants").where("gw_code", "==", gw_code).stream():
         doc.reference.delete()
     fs_db().collection("giveaways").document(gw_code).delete()
+    _evict_giveaway_cache(gw_code)
 
 
 _GIVEAWAYS_STATS_CACHE = {"data": None, "ts": 0.0}
@@ -6474,6 +6581,7 @@ def delete_quick_roulette_admin(roulette_id: int) -> None:
     for doc in fs_db().collection("counted_users").where("roulette_id", "==", roulette_id).stream():
         doc.reference.delete()
     fs_db().collection("roulettes").document(str(roulette_id)).delete()
+    _evict_roulette_cache(roulette_id)
 
 
 _QUICK_ROULETTE_STATS_CACHE = {"data": None, "ts": 0.0}
@@ -9517,37 +9625,37 @@ def join_roulette(user_id: int, roulette_id: int, display_name: str = None):
     owner_id = roulette["owner_id"]
     status = roulette["status"]
 
-    def _current_count():
-        docs = client.collection("counted_users").where("roulette_id", "==", roulette_id).stream()
-        return sum(1 for _ in docs)
-
-    counted_ref = client.collection("counted_users").document(_counted_user_doc_id(user_id, roulette_id))
-    existing = counted_ref.get().exists
+    # ⚡ يعتمد على نفس كاش المشاركين بالذاكرة (_load_roulette_counted) بدل
+    # مسح مجموعة counted_users بالكامل مع كل استدعاء — انظر التعليق أعلى
+    # _ROULETTE_COUNTED_CACHE.
+    counted = _load_roulette_counted(roulette_id)
+    existing = user_id in counted
 
     if existing or status != "open":
-        current = _current_count()
         return {
-            "found": True, "already": existing, "current": current,
+            "found": True, "already": existing, "current": len(counted),
             "target": target, "owner_id": owner_id, "status": status,
         }
 
+    counted_ref = client.collection("counted_users").document(_counted_user_doc_id(user_id, roulette_id))
+    new_data = {
+        "user_id": user_id,
+        "roulette_id": roulette_id,
+        "display_name": display_name,
+        "counted_at": datetime.now(timezone.utc).isoformat(),
+    }
     try:
-        counted_ref.create({
-            "user_id": user_id,
-            "roulette_id": roulette_id,
-            "display_name": display_name,
-            "counted_at": datetime.now(timezone.utc).isoformat(),
-        })
+        counted_ref.create(new_data)
     except AlreadyExists:
-        current = _current_count()
+        counted[user_id] = new_data
         return {
-            "found": True, "already": True, "current": current,
+            "found": True, "already": True, "current": len(counted),
             "target": target, "owner_id": owner_id, "status": status,
         }
 
-    current = _current_count()
+    counted[user_id] = new_data
     return {
-        "found": True, "already": False, "current": current,
+        "found": True, "already": False, "current": len(counted),
         "target": target, "owner_id": owner_id, "status": status,
     }
 
