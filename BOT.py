@@ -2843,13 +2843,13 @@ def build_result_message(winner_id: int, winner_name: str, participants: list) -
 
 def waiting_spin_keyboard(roulette_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔷 تدوير الروليت 🔷", callback_data=f"rr_spin_{roulette_id}", style="danger")],
+        [InlineKeyboardButton("🎡 تدوير الروليت", callback_data=f"rr_spin_{roulette_id}", style="primary")],
     ])
 
 def result_keyboard(roulette_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("↻ اختيار فائز آخر", callback_data=f"rr_respin_{roulette_id}", style="danger")],
-        [InlineKeyboardButton("↻ لعب مره اخرى", switch_inline_query="", style="success")],
+        [InlineKeyboardButton("↻ اختيار فائز آخر", callback_data=f"rr_respin_{roulette_id}", style="primary")],
+        [InlineKeyboardButton("↻ لعب مرة أخرى", switch_inline_query="", style="success")],
     ])
 
 def build_giveaway_target_message() -> tuple:
@@ -4200,7 +4200,7 @@ def create_roulettes_batch(owner_id: int, target_counts: list) -> dict:
     now_iso = datetime.now(timezone.utc).isoformat()
     result = {}
     for n, rid in zip(target_counts, ids):
-        batch.set(client.collection("roulettes").document(str(rid)), {
+        data = {
             "roulette_id": rid,
             "owner_id": owner_id,
             "target_count": n,
@@ -4208,23 +4208,41 @@ def create_roulettes_batch(owner_id: int, target_counts: list) -> dict:
             "status": "open",
             "created_at": now_iso,
             "channel_id": 0,
-        })
+        }
+        batch.set(client.collection("roulettes").document(str(rid)), data)
+        # حدث إنشاء فعلي — يُضاف مباشرة لكاش مستندات الروليت بالذاكرة، فلا
+        # تحدث أي قراءة من Firestore لهذا الروليت لحظة أول فتح له.
+        _ROULETTE_DOC_CACHE[rid] = data
         result[n] = rid
     batch.commit()
     return result
 
+# ---------------------------------------------------------------------------
+# ⚡ كاش مستند الروليت نفسه بالذاكرة (بمعزل عن كاش قائمة المشاركين أعلاه) —
+# نفس مبدأ _USER_CACHE: يُقرأ من Firestore مرة واحدة فقط طول عمر التشغيلة،
+# وأي تحديث لاحق (حالة، معرّف رسالة القناة...) يُكتب في Firestore ويُحدَّث
+# في الكاش مباشرة بنفس الوقت — بدل قراءة كاملة جديدة في كل استدعاء لاحق.
+# ---------------------------------------------------------------------------
+_ROULETTE_DOC_CACHE = {}   # roulette_id -> dict | None (None = غير موجود)
+
+
 def set_inline_message_id(roulette_id: int, inline_message_id: str):
-    ref = fs_db().collection("roulettes").document(str(roulette_id))
-    doc = ref.get()
-    if doc.exists and doc.to_dict().get("inline_message_id") is None:
-        ref.update({"inline_message_id": inline_message_id})
+    roulette = get_roulette(roulette_id)
+    if roulette and roulette.get("inline_message_id") is None:
+        fs_db().collection("roulettes").document(str(roulette_id)).update({"inline_message_id": inline_message_id})
+        _ROULETTE_DOC_CACHE[roulette_id]["inline_message_id"] = inline_message_id
 
 def get_roulette(roulette_id: int):
-    doc = fs_db().collection("roulettes").document(str(roulette_id)).get()
-    return _fs_row_or_none(doc)
+    if roulette_id not in _ROULETTE_DOC_CACHE:
+        doc = fs_db().collection("roulettes").document(str(roulette_id)).get()
+        _ROULETTE_DOC_CACHE[roulette_id] = doc.to_dict() if doc.exists else None
+    data = _ROULETTE_DOC_CACHE[roulette_id]
+    return FSRow(dict(data)) if data is not None else None
 
 def set_roulette_status(roulette_id: int, status: str):
     fs_db().collection("roulettes").document(str(roulette_id)).update({"status": status})
+    if _ROULETTE_DOC_CACHE.get(roulette_id) is not None:
+        _ROULETTE_DOC_CACHE[roulette_id]["status"] = status
 
 def _counted_user_doc_id(user_id: int, roulette_id: int) -> str:
     return f"{roulette_id}_{user_id}"
@@ -4259,6 +4277,7 @@ def _evict_roulette_cache(roulette_id: int) -> None:
     """يفرّغ كاش عملية سحب سريع معيّنة من الذاكرة كليًا (بعد الحذف النهائي)."""
     _ROULETTE_COUNTED_CACHE.pop(roulette_id, None)
     _ROULETTE_COUNTED_LOADED.discard(roulette_id)
+    _ROULETTE_DOC_CACHE.pop(roulette_id, None)
 
 
 def is_user_counted(user_id: int, roulette_id: int) -> bool:
@@ -5819,12 +5838,13 @@ def _evict_contest_cache(contest_code: str) -> None:
             _PARTICIPANT_CODE_INDEX.pop(pc, None)
     if _OPEN_CONTEST_CODES is not None:
         _OPEN_CONTEST_CODES.discard(contest_code)
+    _CONTEST_DOC_CACHE.pop(contest_code, None)
 
 
 def create_contest(contest_code: str, owner_id: int, chat_id: int, cliche_text: str,
                     cliche_entities, target_count: int, end_type: str, time_minutes,
                     winners_count, settings: dict, votes_target=None) -> None:
-    fs_db().collection("contests").document(contest_code).set({
+    data = {
         "contest_code": contest_code,
         "owner_id": owner_id,
         "chat_id": chat_id,
@@ -5842,20 +5862,34 @@ def create_contest(contest_code: str, owner_id: int, chat_id: int, cliche_text: 
         "channel_message_id": None,
         "status": "open",
         "created_at": datetime.now(timezone.utc).isoformat(),
-    })
-    # حدث إنشاء فعلي — يُضاف مباشرة لكاش المسابقات المفتوحة بالذاكرة (يضمن
-    # التحميل الأول من Firestore لو لم يحدث بعد بهذه التشغيلة).
+    }
+    fs_db().collection("contests").document(contest_code).set(data)
+    # حدث إنشاء فعلي — يُضاف مباشرة لكاش المسابقات المفتوحة ومستند المسابقة
+    # نفسه بالذاكرة (يضمن عدم أي قراءة من Firestore لحظة أول فتح لها).
     _get_open_contest_codes().add(contest_code)
     _CONTEST_VOTES_CACHE[contest_code] = {}
     _CONTEST_VOTES_LOADED.add(contest_code)
     _CONTEST_PARTICIPANTS_CACHE[contest_code] = {}
     _CONTEST_PARTICIPANTS_LOADED.add(contest_code)
+    _CONTEST_DOC_CACHE[contest_code] = data
     bump_channel_roulette_count(chat_id)
 
 
+# ---------------------------------------------------------------------------
+# ⚡ كاش مستند المسابقة نفسه بالذاكرة (بمعزل عن كاش الأصوات/المشاركين) —
+# نفس مبدأ _USER_CACHE و_ROULETTE_DOC_CACHE و_GIVEAWAY_DOC_CACHE: قراءة
+# واحدة فقط طول عمر التشغيلة، وأي تعديل لاحق يُكتب في Firestore ويُحدَّث في
+# الكاش بنفس اللحظة.
+# ---------------------------------------------------------------------------
+_CONTEST_DOC_CACHE = {}   # contest_code -> dict | None (None = غير موجود)
+
+
 def get_contest(contest_code: str):
-    doc = fs_db().collection("contests").document(contest_code).get()
-    return _fs_row_or_none(doc)
+    if contest_code not in _CONTEST_DOC_CACHE:
+        doc = fs_db().collection("contests").document(contest_code).get()
+        _CONTEST_DOC_CACHE[contest_code] = doc.to_dict() if doc.exists else None
+    data = _CONTEST_DOC_CACHE[contest_code]
+    return FSRow(dict(data)) if data is not None else None
 
 
 def get_open_contests_by_chat(chat_id: int) -> list:
@@ -6003,10 +6037,14 @@ def delete_contest_completely(contest_code: str) -> None:
 
 def set_contest_channel_message(contest_code: str, message_id: int):
     fs_db().collection("contests").document(contest_code).update({"channel_message_id": message_id})
+    if _CONTEST_DOC_CACHE.get(contest_code) is not None:
+        _CONTEST_DOC_CACHE[contest_code]["channel_message_id"] = message_id
 
 
 def set_contest_status(contest_code: str, status: str):
     fs_db().collection("contests").document(contest_code).update({"status": status})
+    if _CONTEST_DOC_CACHE.get(contest_code) is not None:
+        _CONTEST_DOC_CACHE[contest_code]["status"] = status
     if status == "open":
         _get_open_contest_codes().add(contest_code)
     elif _OPEN_CONTEST_CODES is not None:
@@ -6302,7 +6340,7 @@ def create_giveaway(gw_code: str, owner_id: int, chat_id: int, cliche_text: str,
         (datetime.now(timezone.utc) + timedelta(minutes=autospin_minutes)).isoformat()
         if autospin_mode == "time" and autospin_minutes else None
     )
-    fs_db().collection("giveaways").document(gw_code).set({
+    data = {
         "gw_code": gw_code,
         "owner_id": owner_id,
         "chat_id": chat_id,
@@ -6324,21 +6362,40 @@ def create_giveaway(gw_code: str, owner_id: int, chat_id: int, cliche_text: str,
         "autospin_target": autospin_target,
         "autospin_minutes": autospin_minutes,
         "autospin_ends_at": autospin_ends_at,
-    })
+    }
+    fs_db().collection("giveaways").document(gw_code).set(data)
+    # حدث إنشاء فعلي — يُضاف مباشرة لكاش مستندات السحوبات، فلا تحدث أي قراءة
+    # من Firestore لهذا السحب لحظة أول فتح له.
+    _GIVEAWAY_DOC_CACHE[gw_code] = data
     bump_channel_roulette_count(chat_id)
 
 
+# ---------------------------------------------------------------------------
+# ⚡ كاش مستند السحب نفسه بالذاكرة (بمعزل عن كاش قائمة المشاركين أعلاه) —
+# نفس مبدأ _USER_CACHE و_ROULETTE_DOC_CACHE: قراءة واحدة فقط طول عمر
+# التشغيلة، وأي تعديل لاحق يُكتب في Firestore ويُحدَّث في الكاش بنفس اللحظة.
+# ---------------------------------------------------------------------------
+_GIVEAWAY_DOC_CACHE = {}   # gw_code -> dict | None (None = غير موجود)
+
+
 def get_giveaway(gw_code: str):
-    doc = fs_db().collection("giveaways").document(gw_code).get()
-    return _fs_row_or_none(doc)
+    if gw_code not in _GIVEAWAY_DOC_CACHE:
+        doc = fs_db().collection("giveaways").document(gw_code).get()
+        _GIVEAWAY_DOC_CACHE[gw_code] = doc.to_dict() if doc.exists else None
+    data = _GIVEAWAY_DOC_CACHE[gw_code]
+    return FSRow(dict(data)) if data is not None else None
 
 
 def set_giveaway_channel_message(gw_code: str, message_id: int):
     fs_db().collection("giveaways").document(gw_code).update({"channel_message_id": message_id})
+    if _GIVEAWAY_DOC_CACHE.get(gw_code) is not None:
+        _GIVEAWAY_DOC_CACHE[gw_code]["channel_message_id"] = message_id
 
 
 def set_giveaway_status(gw_code: str, status: str):
     fs_db().collection("giveaways").document(gw_code).update({"status": status})
+    if _GIVEAWAY_DOC_CACHE.get(gw_code) is not None:
+        _GIVEAWAY_DOC_CACHE[gw_code]["status"] = status
 
 
 # ---------------------------------------------------------------------------
@@ -6368,6 +6425,7 @@ def _evict_giveaway_cache(gw_code: str) -> None:
     """يفرّغ كاش سحب معيّن من الذاكرة كليًا (بعد الحذف النهائي)."""
     _GIVEAWAY_PARTICIPANTS_CACHE.pop(gw_code, None)
     _GIVEAWAY_PARTICIPANTS_LOADED.discard(gw_code)
+    _GIVEAWAY_DOC_CACHE.pop(gw_code, None)
 
 
 def count_giveaway_participants(gw_code: str) -> int:
@@ -9275,8 +9333,8 @@ def build_cliche_prompt_keyboard() -> InlineKeyboardMarkup:
 
 def roulette_share_keyboard(roulette_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔶 اضغط لـ المشاركة 🔶", callback_data=f"rr_join_{roulette_id}", style="primary")],
-        [InlineKeyboardButton("🔷 تدوير الروليت 🔷", callback_data=f"rr_spin_{roulette_id}", style="danger")],
+        [InlineKeyboardButton("🎯 اضغط للمشاركة", callback_data=f"rr_join_{roulette_id}", style="primary")],
+        [InlineKeyboardButton("🎡 تدوير الروليت", callback_data=f"rr_spin_{roulette_id}", style="primary")],
     ])
 
 class _ReplyOnlyMessageShim:
@@ -9616,10 +9674,9 @@ def join_roulette(user_id: int, roulette_id: int, display_name: str = None):
     from google.api_core.exceptions import AlreadyExists
     client = fs_db()
 
-    roulette_doc = client.collection("roulettes").document(str(roulette_id)).get()
-    if not roulette_doc.exists:
+    roulette = get_roulette(roulette_id)
+    if not roulette:
         return {"found": False}
-    roulette = roulette_doc.to_dict()
 
     target = roulette["target_count"]
     owner_id = roulette["owner_id"]
@@ -11154,6 +11211,8 @@ async def finish_contest_by_time(bot, contest_code: str):
         "ended_at": datetime.now(timezone.utc).isoformat(),
     })
     contest["status"] = "ended"
+    if _CONTEST_DOC_CACHE.get(contest_code) is not None:
+        _CONTEST_DOC_CACHE[contest_code]["status"] = "ended"
     if _OPEN_CONTEST_CODES is not None:
         _OPEN_CONTEST_CODES.discard(contest_code)
 
