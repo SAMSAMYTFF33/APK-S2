@@ -1,2 +1,6 @@
-python-telegram-bot[job-queue]
+telethon
+python-telegram-bot
+aiohttp
 httpx
+cryptography
+requests
