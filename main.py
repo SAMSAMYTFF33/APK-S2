@@ -18,7 +18,7 @@ ATF_ACCOUNT_1   = 1     # ATF - gz
 ATF_ACCOUNT_2   = 1     # ATF -  ousama 
 ATF_ACCOUNT_3   = 1     # ATF - SKATE 
 ATF_ACCOUNT_4   = 1     # ATF - AWF 
-ATF_ACCOUNT_5   = 1     # ATF - ZAMASO 
+ATF_ACCOUNT_5   = 0     # ATF - ZAMASO 
 # ==============================================================================
 # ⚙️ مفاتيح التحكم بحسابات BODA (1 = يعمل | 0 = متوقف)
 # ==============================================================================
