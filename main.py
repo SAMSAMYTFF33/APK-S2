@@ -14,10 +14,10 @@ from telethon.tl.types import KeyboardButtonWebView, KeyboardButtonSimpleWebView
 #  =============================================================================
 # ⚙️ مفاتيح التحكم بحسابات ATF (1 = يعمل | 0 = متوقف)
 # ==============================================================================
-ATF_ACCOUNT_1   = 1    # ATF - gz 
+ATF_ACCOUNT_1   = 0    # ATF - gz 
 ATF_ACCOUNT_2   = 0     # ATF -  ousama 
 ATF_ACCOUNT_3   = 0     # ATF - SKATE 
-ATF_ACCOUNT_4   = 1     # ATF - AWF 
+ATF_ACCOUNT_4   = 0     # ATF - AWF 
 ATF_ACCOUNT_5   = 0     # ATF - ZAMASO 
 # ==============================================================================
 # ⚙️ مفاتيح التحكم بحسابات BODA (1 = يعمل | 0 = متوقف)
