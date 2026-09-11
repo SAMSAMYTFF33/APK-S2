@@ -1,6 +1,2 @@
-telethon
-python-telegram-bot
+telethon==1.36.0
 aiohttp
-httpx
-cryptography
-requests
