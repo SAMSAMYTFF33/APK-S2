@@ -9,9 +9,19 @@ from datetime import datetime, timedelta, timezone
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import RequestWebViewRequest
-from telethon.tl.types import KeyboardButtonWebView, KeyboardButtonSimpleWebView
 
-# =============================================================================
+# استدعاء آمن لمكونات الأزرار لتجنب الانهيار ImportError على Railway
+try:
+    from telethon.tl.types import KeyboardButtonWebView, KeyboardButtonSimpleWebView
+except ImportError:
+    try:
+        from telethon.tl.types import KeyboardButtonUrl as KeyboardButtonWebView
+        KeyboardButtonSimpleWebView = KeyboardButtonWebView
+    except ImportError:
+        KeyboardButtonWebView = object
+        KeyboardButtonSimpleWebView = object
+
+# ==============================================================================
 # ⚙️ مفاتيح التحكم بحسابات ATF (1 = يعمل | 0 = متوقف)
 # ==============================================================================
 ATF_ACCOUNT_1   = 0    # ATF - gz 
@@ -170,7 +180,6 @@ TARGET_MINUTE_BODA = 0
 # 🛠️ دالة النوم الاستجابي
 # ==============================================================================
 async def pauseable_sleep(seconds, event=None):
-    """انتظار ذكي يستجيب لأمر التوقف والعمل دون أن يعطل الحلقة."""
     end_time = time.time() + seconds
     while time.time() < end_time:
         if event is not None and not event.is_set():
@@ -410,7 +419,6 @@ async def account_worker_atf(acc_config, atf_run_event):
                 if acc_config.get("do_boost", True):
                     workers_to_run.append(atf_boost_worker(http_session, headers, me, init_data, lock, acc_config["device_prefix"], atf_run_event))
 
-                # سنربط التنافس بين إتمام العمال أو توقف حدث التشغيل
                 async def event_watcher():
                     while atf_run_event.is_set():
                         await asyncio.sleep(1)
@@ -453,15 +461,13 @@ async def main_atf_app(atf_run_event):
 
 
 # ==============================================================================
-# 🟦 دوال وتدفق بوت BODA (تم دعم البصمة ودقة الوقت والـ Sessions)
+# 🟦 دوال وتدفق بوت BODA (استخراج آمن للزر للعمل مع جميع نسخ Telethon)
 # ==============================================================================
 def get_morocco_time():
-    """الحصول على الوقت الحالي بتوقيت المغرب (GMT+1)."""
     return datetime.now(timezone.utc) + MOROCCO_OFFSET
 
 
 def get_target_time_boda():
-    """الحصول على وقت الهدف (3:00 صباحاً بتوقيت المغرب)."""
     now = get_morocco_time()
     target = now.replace(hour=TARGET_HOUR_BODA, minute=TARGET_MINUTE_BODA, second=0, microsecond=0)
     if now >= target:
@@ -470,7 +476,6 @@ def get_target_time_boda():
 
 
 async def wait_until_target_time_boda():
-    """تنتظر حتى الساعة 3:00 صباحاً بتوقيت المغرب مع تفادي الانحراف الزمني."""
     target = get_target_time_boda()
     now = get_morocco_time()
     wait_seconds = (target - now).total_seconds()
@@ -505,7 +510,6 @@ async def wait_until_target_time_boda():
 
 
 async def get_init_data_boda(acc_config):
-    """استخراج initData من بوت YodaAirdropBot لحساب محدد وتفادي تعارض الجلسات."""
     session_str = acc_config["session_string"]
     api_id = acc_config["api_id"]
     api_hash = acc_config["api_hash"]
@@ -523,11 +527,12 @@ async def get_init_data_boda(acc_config):
         target_url = None
         bot_entity = await client.get_input_entity(TARGET_BOT_BODA)
 
+        # استخراج آمن للزر يفحص جميع الخصائص للعمل بدون الاعتماد المباشر على Class Name
         async for message in client.iter_messages(TARGET_BOT_BODA, limit=10):
             if message.reply_markup and hasattr(message.reply_markup, 'rows'):
                 for row in message.reply_markup.rows:
                     for button in row.buttons:
-                        if isinstance(button, (KeyboardButtonWebView, KeyboardButtonSimpleWebView)):
+                        if hasattr(button, 'url') and button.url:
                             target_url = button.url
                             break
                     if target_url:
@@ -568,7 +573,6 @@ async def get_init_data_boda(acc_config):
 
 
 def build_headers_boda(init_data, user_id, acc_config):
-    """بناء الهيدرز الخاصة بـ BODA ديناميكياً باستخدام البصمة المخصصة للحساب من ATF."""
     extra = acc_config.get("extra_headers", {})
     return {
         "accept": "*/*",
@@ -661,7 +665,6 @@ async def social_tasks_boda(session, headers, acc_name=""):
 
 
 async def run_boda_tasks_for_account(acc_config):
-    """تنفيذ جميع مهام Baby Yoda لحساب محدد باستعمال بصمته المخصصة."""
     acc_name = acc_config["account_name"]
     now = get_morocco_time()
     print(f"\n🚀 BODA [{acc_name}] بدء تنفيذ المهام (بتوقيت المغرب: {now.strftime('%H:%M:%S')})...")
@@ -671,24 +674,20 @@ async def run_boda_tasks_for_account(acc_config):
         print(f"❌ BODA [{acc_name}] فشل استخراج initData.")
         return
 
-    # 🎯 استخدام بصمة الجهاز الفريدة للحساب في BODA
     headers = build_headers_boda(init_data, user_id, acc_config)
     print(f"✅ BODA [{acc_name}] تم استخراج initData وبناء البصمة الخاصة بالحساب بنجاح.\n")
 
     async with aiohttp.ClientSession() as session:
         total = 0
 
-        # 1. فيديو
         earned, msg = await video_ads_boda(session, headers, 10, acc_name)
         total += earned
         print(f"✅ BODA [{acc_name}] فيديو: {msg}\n")
 
-        # 2. روابط
         earned, msg = await link_ads_boda(session, headers, acc_name)
         total += earned
         print(f"✅ BODA [{acc_name}] روابط: {msg}\n")
 
-        # 3. اجتماعي
         earned, msg = await social_tasks_boda(session, headers, acc_name)
         total += earned
         print(f"✅ BODA [{acc_name}] اجتماعي: {msg}\n")
@@ -699,7 +698,6 @@ async def run_boda_tasks_for_account(acc_config):
 
 
 async def run_all_boda_tasks(atf_run_event):
-    """إيقاف ATF مؤقتاً ثم تشغيل BODA لجميع الحسابات المفعلة، واستئناف ATF بعد الانتهاء."""
     active_boda_accounts = [acc for acc in ACCOUNTS_CONFIG if acc.get("boda_enabled", False)]
     if not active_boda_accounts:
         print("⚠️ BODA: لا توجد حسابات مفعلة لـ BODA.")
@@ -709,7 +707,6 @@ async def run_all_boda_tasks(atf_run_event):
     print("🛑 إيقاف بوت ATF مؤقتاً لبدء تشغيل بوت BODA...")
     print("=" * 60)
 
-    # ⏸️ إيقاف ATF مؤقتاً لمنع تعارض الجلسات
     atf_run_event.clear()
     await asyncio.sleep(3)
 
@@ -725,12 +722,10 @@ async def run_all_boda_tasks(atf_run_event):
         print("\n" + "=" * 60)
         print("✅ اكتملت جميع مهام BODA! استئناف عمل بوت ATF...")
         print("=" * 60)
-        # ▶️ استئناف ATF
         atf_run_event.set()
 
 
 async def boda_scheduler_loop(atf_run_event):
-    """حلقة جدولة BODA اليومية عند 3 صباحاً بتوقيت المغرب."""
     print("=" * 60)
     print("🚀 جدولة Baby Yoda (BODA) Bot")
     print(f"📍 المنطقة الزمنية: GMT+1 (المغرب)")
@@ -757,11 +752,9 @@ async def boda_scheduler_loop(atf_run_event):
 # 🟨 المنسق الرئيسي والنظام الشامل
 # ==============================================================================
 async def main_system():
-    # حدث التحكم بتشغيل/توقف بوت ATF
     atf_run_event = asyncio.Event()
-    atf_run_event.set()  # يبدأ بالعمل افتراضياً
+    atf_run_event.set()
 
-    # تشغيل مهام ATF وجدولة BODA بالتوازي
     atf_task = asyncio.create_task(main_atf_app(atf_run_event))
     boda_task = asyncio.create_task(boda_scheduler_loop(atf_run_event))
 
