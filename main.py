@@ -29,7 +29,7 @@ ACCOUNTS_CONFIG = [
         "do_boost": True,
         "api_id": 38197378,
         "api_hash": "1efeb1db162150616801ae759799ca97",
-        "session_string": "1BJWap1sBu0-8gtNdiaxYuK9KpkQFc-exbIYosBX2AV9PCwWQvXpB6TJzJxY7q1tc8HyFLZkR2Gr6a3nSYvkJ0lIPZGZ1Oreaoen885A-CAlU9awGzeV_zrcLwWB8g6-kL_0yd-OeCCpBkSP-jS9Td3BuWwdvm1ncnPDbRZ0JRU5wbx5ko-_uGk4JmvagkW6mX9Y6GPfBXDujc-1JOdFFGoOAzASB95TvIV4-DJWVyD_VcygZ20lOMd-zocgzJqh7mt01Z-w5sitQzLJaAD7hRvEBklqhH511VK7OvigMC_diJ_m1uD_jQ6pwFy5Zbkm5R4QzDDBEdXoAU_t01ui9vCuwsK6VVck=",
+        "session_string": "1BJWap1wBu3SWNB8JFOdcM2T6cVu0o4dv7iybgtIqrRmUZYzkmWRkmBjFbGaovA7tyqfsozceWzvd9SuhsKsW1a9cle_PXkM_THwP_65_PYfO9w3aHVUvN_sIcfbnyQHz4AaVJhCyNEbwaRaZjShJvpZscoU_JLc0xD0rvE5wGQjEHZJkmL4OLsqoxZn0DgKqRtjLFX6KeQZinHJQeaFQQTqMdelSWmtE3diSNAV3JETvf7X2Llfb4dhVYbOAcMxm3ZRhRtv5uE9RjmMkS2OHOA8Dmr1OYn_E1r-xup8d2FifOMmI8QHcAS0ucEUwtgf5fS9AxtrLOS-JimS6tTNiiPcc7jZzRUU=",
         "device_prefix": "dev-B",
         "user_agent": "Mozilla/5.0 (Linux; Android 14; SM-A155F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36",
         "extra_headers": {
@@ -233,17 +233,17 @@ async def execute_task_atf(session, headers, tg_id, init_data, device_prefix, ta
         return False
 
 
-async def atf_boost_worker(session, headers, me, init_data, lock, device_prefix):
+async def atf_boost_worker(session, headers, me_id, me_username, init_data, lock, device_prefix):
     await asyncio.sleep(2)
     while True:
         try:
             async with lock:
                 payload = {
                     "initData": init_data, 
-                    "tg_id": me.id, 
-                    "username": me.username or "",
-                    "request_id": f"rq-{int(time.time()*1000)}-{me.id}",
-                    "device_id": f"{device_prefix}-{me.id}-{int(time.time())}",
+                    "tg_id": me_id, 
+                    "username": me_username or "",
+                    "request_id": f"rq-{int(time.time()*1000)}-{me_id}",
+                    "device_id": f"{device_prefix}-{me_id}-{int(time.time())}",
                     "display_preview": "0.0000"
                 }
                 async with session.post(START_MINE_ENDPOINT_ATF, json=payload, headers=headers):
@@ -252,41 +252,30 @@ async def atf_boost_worker(session, headers, me, init_data, lock, device_prefix)
                     if resp.status == 200:
                         res = await resp.json()
                         if res.get("status") == "success":
-                            print(f"🚀 [{me.id}] تم إرسال تسريع التعدين (BOOST) بنجاح!")
+                            print(f"🚀 [{me_id}] تم إرسال تسريع التعدين (BOOST) بنجاح!")
         except Exception:
             pass
         await asyncio.sleep(round(random.uniform(9, 11), 2))
 
 
-async def smart_tasks_worker(client, bot, acc_config, session, lock):
+async def smart_tasks_worker(acc_config, session, me_id, me_username, init_data, lock):
     acc_name = acc_config["account_name"]
     device_prefix = acc_config["device_prefix"]
 
     while True:
         async with lock:
             print("\n" + "="*50)
-            print(f"🔍 [{acc_name}] فحص الوضع الحالي للمهام...")
+            print(f"🔍 [{acc_name}] بدء دورة تنفيذ المهام...")
 
-            init_data = await get_init_data_atf(client, bot, acc_name)
-            if not init_data:
-                print(f"🛑 [{acc_name}] فشل جلب initData، محاولة بعد 15 ثانية...")
-                await asyncio.sleep(15)
-                continue
-
-            me = await client.get_me()
-            login_data, headers = await login_atf(session, init_data, me.id, me.username, acc_config)
+            login_data, headers = await login_atf(session, init_data, me_id, me_username, acc_config)
 
             if not login_data:
-                print(f"🛑 [{acc_name}] فشل تسجيل الدخول، محاولة بعد 15 ثانية...")
-                await asyncio.sleep(15)
-                continue
+                print(f"⚠️ [{acc_name}] انتهت صلاحية الجلسة/الرابط (Token Expired). سيتم جلب رابط جديد...")
+                return  # إنهاء هذه الدالة للعودة للاتصال بتيليجرام وجلب رابط جديد
 
             cooldowns = login_data.get("task_cooldowns", {})
             task_starts = login_data.get("task_starts", {})
             current_time = int(time.time())
-
-            action_executed = False
-            sleep_times = []
 
             for task in TASKS_ATF:
                 task_id = task["id"]
@@ -295,34 +284,20 @@ async def smart_tasks_worker(client, bot, acc_config, session, lock):
 
                 if cd_time > current_time and not is_started:
                     remaining = cd_time - current_time
-                    sleep_times.append(remaining)
                     mins, secs = divmod(remaining, 60)
                     hrs, mins = divmod(mins, 60)
-                    print(f"⏳ [{acc_name}] [{task['name']}]: قيد الانتظار باقي له ({hrs}h {mins}m {secs}s)")
+                    print(f"⏳ [{acc_name}] [{task['name']}]: غير جاهزة ({hrs}h {mins}m {secs}s)")
                 else:
                     if is_started:
                         print(f"💡 [{acc_name}] [{task['name']}]: يتطلب الضغط المباشر على [CLAIM]")
                     else:
                         print(f"💡 [{acc_name}] [{task['name']}]: يتطلب البدء والجمع [GO -> CLAIM]")
 
-                    await execute_task_atf(session, headers, me.id, init_data, device_prefix, task, is_started, acc_name)
-                    action_executed = True
+                    await execute_task_atf(session, headers, me_id, init_data, device_prefix, task, is_started, acc_name)
+                    await asyncio.sleep(3)
 
-        if action_executed:
-            print(f"🔄 [{acc_name}] تم تنفيذ مهمة، جاري التحديث المباشر من السيرفر...")
-            await asyncio.sleep(3)
-            continue
-
-        if sleep_times:
-            shortest_wait = min(sleep_times)
-            next_wait = max(shortest_wait + 5, 10)
-            mins, secs = divmod(next_wait, 60)
-            hrs, mins = divmod(mins, 60)
-            print(f"😴 [{acc_name}] جميع المهام قيد الانتظار. نوم حتى جاهزية أقرب مهمة: ({hrs}h {mins}m {secs}s)...\n")
-            await asyncio.sleep(next_wait)
-        else:
-            print(f"🎉 [{acc_name}] جميع المهام مكتملة! إعاده الفحص بعد 15 دقيقة...\n")
-            await asyncio.sleep(900)
+        print(f"😴 [{acc_name}] تم إنهاء المهام. إراحة الحساب لمدة ساعتين (7200 ثانية)...")
+        await asyncio.sleep(7200)
 
 
 async def account_worker_atf(acc_config):
@@ -343,39 +318,48 @@ async def account_worker_atf(acc_config):
             bot = await client.get_input_entity(TARGET_BOT_USERNAME_ATF)
             lock = asyncio.Lock()
 
-            async with aiohttp.ClientSession() as http_session:
-                init_data = await get_init_data_atf(client, bot, acc_name)
-                if not init_data:
-                    print(f"🛑 [{acc_name}] فشل جلب initData الأولي")
-                    await client.disconnect()
-                    await asyncio.sleep(15)
-                    continue
+            init_data = await get_init_data_atf(client, bot, acc_name)
+            
+            # قطع الاتصال فوراً بعد الحصول على الرابط لمنع الـ AuthKeyDuplicatedError
+            await client.disconnect()
+            print(f"🔗 [{acc_name}] تم جلب البيانات بنجاح، وتم قطع اتصال تيليجرام للحماية.")
 
+            if not init_data:
+                print(f"🛑 [{acc_name}] فشل جلب initData الأولي")
+                await asyncio.sleep(15)
+                continue
+
+            async with aiohttp.ClientSession() as http_session:
                 login_data, headers = await login_atf(http_session, init_data, me.id, me.username, acc_config)
                 if not headers:
                     print(f"🛑 [{acc_name}] فشل تسجيل الدخول الأولي")
-                    await client.disconnect()
                     await asyncio.sleep(15)
                     continue
 
-                workers_to_run = [
-                    smart_tasks_worker(client, bot, acc_config, http_session, lock)
-                ]
-
+                # تشغيل المهام والتسريع في الخلفية عبر HTTP
+                tasks_task = asyncio.create_task(smart_tasks_worker(acc_config, http_session, me.id, me.username, init_data, lock))
+                
+                boost_task = None
                 if acc_config.get("do_boost", True):
-                    workers_to_run.append(atf_boost_worker(http_session, headers, me, init_data, lock, acc_config["device_prefix"]))
+                    boost_task = asyncio.create_task(atf_boost_worker(http_session, headers, me.id, me.username, init_data, lock, acc_config["device_prefix"]))
 
-                # تشغيل مهام ATF
-                await asyncio.gather(*workers_to_run)
+                # انتظار دالة المهام (ستستمر بالعمل والنوم، ولن تنتهي إلا إذا فسد الرابط)
+                await tasks_task
+
+                # إذا انتهت دالة المهام، نوقف التسريع لنعيد الاتصال ونجلب رابطاً جديداً
+                if boost_task:
+                    boost_task.cancel()
 
         except Exception as e:
             print(f"🛑 [{acc_name}] توقف في ATF: {type(e).__name__}")
         finally:
             try:
-                await client.disconnect()
+                if client.is_connected():
+                    await client.disconnect()
             except Exception:
                 pass
-        
+
+        print(f"🔄 [{acc_name}] جاري إعادة تهيئة الحساب بالكامل لجلب بيانات جديدة...")
         await asyncio.sleep(10)
 
 
