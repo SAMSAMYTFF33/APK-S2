@@ -271,11 +271,14 @@ async def smart_tasks_worker(acc_config, session, me_id, me_username, init_data,
 
             if not login_data:
                 print(f"⚠️ [{acc_name}] انتهت صلاحية الجلسة/الرابط (Token Expired). سيتم جلب رابط جديد...")
-                return  # إنهاء هذه الدالة للعودة للاتصال بتيليجرام وجلب رابط جديد
+                return  
 
             cooldowns = login_data.get("task_cooldowns", {})
             task_starts = login_data.get("task_starts", {})
             current_time = int(time.time())
+            
+            # قائمة لتخزين أوقات الانتظار المتبقية للمهام
+            pending_waits = []
 
             for task in TASKS_ATF:
                 task_id = task["id"]
@@ -284,6 +287,7 @@ async def smart_tasks_worker(acc_config, session, me_id, me_username, init_data,
 
                 if cd_time > current_time and not is_started:
                     remaining = cd_time - current_time
+                    pending_waits.append(remaining)
                     mins, secs = divmod(remaining, 60)
                     hrs, mins = divmod(mins, 60)
                     print(f"⏳ [{acc_name}] [{task['name']}]: غير جاهزة ({hrs}h {mins}m {secs}s)")
@@ -296,8 +300,16 @@ async def smart_tasks_worker(acc_config, session, me_id, me_username, init_data,
                     await execute_task_atf(session, headers, me_id, init_data, device_prefix, task, is_started, acc_name)
                     await asyncio.sleep(3)
 
-        print(f"😴 [{acc_name}] تم إنهاء المهام. إراحة الحساب لمدة ساعتين (7200 ثانية)...")
-        await asyncio.sleep(7200)
+        # تحديد وقت السبات بناءً على أقرب مهمة (مع إضافة 10 ثوانٍ كفارق أمان)
+        if pending_waits:
+            next_wake_up = min(pending_waits) + 10
+        else:
+            # إذا لم تكن هناك مهام قيد الانتظار، ننام لمدة ساعتين كحد أقصى
+            next_wake_up = 7200 
+
+        hrs, mins = divmod(next_wake_up // 60, 60)
+        print(f"😴 [{acc_name}] تم إنهاء المهام. إراحة الحساب واستيقاظ بعد: {hrs} ساعة و {mins} دقيقة ({next_wake_up} ثانية)...")
+        await asyncio.sleep(next_wake_up)
 
 
 async def account_worker_atf(acc_config):
