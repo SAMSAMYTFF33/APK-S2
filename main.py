@@ -5,52 +5,31 @@ import aiohttp
 import random
 import sys
 import subprocess
-from datetime import datetime, timedelta, timezone
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import RequestWebViewRequest
 
-# استدعاء آمن لمكونات الأزرار لتجنب الانهيار ImportError على Railway
-try:
-    from telethon.tl.types import KeyboardButtonWebView, KeyboardButtonSimpleWebView
-except ImportError:
-    try:
-        from telethon.tl.types import KeyboardButtonUrl as KeyboardButtonWebView
-        KeyboardButtonSimpleWebView = KeyboardButtonWebView
-    except ImportError:
-        KeyboardButtonWebView = object
-        KeyboardButtonSimpleWebView = object
-
-# =============================================================================
+# ==============================================================================
 # ⚙️ مفاتيح التحكم بحسابات ATF (1 = يعمل | 0 = متوقف)
 # ==============================================================================
-ATF_ACCOUNT_1   = 1   # ATF - gz 
+ATF_ACCOUNT_1   = 1    # ATF - gz (الحساب الأول)
 ATF_ACCOUNT_2   = 0    # ATF - ousama 
 ATF_ACCOUNT_3   = 0    # ATF - SKATE 
 ATF_ACCOUNT_4   = 0    # ATF - AWF 
 ATF_ACCOUNT_5   = 0    # ATF - ZAMASO 
 # ==============================================================================
-# ⚙️ مفاتيح التحكم بحسابات BODA (1 = يعمل | 0 = متوقف)
-# ==============================================================================
-BODA_ACCOUNT_1  = 1    # BODA - gz (الحساب الأول)
-BODA_ACCOUNT_2  = 1    # BODA - الحساب الثاني
-BODA_ACCOUNT_3  = 0    # BODA - SKATE (الحساب الثالث)
-BODA_ACCOUNT_4  = 0    # BODA - الحساب الرابع
-BODA_ACCOUNT_5  = 0    # BODA - ZAMASO (الحساب الخامس)
-# ==============================================================================
 
 # ==============================================================================
-# 🟩 إعدادات الحسابات المشتركة لـ ATF و BODA
+# 🟩 إعدادات الحسابات
 # ==============================================================================
 ACCOUNTS_CONFIG = [
     {
         "atf_enabled": ATF_ACCOUNT_1 == 1,
-        "boda_enabled": BODA_ACCOUNT_1 == 1,
         "account_name": "الحساب الأول (gz)",
         "do_boost": True,
-        "api_id": 31568734,
-        "api_hash": "7286e8c92ccc4dc698d771664bf71700",
-        "session_string": "1BJWap1sBuxjvSEbIQZYZ_pwBJo9M9XfWiyMQLlzTt48Ku7r1-_gW20dBsDHYtoKza6DvS1cZQsPc5e5wwJBz-SO-t4iEqHXU68xVGFVZN5gnTLUPY7Jztm21a2Snmy2SgsIGg0NK5KuxO39moAE8vnGPsdb-BDCxrvRIpxYWwEi_CYp0NZ_Z2gAfqK8ZZIM36Gyq4u0yVU_xSYdl8HmNaV0Imop8p9MnOQIHyXRswfgDSz4dMctk3_AMbsg0i7UCJ3yoHH97-UjYFqBHyi2j2LxcQrezwaJeVYvLKxmpxCf-jCwPK_a9vHaM2L7QV6wfcBsS1jgiwVVpik4XXj5aGQ18UdkCOTU=",
+        "api_id": 38197378,
+        "api_hash": "1efeb1db162150616801ae759799ca97",
+        "session_string": "1BJWap1sBu0-8gtNdiaxYuK9KpkQFc-exbIYosBX2AV9PCwWQvXpB6TJzJxY7q1tc8HyFLZkR2Gr6a3nSYvkJ0lIPZGZ1Oreaoen885A-CAlU9awGzeV_zrcLwWB8g6-kL_0yd-OeCCpBkSP-jS9Td3BuWwdvm1ncnPDbRZ0JRU5wbx5ko-_uGk4JmvagkW6mX9Y6GPfBXDujc-1JOdFFGoOAzASB95TvIV4-DJWVyD_VcygZ20lOMd-zocgzJqh7mt01Z-w5sitQzLJaAD7hRvEBklqhH511VK7OvigMC_diJ_m1uD_jQ6pwFy5Zbkm5R4QzDDBEdXoAU_t01ui9vCuwsK6VVck=",
         "device_prefix": "dev-B",
         "user_agent": "Mozilla/5.0 (Linux; Android 14; SM-A155F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36",
         "extra_headers": {
@@ -65,7 +44,6 @@ ACCOUNTS_CONFIG = [
     },
     {
         "atf_enabled": ATF_ACCOUNT_2 == 1,
-        "boda_enabled": BODA_ACCOUNT_2 == 1,
         "account_name": "الحساب الثاني",
         "do_boost": True,
         "api_id": 38197378,
@@ -85,7 +63,6 @@ ACCOUNTS_CONFIG = [
     },
     {
         "atf_enabled": ATF_ACCOUNT_3 == 1,
-        "boda_enabled": BODA_ACCOUNT_3 == 1,
         "account_name": "الحساب الثالث (SKATE)",
         "do_boost": True,
         "api_id": 38197378,
@@ -105,7 +82,6 @@ ACCOUNTS_CONFIG = [
     },
     {
         "atf_enabled": ATF_ACCOUNT_4 == 1,
-        "boda_enabled": BODA_ACCOUNT_4 == 1,
         "account_name": "الحساب الرابع",
         "do_boost": True,
         "api_id": 38197378,
@@ -125,7 +101,6 @@ ACCOUNTS_CONFIG = [
     },
     {
         "atf_enabled": ATF_ACCOUNT_5 == 1,
-        "boda_enabled": BODA_ACCOUNT_5 == 1,
         "account_name": "الحساب الخامس (ZAMASO)",
         "do_boost": True,
         "api_id": 31514497,
@@ -166,30 +141,6 @@ TASKS_ATF = [
 ]
 
 # ==============================================================================
-# 🟦 ثوابت وإعدادات BODA Bot
-# ==============================================================================
-TARGET_BOT_BODA = "YodaAirdropBot"
-BASE_URL_BODA = "https://baby-yoda.arsidfani.workers.dev"
-
-MOROCCO_OFFSET = timedelta(hours=1)  # GMT+1 (بتوقيت المغرب)
-TARGET_HOUR_BODA = 3  # 3 صباحاً
-TARGET_MINUTE_BODA = 0
-
-
-# ==============================================================================
-# 🛠️ دالة النوم الاستجابي
-# ==============================================================================
-async def pauseable_sleep(seconds, event=None):
-    end_time = time.time() + seconds
-    while time.time() < end_time:
-        if event is not None and not event.is_set():
-            await event.wait()
-        rem = end_time - time.time()
-        if rem > 0:
-            await asyncio.sleep(min(rem, 2))
-
-
-# ==============================================================================
 # 🟩 دوال وتدفق بوت ATF
 # ==============================================================================
 async def get_init_data_atf(client, bot, acc_name):
@@ -205,7 +156,8 @@ async def get_init_data_atf(client, bot, acc_name):
         else:
             return None
         return urllib.parse.unquote(encoded)
-    except Exception:
+    except Exception as e:
+        print(f"❌ [{acc_name}] خطأ أثناء جلب initData: {e}")
         return None
 
 
@@ -236,7 +188,7 @@ async def login_atf(session, init_data, tg_id, username, acc_config):
     return None, None
 
 
-async def execute_task_atf(session, headers, tg_id, init_data, device_prefix, task, is_started, acc_name, atf_run_event):
+async def execute_task_atf(session, headers, tg_id, init_data, device_prefix, task, is_started, acc_name):
     now = int(time.time())
 
     if not is_started:
@@ -258,7 +210,7 @@ async def execute_task_atf(session, headers, tg_id, init_data, device_prefix, ta
 
         wait_sec = task.get('wait', 5) + 3
         print(f"⏳ [{acc_name}] انتظار {wait_sec} ثانية لإنهاء المهمة...")
-        await pauseable_sleep(wait_sec, atf_run_event)
+        await asyncio.sleep(wait_sec)
 
     now_claim = int(time.time())
     print(f"🟩 [{acc_name}] [CLAIM] المطالبة بمكافأة: {task['name']}")
@@ -281,11 +233,10 @@ async def execute_task_atf(session, headers, tg_id, init_data, device_prefix, ta
         return False
 
 
-async def atf_boost_worker(session, headers, me, init_data, lock, device_prefix, atf_run_event):
+async def atf_boost_worker(session, headers, me, init_data, lock, device_prefix):
     await asyncio.sleep(2)
     while True:
         try:
-            await atf_run_event.wait()
             async with lock:
                 payload = {
                     "initData": init_data, 
@@ -304,16 +255,14 @@ async def atf_boost_worker(session, headers, me, init_data, lock, device_prefix,
                             print(f"🚀 [{me.id}] تم إرسال تسريع التعدين (BOOST) بنجاح!")
         except Exception:
             pass
-        await pauseable_sleep(round(random.uniform(9, 11), 2), atf_run_event)
+        await asyncio.sleep(round(random.uniform(9, 11), 2))
 
 
-async def smart_tasks_worker(client, bot, acc_config, session, lock, atf_run_event):
+async def smart_tasks_worker(client, bot, acc_config, session, lock):
     acc_name = acc_config["account_name"]
     device_prefix = acc_config["device_prefix"]
 
     while True:
-        await atf_run_event.wait()
-
         async with lock:
             print("\n" + "="*50)
             print(f"🔍 [{acc_name}] فحص الوضع الحالي للمهام...")
@@ -321,7 +270,7 @@ async def smart_tasks_worker(client, bot, acc_config, session, lock, atf_run_eve
             init_data = await get_init_data_atf(client, bot, acc_name)
             if not init_data:
                 print(f"🛑 [{acc_name}] فشل جلب initData، محاولة بعد 15 ثانية...")
-                await pauseable_sleep(15, atf_run_event)
+                await asyncio.sleep(15)
                 continue
 
             me = await client.get_me()
@@ -329,7 +278,7 @@ async def smart_tasks_worker(client, bot, acc_config, session, lock, atf_run_eve
 
             if not login_data:
                 print(f"🛑 [{acc_name}] فشل تسجيل الدخول، محاولة بعد 15 ثانية...")
-                await pauseable_sleep(15, atf_run_event)
+                await asyncio.sleep(15)
                 continue
 
             cooldowns = login_data.get("task_cooldowns", {})
@@ -340,7 +289,6 @@ async def smart_tasks_worker(client, bot, acc_config, session, lock, atf_run_eve
             sleep_times = []
 
             for task in TASKS_ATF:
-                await atf_run_event.wait()
                 task_id = task["id"]
                 cd_time = cooldowns.get(task_id, 0)
                 is_started = task_id in task_starts
@@ -357,12 +305,12 @@ async def smart_tasks_worker(client, bot, acc_config, session, lock, atf_run_eve
                     else:
                         print(f"💡 [{acc_name}] [{task['name']}]: يتطلب البدء والجمع [GO -> CLAIM]")
 
-                    await execute_task_atf(session, headers, me.id, init_data, device_prefix, task, is_started, acc_name, atf_run_event)
+                    await execute_task_atf(session, headers, me.id, init_data, device_prefix, task, is_started, acc_name)
                     action_executed = True
 
         if action_executed:
             print(f"🔄 [{acc_name}] تم تنفيذ مهمة، جاري التحديث المباشر من السيرفر...")
-            await pauseable_sleep(3, atf_run_event)
+            await asyncio.sleep(3)
             continue
 
         if sleep_times:
@@ -371,18 +319,16 @@ async def smart_tasks_worker(client, bot, acc_config, session, lock, atf_run_eve
             mins, secs = divmod(next_wait, 60)
             hrs, mins = divmod(mins, 60)
             print(f"😴 [{acc_name}] جميع المهام قيد الانتظار. نوم حتى جاهزية أقرب مهمة: ({hrs}h {mins}m {secs}s)...\n")
-            await pauseable_sleep(next_wait, atf_run_event)
+            await asyncio.sleep(next_wait)
         else:
             print(f"🎉 [{acc_name}] جميع المهام مكتملة! إعاده الفحص بعد 15 دقيقة...\n")
-            await pauseable_sleep(900, atf_run_event)
+            await asyncio.sleep(900)
 
 
-async def account_worker_atf(acc_config, atf_run_event):
+async def account_worker_atf(acc_config):
     acc_name = acc_config["account_name"]
 
     while True:
-        await atf_run_event.wait()
-
         client = TelegramClient(StringSession(acc_config["session_string"]), acc_config["api_id"], acc_config["api_hash"])
 
         try:
@@ -390,7 +336,7 @@ async def account_worker_atf(acc_config, atf_run_event):
             if not await client.is_user_authorized():
                 print(f"🛑 [{acc_name}] الجلسة غير مصرّحة - يلزم session جديد")
                 await client.disconnect()
-                await pauseable_sleep(300, atf_run_event)
+                await asyncio.sleep(300)
                 continue
 
             me = await client.get_me()
@@ -402,33 +348,25 @@ async def account_worker_atf(acc_config, atf_run_event):
                 if not init_data:
                     print(f"🛑 [{acc_name}] فشل جلب initData الأولي")
                     await client.disconnect()
-                    await pauseable_sleep(15, atf_run_event)
+                    await asyncio.sleep(15)
                     continue
 
                 login_data, headers = await login_atf(http_session, init_data, me.id, me.username, acc_config)
                 if not headers:
                     print(f"🛑 [{acc_name}] فشل تسجيل الدخول الأولي")
                     await client.disconnect()
-                    await pauseable_sleep(15, atf_run_event)
+                    await asyncio.sleep(15)
                     continue
 
                 workers_to_run = [
-                    smart_tasks_worker(client, bot, acc_config, http_session, lock, atf_run_event)
+                    smart_tasks_worker(client, bot, acc_config, http_session, lock)
                 ]
 
                 if acc_config.get("do_boost", True):
-                    workers_to_run.append(atf_boost_worker(http_session, headers, me, init_data, lock, acc_config["device_prefix"], atf_run_event))
+                    workers_to_run.append(atf_boost_worker(http_session, headers, me, init_data, lock, acc_config["device_prefix"]))
 
-                async def event_watcher():
-                    while atf_run_event.is_set():
-                        await asyncio.sleep(1)
-
-                group = asyncio.gather(*workers_to_run)
-                watcher = asyncio.create_task(event_watcher())
-                
-                done, pending = await asyncio.wait([group, watcher], return_when=asyncio.FIRST_COMPLETED)
-                for task in pending:
-                    task.cancel()
+                # تشغيل مهام ATF
+                await asyncio.gather(*workers_to_run)
 
         except Exception as e:
             print(f"🛑 [{acc_name}] توقف في ATF: {type(e).__name__}")
@@ -437,14 +375,11 @@ async def account_worker_atf(acc_config, atf_run_event):
                 await client.disconnect()
             except Exception:
                 pass
-
-        if not atf_run_event.is_set():
-            print(f"⏸️ [{acc_name}] تم إيقاف حساب ATF مؤقتاً لصالح بوت BODA...")
-            await atf_run_event.wait()
-            print(f"▶️ [{acc_name}] إعادة استئناف حساب ATF بنجاح.")
+        
+        await asyncio.sleep(10)
 
 
-async def main_atf_app(atf_run_event):
+async def main_atf_app():
     active_accounts = [acc for acc in ACCOUNTS_CONFIG if acc.get("atf_enabled", True)]
     if not active_accounts:
         print("⚠️ ATF: كل الحسابات متوقفة")
@@ -452,7 +387,7 @@ async def main_atf_app(atf_run_event):
 
     print(f"🚀 ATF: تشغيل {len(active_accounts)} حسابات بنظام التحقق والدقة الذكية...")
     results = await asyncio.gather(
-        *(account_worker_atf(acc, atf_run_event) for acc in active_accounts),
+        *(account_worker_atf(acc) for acc in active_accounts),
         return_exceptions=True
     )
     for acc, result in zip(active_accounts, results):
@@ -461,304 +396,10 @@ async def main_atf_app(atf_run_event):
 
 
 # ==============================================================================
-# 🟦 دوال وتدفق بوت BODA (استخراج آمن للزر للعمل مع جميع نسخ Telethon)
-# ==============================================================================
-def get_morocco_time():
-    return datetime.now(timezone.utc) + MOROCCO_OFFSET
-
-
-def get_target_time_boda():
-    now = get_morocco_time()
-    target = now.replace(hour=TARGET_HOUR_BODA, minute=TARGET_MINUTE_BODA, second=0, microsecond=0)
-    if now >= target:
-        target += timedelta(days=1)
-    return target
-
-
-async def wait_until_target_time_boda():
-    target = get_target_time_boda()
-    now = get_morocco_time()
-    wait_seconds = (target - now).total_seconds()
-
-    wait_hours = int(wait_seconds // 3600)
-    wait_minutes = int((wait_seconds % 3600) // 60)
-    wait_seconds_remain = int(wait_seconds % 60)
-
-    print(f"\n⏰ الوقت الحالي (المغرب): {now.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"📍 المنطقة الزمنية: GMT+1 (المغرب)")
-    print(f"⏳ الانتظار حتى الساعة {TARGET_HOUR_BODA:02d}:{TARGET_MINUTE_BODA:02d} صباحاً (بتوقيت المغرب)")
-    print(f"📅 التاريخ المستهدف: {target.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"⏱️ المتبقي: {wait_hours} ساعة و {wait_minutes} دقيقة و {wait_seconds_remain} ثانية")
-
-    last_log_time = 0
-    while True:
-        now = get_morocco_time()
-        rem_seconds = (target - now).total_seconds()
-        if rem_seconds <= 0:
-            break
-
-        if rem_seconds > 60:
-            await asyncio.sleep(30)
-            if time.time() - last_log_time >= 600:
-                hours = int(rem_seconds // 3600)
-                minutes = int((rem_seconds % 3600) // 60)
-                print(f"⏳ BODA - متبقي حتى الساعة 3:00 صباحاً: {hours} ساعة و {minutes} دقيقة")
-                last_log_time = time.time()
-        else:
-            await asyncio.sleep(rem_seconds)
-            break
-
-
-async def get_init_data_boda(acc_config):
-    session_str = acc_config["session_string"]
-    api_id = acc_config["api_id"]
-    api_hash = acc_config["api_hash"]
-    acc_name = acc_config["account_name"]
-
-    client = TelegramClient(StringSession(session_str), api_id, api_hash)
-    try:
-        await client.connect()
-        me = await client.get_me()
-        print(f"✅ BODA [{acc_name}] تم تسجيل الدخول: {me.first_name} (ID: {me.id})")
-
-        await client.send_message(TARGET_BOT_BODA, "/start")
-        await asyncio.sleep(2)
-
-        target_url = None
-        bot_entity = await client.get_input_entity(TARGET_BOT_BODA)
-
-        # استخراج آمن للزر يفحص جميع الخصائص للعمل بدون الاعتماد المباشر على Class Name
-        async for message in client.iter_messages(TARGET_BOT_BODA, limit=10):
-            if message.reply_markup and hasattr(message.reply_markup, 'rows'):
-                for row in message.reply_markup.rows:
-                    for button in row.buttons:
-                        if hasattr(button, 'url') and button.url:
-                            target_url = button.url
-                            break
-                    if target_url:
-                        break
-            if target_url:
-                break
-
-        if not target_url:
-            print(f"❌ BODA [{acc_name}] لم يتم العثور على زر WebApp.")
-            await client.disconnect()
-            return None, None
-
-        web_view = await client(RequestWebViewRequest(
-            peer=bot_entity,
-            bot=bot_entity,
-            platform="android",
-            from_bot_menu=False,
-            url=target_url
-        ))
-
-        full_url = web_view.url
-        if "#tgWebAppData=" in full_url:
-            raw_init_data = full_url.split("#tgWebAppData=")[1].split("&")[0]
-        elif "tgWebAppData=" in full_url:
-            raw_init_data = full_url.split("tgWebAppData=")[1].split("&")[0]
-        else:
-            raw_init_data = full_url
-
-        await client.disconnect()
-        return urllib.parse.unquote(raw_init_data), me.id
-    except Exception as e:
-        print(f"❌ BODA [{acc_name}] خطأ في جلب initData: {e}")
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
-        return None, None
-
-
-def build_headers_boda(init_data, user_id, acc_config):
-    extra = acc_config.get("extra_headers", {})
-    return {
-        "accept": "*/*",
-        "accept-language": extra.get("accept-language", "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7"),
-        "content-type": "application/json",
-        "sec-ch-ua": extra.get("sec-ch-ua", '"Chromium";v="126", "Not/A)Brand";v="8"'),
-        "sec-ch-ua-mobile": extra.get("sec-ch-ua-mobile", "?1"),
-        "sec-ch-ua-platform": extra.get("sec-ch-ua-platform", '"Android"'),
-        "sec-fetch-dest": extra.get("sec-fetch-dest", "empty"),
-        "sec-fetch-mode": extra.get("sec-fetch-mode", "cors"),
-        "sec-fetch-site": extra.get("sec-fetch-site", "same-origin"),
-        "x-guest-id": f"guest_{user_id}_{int(time.time())}",
-        "x-init-data": init_data,
-        "x-start-param": "",
-        "referer": BASE_URL_BODA + "/",
-        "origin": BASE_URL_BODA,
-        "user-agent": acc_config["user_agent"]
-    }
-
-
-async def req_boda(session, endpoint, method='GET', data=None, headers=None):
-    url = BASE_URL_BODA + endpoint
-    async with session.request(method, url, json=data, headers=headers, timeout=15) as resp:
-        resp.raise_for_status()
-        return await resp.json()
-
-
-async def video_ads_boda(session, headers, limit=10, acc_name=""):
-    st = await req_boda(session, '/api/state', headers=headers)
-    ads = st.get('ads', {})
-    done = ads.get('done', 0)
-    remaining = min(limit, ads.get('limit', 10) - done)
-    if remaining <= 0:
-        return 0, "مكتمل"
-    earned = 0
-    for i in range(remaining):
-        wait = random.randint(5, 10)
-        print(f"🎬 BODA [{acc_name}] فيديو {i+1}/{remaining} ({wait}s)")
-        await asyncio.sleep(wait)
-        res = await req_boda(session, '/api/ads/watch', 'POST', {'network': 'monetag'}, headers)
-        if res.get('ok'):
-            reward = res['result']['reward']
-            earned += reward
-            print(f"   +{reward} YODA")
-        else:
-            break
-        await asyncio.sleep(random.uniform(2, 4))
-    return earned, f"{earned:.2f} YODA"
-
-
-async def link_ads_boda(session, headers, acc_name=""):
-    st = await req_boda(session, '/api/state', headers=headers)
-    links = [l for l in st.get('adLinks', []) if l.get('remaining', 0) > 0]
-    if not links:
-        return 0, "مكتمل"
-    earned = 0
-    for l in links:
-        wait = l.get('wait_seconds', 5)
-        print(f"🔗 BODA [{acc_name}] {l['title']} ({wait}s)")
-        await asyncio.sleep(wait)
-        res = await req_boda(session, '/api/ads/link', 'POST', {'linkId': l['id']}, headers)
-        if res.get('ok'):
-            reward = res['result']['reward']
-            earned += reward
-            print(f"   +{reward} YODA")
-        else:
-            break
-        await asyncio.sleep(1)
-    return earned, f"{earned:.2f} YODA"
-
-
-async def social_tasks_boda(session, headers, acc_name=""):
-    data = await req_boda(session, '/api/social/list', headers=headers)
-    tasks = [t for t in data.get('tasks', []) if not t.get('completed')]
-    if not tasks:
-        return 0, "مكتمل"
-    earned = 0
-    for t in tasks:
-        print(f"👤 BODA [{acc_name}] {t['title']}")
-        await asyncio.sleep(2)
-        res = await req_boda(session, '/api/social/complete', 'POST', {'taskId': t['id']}, headers)
-        if res.get('ok'):
-            reward = res['result']['reward']
-            earned += reward
-            print(f"   +{reward} YODA")
-        else:
-            break
-        await asyncio.sleep(1)
-    return earned, f"{earned:.2f} YODA"
-
-
-async def run_boda_tasks_for_account(acc_config):
-    acc_name = acc_config["account_name"]
-    now = get_morocco_time()
-    print(f"\n🚀 BODA [{acc_name}] بدء تنفيذ المهام (بتوقيت المغرب: {now.strftime('%H:%M:%S')})...")
-
-    init_data, user_id = await get_init_data_boda(acc_config)
-    if not init_data:
-        print(f"❌ BODA [{acc_name}] فشل استخراج initData.")
-        return
-
-    headers = build_headers_boda(init_data, user_id, acc_config)
-    print(f"✅ BODA [{acc_name}] تم استخراج initData وبناء البصمة الخاصة بالحساب بنجاح.\n")
-
-    async with aiohttp.ClientSession() as session:
-        total = 0
-
-        earned, msg = await video_ads_boda(session, headers, 10, acc_name)
-        total += earned
-        print(f"✅ BODA [{acc_name}] فيديو: {msg}\n")
-
-        earned, msg = await link_ads_boda(session, headers, acc_name)
-        total += earned
-        print(f"✅ BODA [{acc_name}] روابط: {msg}\n")
-
-        earned, msg = await social_tasks_boda(session, headers, acc_name)
-        total += earned
-        print(f"✅ BODA [{acc_name}] اجتماعي: {msg}\n")
-
-        end_time = get_morocco_time()
-        print(f"💰 BODA [{acc_name}] الإجمالي اليومي: {total:.2f} YODA")
-        print(f"✅ BODA [{acc_name}] اكتملت المهام في: {end_time.strftime('%Y-%m-%d %H:%M:%S')} (بتوقيت المغرب)")
-
-
-async def run_all_boda_tasks(atf_run_event):
-    active_boda_accounts = [acc for acc in ACCOUNTS_CONFIG if acc.get("boda_enabled", False)]
-    if not active_boda_accounts:
-        print("⚠️ BODA: لا توجد حسابات مفعلة لـ BODA.")
-        return
-
-    print("\n" + "=" * 60)
-    print("🛑 إيقاف بوت ATF مؤقتاً لبدء تشغيل بوت BODA...")
-    print("=" * 60)
-
-    atf_run_event.clear()
-    await asyncio.sleep(3)
-
-    try:
-        print(f"🚀 BODA: بدء تشغيل {len(active_boda_accounts)} حسابات...")
-        for acc in active_boda_accounts:
-            try:
-                await run_boda_tasks_for_account(acc)
-            except Exception as e:
-                print(f"❌ BODA [{acc['account_name']}] خطأ أثناء التنفيذ: {e}")
-            await asyncio.sleep(5)
-    finally:
-        print("\n" + "=" * 60)
-        print("✅ اكتملت جميع مهام BODA! استئناف عمل بوت ATF...")
-        print("=" * 60)
-        atf_run_event.set()
-
-
-async def boda_scheduler_loop(atf_run_event):
-    print("=" * 60)
-    print("🚀 جدولة Baby Yoda (BODA) Bot")
-    print(f"📍 المنطقة الزمنية: GMT+1 (المغرب)")
-    print(f"⏰ سيبدأ العمل يومياً عند الساعة {TARGET_HOUR_BODA:02d}:{TARGET_MINUTE_BODA:02d} صباحاً (بتوقيت المغرب)")
-    print("=" * 60)
-
-    while True:
-        try:
-            await wait_until_target_time_boda()
-            await run_all_boda_tasks(atf_run_event)
-
-            print("\n⏳ BODA - انتظار 5 دقائق قبل إنهاء الدورة اليومية...")
-            await pauseable_sleep(300, atf_run_event)
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            print(f"❌ خطأ غير متوقع في جدولة BODA: {type(e).__name__}: {e}")
-            print("⏳ انتظار 60 ثانية ثم إعادة المحاولة...")
-            await asyncio.sleep(60)
-
-
-# ==============================================================================
 # 🟨 المنسق الرئيسي والنظام الشامل
 # ==============================================================================
 async def main_system():
-    atf_run_event = asyncio.Event()
-    atf_run_event.set()
-
-    atf_task = asyncio.create_task(main_atf_app(atf_run_event))
-    boda_task = asyncio.create_task(boda_scheduler_loop(atf_run_event))
-
-    await asyncio.gather(atf_task, boda_task)
+    await main_atf_app()
 
 
 def run_bot():
@@ -777,7 +418,7 @@ if __name__ == "__main__":
         run_bot()
     else:
         while True:
-            print("🚀 تشغيل النظام المتكامل (ATF طوال اليوم + BODA في 3:00 صباحاً)...")
+            print("🚀 تشغيل النظام (ATF Bot)...")
             try:
                 result = subprocess.run([sys.executable, __file__, "--child"])
                 if result.returncode == 0:
