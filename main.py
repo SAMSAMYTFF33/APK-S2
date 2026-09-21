@@ -511,7 +511,7 @@ async def atf_boost_worker(session, headers, me_id, me_username, init_data, devi
                             print(f"🚀 [{me_id}] تم إرسال تسريع التعدين (BOOST) بنجاح!")
         except Exception:
             pass
-        await asyncio.sleep(round(random.uniform(9, 11), 2))
+        await asyncio.sleep(round(random.uniform(9, 10), 2))
 
 async def smart_tasks_worker(acc_config, session, me_id, me_username, init_data):
     acc_name = acc_config["account_name"]
