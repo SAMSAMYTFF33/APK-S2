@@ -1,13 +1,32 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+🎯 Comprehensive Combined Bot (MRG Claimer v8 + ATF Bot)
+نظام دمج مع حجز وقفل الموارد المؤقت لمنع أي تعارض أو تخريب بين الكودين.
+"""
+
 import time
 import asyncio
-import urllib.parse
-import aiohttp
-import random
+import json
+import re
+import ssl
 import sys
+import random
 import subprocess
-from telethon import TelegramClient
+import urllib.request
+import urllib.error
+import urllib.parse
+from datetime import datetime, timezone, timedelta
+import aiohttp
+
+from telethon import TelegramClient, functions, types
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import RequestWebViewRequest
+
+# ==============================================================================
+# 🔒 قفل المزامنة العالمي لمنع التداخل بين MRG و ATF
+# ==============================================================================
+system_task_lock = asyncio.Lock()
 
 # ==============================================================================
 # ⚙️ مفاتيح التحكم بحسابات ATF (1 = يعمل | 0 = متوقف)
@@ -17,12 +36,11 @@ ATF_ACCOUNT_2   = 0    # ATF - ousama
 ATF_ACCOUNT_3   = 0    # ATF - SKATE 
 ATF_ACCOUNT_4   = 0    # ATF - AWF 
 ATF_ACCOUNT_5   = 0    # ATF - ZAMASO 
-# ==============================================================================
 
 # ==============================================================================
-# 🟩 إعدادات الحسابات
+# 🟩 إعدادات حسابات ATF
 # ==============================================================================
-ACCOUNTS_CONFIG = [
+ACCOUNTS_CONFIG_ATF = [
     {
         "atf_enabled": ATF_ACCOUNT_1 == 1,
         "account_name": "الحساب الأول (gz)",
@@ -121,7 +139,18 @@ ACCOUNTS_CONFIG = [
 ]
 
 # ==============================================================================
-# 🟨 ثوابت وإعدادات ATF Bot
+# 🟥 إعدادات وثوابت MRG Claimer v8
+# ==============================================================================
+API_ID_MRG, API_HASH_MRG = 38197378, "1efeb1db162150616801ae759799ca97"
+SESSION_MRG = "1BJWap1sBu2EWCgdPwWR7Wv_6tcilC6U5ISSgbQGDPQKSz7YcWmZ9xOgswV5fgW5HI_I1ADtBWtdlRcSrIwprzgv7Ru7TjF7O_tRJo7Zk0CoSs6ZnEbRsbwnQ3-w1OzvechQt5LI-_i0eYgKJZqn_vw_iOxpE7qA92MRklYrM1M1EWKQESkCHMqgdPMZq7ZkAaw4Q6_o4qOHo9dasf4kDSUsqvHYAZjEMiiPOGZZYofdiVgiJF787cSABfraMbAvxZKaN6W-Ves_s8IXzIsjayYEfAQUP-wKpJzyIaAVWvVLusLltXjfG1ZLMW_iZ3nHz6nuMEPf7g3JRst5E3SlsJejFshYy2wA="
+BOT_MRG, BASE_MRG = "@mrgminerbot", "https://mrg.up.railway.app"
+SSL_CTX = ssl.create_default_context(); SSL_CTX.check_hostname = False; SSL_CTX.verify_mode = ssl.CERT_NONE
+
+G, R, Y, C, D, X = "\033[92m", "\033[91m", "\033[93m", "\033[96m", "\033[2m", "\033[0m"
+MEM_MRG = {}
+
+# ==============================================================================
+# 🟨 إعدادات وثوابت ATF Bot
 # ==============================================================================
 TARGET_BOT_USERNAME_ATF = "ATF_AIRDROP_bot"
 WEB_APP_URL_ATF = "https://atfminers.asloni.online/miner/index.html"
@@ -139,6 +168,224 @@ TASKS_ATF = [
     {"id": "twitter_retweet", "wait": 33, "name": "Twitter"},
     {"id": "telegram_react_latest", "wait": 23, "name": "React"}
 ]
+
+# ==============================================================================
+# 🛠️ أدوات MRG الأساسية
+# ==============================================================================
+def hms(s):
+    s = int(max(0, s)); h, r = divmod(s, 3600); m, x = divmod(r, 60)
+    return f"{h:02d}:{m:02d}:{x:02d}"
+
+def now(): return datetime.now(timezone.utc)
+
+def iso(s):
+    if not s: return None
+    try:
+        if s.endswith("Z"): s = s[:-1] + "+00:00"
+        d = datetime.fromisoformat(s)
+        return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d
+    except: return None
+
+def http_mrg(ep, payload):
+    for _ in range(2):
+        try:
+            req = urllib.request.Request(BASE_MRG+ep, data=json.dumps(payload).encode(),
+                headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0",
+                         "Origin":"https://app.mrgtoken.xyz"}, method="POST")
+            with urllib.request.urlopen(req, timeout=20, context=SSL_CTX) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode())
+        except: time.sleep(2)
+    return None, {}
+
+async def api_mrg(ep, p): return await asyncio.to_thread(http_mrg, ep, p)
+
+async def wv_mrg(cli, bot, url=None, sn=None, sp=None):
+    try:
+        if sn: return (await cli(functions.messages.RequestAppWebViewRequest(
+            peer=bot, app=types.InputBotAppShortName(bot, sn), platform="android", start_param=sp))).url
+        return (await cli(functions.messages.RequestWebViewRequest(
+            peer=bot, bot=bot, platform="android", url=url, start_param=sp))).url
+    except: return None
+
+async def get_init_mrg(cli, bot):
+    full = None
+    async for m in cli.iter_messages(BOT_MRG, limit=5):
+        if not (m.reply_markup and hasattr(m.reply_markup, "rows")): continue
+        for row in m.reply_markup.rows:
+            for b in row.buttons:
+                if isinstance(b, (types.KeyboardButtonWebView, types.KeyboardButtonSimpleWebView)):
+                    full = await wv_mrg(cli, bot, url=b.url); break
+                if isinstance(b, types.KeyboardButtonUrl) and not any(x in b.url for x in ["x.com","twitter.com"]):
+                    mm = re.search(r't\.me/[^/]+/([^/?#]+)', b.url)
+                    if mm and mm.group(1) not in ["start","join"]:
+                        full = await wv_mrg(cli, bot, sn=mm.group(1)); break
+            if full: break
+        if full: break
+    if not full:
+        for sn in ["app","start","game"]:
+            full = await wv_mrg(cli, bot, sn=sn)
+            if full: break
+    if not full: return None
+    raw = full.split("#tgWebAppData=")[-1].split("&tgWebAppVersion")[0] if "#tgWebAppData=" in full \
+          else full.split("tgWebAppData=")[-1].split("&tgWebAppVersion")[0]
+    return urllib.parse.unquote(raw)
+
+async def refresh_mrg(cli, bot, why=""):
+    print(f"\n{Y}🔑 [MRG] {why}{X}")
+    try: await cli.send_message(BOT_MRG, "/start"); await asyncio.sleep(2)
+    except: pass
+    d = await get_init_mrg(cli, bot)
+    print(f"{G}   ✅ MRG initData: {len(d)} حرف{X}" if d else f"{R}   ❌ فشل MRG{X}")
+    return d
+
+def cd_sec_mrg(tt):
+    tt = (tt or "").lower()
+    return 3600 if tt == "recurring_1h" else 10800 if tt.startswith("recurring") else None
+
+def remaining_mrg(task, txs):
+    cd = cd_sec_mrg(task.get("taskType"))
+    if not cd: return None, "—"
+    tid = task.get("taskId")
+
+    if tid in MEM_MRG:
+        return max(0.0, cd - (now() - MEM_MRG[tid]).total_seconds()), "جلسة"
+
+    rw = float(task.get("reward", 0))
+    best = None
+    for tx in txs:
+        if tx.get("type") != "Task Reward": continue
+        try: amt = float(tx.get("amount", 0))
+        except: continue
+        if abs(amt - rw) < 0.01:
+            d = iso(tx.get("createdAt"))
+            if d and (best is None or d > best): best = d
+    if best:
+        return max(0.0, cd - (now() - best).total_seconds()), "دقيق"
+    return None, "?"
+
+def show_mrg(tasks, done, txs):
+    print(f"\n{C}{'═'*95}{X}\n{C}📋 مهام MRG{X}\n{C}{'═'*95}{X}")
+    print(f"{'#':<3}{'ID':<28}{'العنوان':<36}{'MRG':<7}{'النوع':<10}{'المتبقي':<12}{'القرار'}")
+    print("─"*95)
+    for i, t in enumerate(tasks, 1):
+        tid = t.get("taskId"); tt = t.get("taskType","")
+        rem, q = remaining_mrg(t, txs) if tt.startswith("recurring") else (None,"—")
+        if tid in done and tt == "one_time": dec = f"{G}✓ منجزة{X}"
+        elif t.get("isPaused"): dec = f"{R}✗ متوقفة{X}"
+        elif rem and rem > 0: dec = f"{Y}⏳ {hms(rem)}{X}"
+        else: dec = f"{C}▶ سيُجرَّب{X}"
+        rs = hms(rem) if rem and rem > 0 else "—" if rem is None else f"{G}جاهز{X}"
+        ts = {"one_time":"once","recurring_1h":"1h","recurring_3h":"3h"}.get(tt, tt[:6])
+        print(f"{i:<3}{tid:<28}{(t.get('title') or '')[:34]:<36}{Y}+{t.get('reward',0):<6}{X}{ts:<10}{rs:<12}{dec}")
+    print("─"*95)
+
+async def cycle_mrg(cli, bot, init):
+    # 🔒 حجز القفل الكامل للنظام لمنع تداخل ATF أثناء عمل MRG
+    async with system_task_lock:
+        st, data = await api_mrg("/api/auth/verify", {"initData":init, "startParam":"ref"})
+        if st != 200 or not data.get("success"): return None, True
+
+        tasks, done = data.get("tasks", []), set(data.get("completedTaskIds", []))
+        txs, b0 = data.get("transactions", []), data.get("user",{}).get("inAppBalance",0)
+        show_mrg(tasks, done, txs)
+
+        try_list = []
+        for t in tasks:
+            tid, tt = t.get("taskId"), t.get("taskType","")
+            if tid in done and tt == "one_time": continue
+            if t.get("isPaused"): continue
+            if tt.startswith("recurring"):
+                rem, _ = remaining_mrg(t, txs)
+                if rem and rem > 0: continue
+            try_list.append(t)
+
+        print(f"\n{C}🎯 [MRG] محاولة {len(try_list)} مهمة{X}\n")
+        auth_fail = False
+        for i, t in enumerate(try_list, 1):
+            tid = t.get("taskId")
+            print(f"[MRG] [{i}/{len(try_list)}] {(t.get('title') or '')[:55]}")
+            st, body = await api_mrg("/api/user/claim-task", {"initData":init, "taskId":tid})
+            err = (body.get("error") or "").lower()
+
+            if st == 200 and body.get("success"):
+                MEM_MRG[tid] = now()
+                print(f"   {G}✅ +{t.get('reward',0)} MRG{X}")
+            elif "cooldown" in err:
+                rem, _ = remaining_mrg(t, txs)
+                print(f"   {Y}⏳ cooldown — متبقي {hms(rem) if rem else '?'}{X}")
+            elif "region" in err: print(f"   {R}🚫 محجوبة جغرافياً{X}")
+            elif "already" in err: print(f"   {D}✓ منجزة{X}")
+            elif st == 429: print(f"   {Y}⚠️ Rate limit{X}"); break
+            else:
+                e = (body.get("error") or "?")[:60]
+                print(f"   {R}❌ {e}{X}")
+                if "hmac" in e.lower() or "initdata" in e.lower(): auth_fail = True; break
+            if i < len(try_list): await asyncio.sleep(4)
+
+        await asyncio.sleep(2)
+        _, f = await api_mrg("/api/auth/verify", {"initData":init, "startParam":"ref"})
+        b1 = f.get("user",{}).get("inAppBalance", b0)
+        return (b0, b1, tasks, txs), auth_fail
+
+async def mrg_main_worker():
+    print(f"\n{C}{'═'*95}\n{C}🎯 MRG Claimer v8 — بدء الخدمة التزامنية{X}\n{C}{'═'*95}{X}")
+
+    cli = TelegramClient(StringSession(SESSION_MRG), API_ID_MRG, API_HASH_MRG)
+    await cli.connect()
+    if not await cli.is_user_authorized(): 
+        print(f"{R}❌ جلسة MRG غير صالحة{X}")
+        return
+
+    me = await cli.get_me()
+    print(f"{G}✅ MRG: {me.first_name} (@{me.username or me.id}){X}")
+    bot = await cli.get_input_entity(BOT_MRG)
+
+    init = await refresh_mrg(cli, bot, "استخراج أولي")
+    if not init: 
+        await cli.disconnect()
+        return
+
+    n = 0
+    try:
+        while True:
+            n += 1
+            print(f"\n{C}{'═'*95}\n{C}🔄 [MRG] دورة #{n} — {now().strftime('%H:%M:%S')} UTC{X}\n{C}{'═'*95}{X}")
+            try:
+                res, auth_fail = await cycle_mrg(cli, bot, init)
+                if auth_fail:
+                    init = await refresh_mrg(cli, bot, "فشل auth")
+                    if not init: await asyncio.sleep(30)
+                    continue
+                if res:
+                    b0, b1, tasks, txs = res
+                    d = b1 - b0
+                    print(f"\n💰 MRG Balance: {b0:.4f} → {b1:.4f} MRG  ({G if d>0 else D}{d:+.4f}{X})")
+                    earliest = None
+                    for t in tasks:
+                        if (t.get("taskType") or "").startswith("recurring"):
+                            rem, _ = remaining_mrg(t, txs)
+                            if rem and rem > 0 and (earliest is None or rem < earliest):
+                                earliest = rem
+                    wait = max(10, int(earliest) - 10) if earliest else 300
+                    reason = f"أقرب مهمة بعد {hms(earliest)}" if earliest else "فحص دوري"
+                    print(f"\n{C}⏰ [MRG] {reason}{X}")
+            except Exception as e:
+                print(f"{R}❌ [MRG Error]: {e}{X}"); wait = 60
+
+            left = wait
+            while left > 0:
+                chunk = min(left, 1200)
+                for s in range(chunk, 0, -1):
+                    await asyncio.sleep(1)
+                left -= chunk
+                if left > 60:
+                    init = await refresh_mrg(cli, bot, "تجديد دوري") or init
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await cli.disconnect()
 
 # ==============================================================================
 # 🟩 دوال وتدفق بوت ATF
@@ -159,7 +406,6 @@ async def get_init_data_atf(client, bot, acc_name):
     except Exception as e:
         print(f"❌ [{acc_name}] خطأ أثناء جلب initData: {e}")
         return None
-
 
 async def login_atf(session, init_data, tg_id, username, acc_config):
     headers = {
@@ -187,16 +433,15 @@ async def login_atf(session, init_data, tg_id, username, acc_config):
                 return data, headers
     return None, None
 
-
 async def execute_task_atf(session, headers, tg_id, init_data, device_prefix, task, is_started, acc_name):
-    now = int(time.time())
+    now_ts = int(time.time())
 
     if not is_started:
         print(f"👉 [{acc_name}] [GO] بدء مهمة: {task['name']}")
         start_payload = {
-            "tg_id": tg_id, "task_id": task["id"], "client_started_at": now,
-            "initData": init_data, "device_id": f"{device_prefix}-{tg_id}-{now}",
-            "request_id": f"rq-{now}-{tg_id}"
+            "tg_id": tg_id, "task_id": task["id"], "client_started_at": now_ts,
+            "initData": init_data, "device_id": f"{device_prefix}-{tg_id}-{now_ts}",
+            "request_id": f"rq-{now_ts}-{tg_id}"
         }
         try:
             async with session.post(START_TASK_ENDPOINT_ATF, json=start_payload, headers=headers) as resp:
@@ -232,12 +477,12 @@ async def execute_task_atf(session, headers, tg_id, init_data, device_prefix, ta
         print(f"❌ [{acc_name}] خطأ في مطالبة {task['name']}: {e}")
         return False
 
-
-async def atf_boost_worker(session, headers, me_id, me_username, init_data, lock, device_prefix):
+async def atf_boost_worker(session, headers, me_id, me_username, init_data, device_prefix):
     await asyncio.sleep(2)
     while True:
         try:
-            async with lock:
+            # استخدام القفل للتأكد من عدم الإرسال أثناء حجز النظام للبوت الآخر
+            async with system_task_lock:
                 payload = {
                     "initData": init_data, 
                     "tg_id": me_id, 
@@ -246,8 +491,7 @@ async def atf_boost_worker(session, headers, me_id, me_username, init_data, lock
                     "device_id": f"{device_prefix}-{me_id}-{int(time.time())}",
                     "display_preview": "0.0000"
                 }
-                async with session.post(START_MINE_ENDPOINT_ATF, json=payload, headers=headers):
-                    pass
+                async with session.post(START_MINE_ENDPOINT_ATF, json=payload, headers=headers): pass
                 async with session.post(ACTIVATE_BOOST_ENDPOINT_ATF, json=payload, headers=headers) as resp:
                     if resp.status == 200:
                         res = await resp.json()
@@ -257,13 +501,13 @@ async def atf_boost_worker(session, headers, me_id, me_username, init_data, lock
             pass
         await asyncio.sleep(round(random.uniform(9, 11), 2))
 
-
-async def smart_tasks_worker(acc_config, session, me_id, me_username, init_data, lock):
+async def smart_tasks_worker(acc_config, session, me_id, me_username, init_data):
     acc_name = acc_config["account_name"]
     device_prefix = acc_config["device_prefix"]
 
     while True:
-        async with lock:
+        # حجز القفل التنفيذي الشامل أثناء تنفيذ مهام ATF
+        async with system_task_lock:
             print("\n" + "="*50)
             print(f"🔍 [{acc_name}] بدء دورة تنفيذ المهام...")
 
@@ -276,8 +520,7 @@ async def smart_tasks_worker(acc_config, session, me_id, me_username, init_data,
             cooldowns = login_data.get("task_cooldowns", {})
             task_starts = login_data.get("task_starts", {})
             current_time = int(time.time())
-            
-            # قائمة لتخزين أوقات الانتظار المتبقية للمهام
+
             pending_waits = []
 
             for task in TASKS_ATF:
@@ -292,25 +535,17 @@ async def smart_tasks_worker(acc_config, session, me_id, me_username, init_data,
                     hrs, mins = divmod(mins, 60)
                     print(f"⏳ [{acc_name}] [{task['name']}]: غير جاهزة ({hrs}h {mins}m {secs}s)")
                 else:
-                    if is_started:
-                        print(f"💡 [{acc_name}] [{task['name']}]: يتطلب الضغط المباشر على [CLAIM]")
-                    else:
-                        print(f"💡 [{acc_name}] [{task['name']}]: يتطلب البدء والجمع [GO -> CLAIM]")
-
                     await execute_task_atf(session, headers, me_id, init_data, device_prefix, task, is_started, acc_name)
                     await asyncio.sleep(3)
 
-        # تحديد وقت السبات بناءً على أقرب مهمة (مع إضافة 10 ثوانٍ كفارق أمان)
         if pending_waits:
             next_wake_up = min(pending_waits) + 10
         else:
-            # إذا لم تكن هناك مهام قيد الانتظار، ننام لمدة ساعتين كحد أقصى
             next_wake_up = 7200 
 
         hrs, mins = divmod(next_wake_up // 60, 60)
         print(f"😴 [{acc_name}] تم إنهاء المهام. إراحة الحساب واستيقاظ بعد: {hrs} ساعة و {mins} دقيقة ({next_wake_up} ثانية)...")
         await asyncio.sleep(next_wake_up)
-
 
 async def account_worker_atf(acc_config):
     acc_name = acc_config["account_name"]
@@ -328,11 +563,9 @@ async def account_worker_atf(acc_config):
 
             me = await client.get_me()
             bot = await client.get_input_entity(TARGET_BOT_USERNAME_ATF)
-            lock = asyncio.Lock()
 
             init_data = await get_init_data_atf(client, bot, acc_name)
-            
-            # قطع الاتصال فوراً بعد الحصول على الرابط لمنع الـ AuthKeyDuplicatedError
+
             await client.disconnect()
             print(f"🔗 [{acc_name}] تم جلب البيانات بنجاح، وتم قطع اتصال تيليجرام للحماية.")
 
@@ -348,17 +581,14 @@ async def account_worker_atf(acc_config):
                     await asyncio.sleep(15)
                     continue
 
-                # تشغيل المهام والتسريع في الخلفية عبر HTTP
-                tasks_task = asyncio.create_task(smart_tasks_worker(acc_config, http_session, me.id, me.username, init_data, lock))
-                
+                tasks_task = asyncio.create_task(smart_tasks_worker(acc_config, http_session, me.id, me.username, init_data))
+
                 boost_task = None
                 if acc_config.get("do_boost", True):
-                    boost_task = asyncio.create_task(atf_boost_worker(http_session, headers, me.id, me.username, init_data, lock, acc_config["device_prefix"]))
+                    boost_task = asyncio.create_task(atf_boost_worker(http_session, headers, me.id, me.username, init_data, acc_config["device_prefix"]))
 
-                # انتظار دالة المهام (ستستمر بالعمل والنوم، ولن تنتهي إلا إذا فسد الرابط)
                 await tasks_task
 
-                # إذا انتهت دالة المهام، نوقف التسريع لنعيد الاتصال ونجلب رابطاً جديداً
                 if boost_task:
                     boost_task.cancel()
 
@@ -374,29 +604,27 @@ async def account_worker_atf(acc_config):
         print(f"🔄 [{acc_name}] جاري إعادة تهيئة الحساب بالكامل لجلب بيانات جديدة...")
         await asyncio.sleep(10)
 
-
 async def main_atf_app():
-    active_accounts = [acc for acc in ACCOUNTS_CONFIG if acc.get("atf_enabled", True)]
+    active_accounts = [acc for acc in ACCOUNTS_CONFIG_ATF if acc.get("atf_enabled", True)]
     if not active_accounts:
         print("⚠️ ATF: كل الحسابات متوقفة")
         return
 
     print(f"🚀 ATF: تشغيل {len(active_accounts)} حسابات بنظام التحقق والدقة الذكية...")
-    results = await asyncio.gather(
+    await asyncio.gather(
         *(account_worker_atf(acc) for acc in active_accounts),
         return_exceptions=True
     )
-    for acc, result in zip(active_accounts, results):
-        if isinstance(result, Exception):
-            print(f"🛑 [{acc['account_name']}] خطأ غير متوقع في ATF: {type(result).__name__}")
-
 
 # ==============================================================================
-# 🟨 المنسق الرئيسي والنظام الشامل
+# 🟨 المنسق الرئيسي والنظام الشامل المدمج
 # ==============================================================================
 async def main_system():
-    await main_atf_app()
-
+    print("⚡ تشغيل النظام الشامل (MRG Claimer + ATF Bot)...")
+    await asyncio.gather(
+        mrg_main_worker(),
+        main_atf_app()
+    )
 
 def run_bot():
     while True:
@@ -408,13 +636,12 @@ def run_bot():
             print(f"⚠️ خطأ عام في النظام الرئيسي: {type(e).__name__}")
             time.sleep(5)
 
-
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--child":
         run_bot()
     else:
         while True:
-            print("🚀 تشغيل النظام (ATF Bot)...")
+            print("🚀 تشغيل المراقب للنظام الشامل...")
             try:
                 result = subprocess.run([sys.executable, __file__, "--child"])
                 if result.returncode == 0:
