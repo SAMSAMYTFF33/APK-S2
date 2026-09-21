@@ -3,6 +3,7 @@
 """
 🎯 Comprehensive Combined Bot (MRG Claimer v8 + ATF Bot)
 نظام دمج مع حجز وقفل الموارد المؤقت لمنع أي تعارض أو تخريب بين الكودين.
+تم تحديث نظام MRG ليتوافق مع المنطق الذكي والسبات العميق لبوت ATF.
 """
 
 import time
@@ -285,7 +286,8 @@ async def cycle_mrg(cli, bot, init):
     # 🔒 حجز القفل الكامل للنظام لمنع تداخل ATF أثناء عمل MRG
     async with system_task_lock:
         st, data = await api_mrg("/api/auth/verify", {"initData":init, "startParam":"ref"})
-        if st != 200 or not data.get("success"): return None, True
+        if st != 200 or not data.get("success"): 
+            return None, True # True يعني فشل في المصادقة (انتهت الصلاحية)
 
         tasks, done = data.get("tasks", []), set(data.get("completedTaskIds", []))
         txs, b0 = data.get("transactions", []), data.get("user",{}).get("inAppBalance",0)
@@ -301,7 +303,8 @@ async def cycle_mrg(cli, bot, init):
                 if rem and rem > 0: continue
             try_list.append(t)
 
-        print(f"\n{C}🎯 [MRG] محاولة {len(try_list)} مهمة{X}\n")
+        if try_list:
+            print(f"\n{C}🎯 [MRG] محاولة {len(try_list)} مهمة{X}\n")
         auth_fail = False
         for i, t in enumerate(try_list, 1):
             tid = t.get("taskId")
@@ -330,7 +333,7 @@ async def cycle_mrg(cli, bot, init):
         return (b0, b1, tasks, txs), auth_fail
 
 async def mrg_main_worker():
-    print(f"\n{C}{'═'*95}\n{C}🎯 MRG Claimer v8 — بدء الخدمة التزامنية{X}\n{C}{'═'*95}{X}")
+    print(f"\n{C}{'═'*95}\n{C}🎯 MRG Claimer v8 — بدء الخدمة الذكية (مزامنة الموارد){X}\n{C}{'═'*95}{X}")
 
     cli = TelegramClient(StringSession(SESSION_MRG), API_ID_MRG, API_HASH_MRG)
     await cli.connect()
@@ -342,7 +345,7 @@ async def mrg_main_worker():
     print(f"{G}✅ MRG: {me.first_name} (@{me.username or me.id}){X}")
     bot = await cli.get_input_entity(BOT_MRG)
 
-    init = await refresh_mrg(cli, bot, "استخراج أولي")
+    init = await refresh_mrg(cli, bot, "استخراج أولي (يتم طلبه مرة واحدة)")
     if not init: 
         await cli.disconnect()
         return
@@ -354,34 +357,43 @@ async def mrg_main_worker():
             print(f"\n{C}{'═'*95}\n{C}🔄 [MRG] دورة #{n} — {now().strftime('%H:%M:%S')} UTC{X}\n{C}{'═'*95}{X}")
             try:
                 res, auth_fail = await cycle_mrg(cli, bot, init)
-                if auth_fail:
-                    init = await refresh_mrg(cli, bot, "فشل auth")
-                    if not init: await asyncio.sleep(30)
+                
+                # إذا انتهت صلاحية التوكن، نجدده ونبدأ فوراً من جديد
+                if auth_fail or res is None:
+                    print(f"⚠️ [MRG] الجلسة انتهت صلاحيتها، سيتم تجديد البيانات...")
+                    init = await refresh_mrg(cli, bot, "تجديد بسبب انتهاء الصلاحية")
+                    if not init: 
+                        await asyncio.sleep(30)
                     continue
+
                 if res:
                     b0, b1, tasks, txs = res
                     d = b1 - b0
                     print(f"\n💰 MRG Balance: {b0:.4f} → {b1:.4f} MRG  ({G if d>0 else D}{d:+.4f}{X})")
+                    
+                    # حساب المهلة الأقرب بدقة
                     earliest = None
                     for t in tasks:
                         if (t.get("taskType") or "").startswith("recurring"):
                             rem, _ = remaining_mrg(t, txs)
                             if rem and rem > 0 and (earliest is None or rem < earliest):
                                 earliest = rem
-                    wait = max(10, int(earliest) - 10) if earliest else 300
-                    reason = f"أقرب مهمة بعد {hms(earliest)}" if earliest else "فحص دوري"
-                    print(f"\n{C}⏰ [MRG] {reason}{X}")
-            except Exception as e:
-                print(f"{R}❌ [MRG Error]: {e}{X}"); wait = 60
+                    
+                    # إذا كان هناك مهلة نأخذها، وإلا ننام ساعة كحد أقصى للتحقق. (ونضيف 10 ثواني كضمان)
+                    wait = int(earliest) + 10 if earliest else 3600
+                    
+                    hrs, mins = divmod(wait, 3600)
+                    mins = mins // 60
+                    secs = wait % 60
+                    
+                    # الدخول في سبات مثل بوت ATF تماماً، مما يحرر المعالج للبوت الآخر 
+                    print(f"😴 [MRG] تم إنهاء المهام. إراحة الحساب واستيقاظ بعد: {int(hrs)} ساعة و {int(mins)} دقيقة ({wait} ثانية)...")
+                    await asyncio.sleep(wait)
 
-            left = wait
-            while left > 0:
-                chunk = min(left, 1200)
-                for s in range(chunk, 0, -1):
-                    await asyncio.sleep(1)
-                left -= chunk
-                if left > 60:
-                    init = await refresh_mrg(cli, bot, "تجديد دوري") or init
+            except Exception as e:
+                print(f"{R}❌ [MRG Error]: {e}{X}")
+                await asyncio.sleep(60)
+
     except asyncio.CancelledError:
         pass
     finally:
