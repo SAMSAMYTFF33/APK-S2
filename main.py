@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎯 Comprehensive Combined Bot (MRG Claimer v8 + ATF Bot)
+🎯 Comprehensive Combined Bo.t (MRG Claimer v8 + ATF Bot)
 تمت ترقية الكود بنظام (Connect ➔ Fetch ➔ Disconnect) لمنع أخطاء 409 وتعارض الجلسات بالكامل.
 """
 
