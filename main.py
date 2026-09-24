@@ -12,13 +12,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # 1. الإعدادات والبيانات (Configuration)
 # ==========================================
 
-# 🔴 للتحكم في تشغيل الحساب لكلا البوتين: 1 = تشغيل | 0 = إيقاف
-ACCOUNT_1_ENABLED = 0 
+# 🔴 للتحكم العام في الحساب (1 = تشغيل الحساب ككل | 0 = إيقاف الحساب بالكامل)
+ACCOUNT_1_ENABLED = 1 
 
 ACCOUNTS = [
     {
         "enabled": ACCOUNT_1_ENABLED,
         "name": "gz",
+        
+        # 🔴 أزرار التحكم المستقلة لكل بوت (True = تشغيل | False = إيقاف)
+        "enable_atf": False,   # تشغيل بوت ATF
+        "enable_mrg": True,  # إيقاف بوت MRG (حسب طلبك)
+        
         "do_boost": True,
         "api_id": 38197378,
         "api_hash": "1efeb1db162150616801ae759799ca97",
@@ -258,6 +263,15 @@ async def smart_tasks_worker_mrg(session: aiohttp.ClientSession, account: dict, 
 
 async def master_account_worker(account: dict):
     """مدير الحساب الموحد: يضمن تشغيل الحساب على البوتين بنفس الاتصال وبدون تعارض AuthKeyDuplicatedError"""
+    
+    # التأكد من أن على الأقل بوت واحد مفعل لهذا الحساب، وإلا نتوقف فوراً لتوفير الموارد
+    enable_atf = account.get("enable_atf", True)
+    enable_mrg = account.get("enable_mrg", True)
+    
+    if not enable_atf and not enable_mrg:
+        logging.info(f"[*] Both ATF and MRG are DISABLED for account {account['name']}. Stopping worker.")
+        return
+
     client = TelegramClient(StringSession(account['session_string']), account['api_id'], account['api_hash'])
     tg_lock = asyncio.Lock()
     
@@ -271,11 +285,22 @@ async def master_account_worker(account: dict):
         
         timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout, connector=aiohttp.TCPConnector(ssl=ssl_context)) as http_session:
-            # تشغيل عمال ATF و MRG بالتوازي الكامل ومشاركة نفس الاتصال بسلام
-            task_atf = asyncio.create_task(smart_tasks_worker_atf(http_session, account, client, tg_lock))
-            task_mrg = asyncio.create_task(smart_tasks_worker_mrg(http_session, account, client, tg_lock))
             
-            await asyncio.gather(task_atf, task_mrg)
+            active_tasks = []
+            
+            # تشغيل عامل ATF فقط إذا كان مفعلاً
+            if enable_atf:
+                logging.info(f"[*] Starting ATF worker for {account['name']}...")
+                active_tasks.append(asyncio.create_task(smart_tasks_worker_atf(http_session, account, client, tg_lock)))
+            
+            # تشغيل عامل MRG فقط إذا كان مفعلاً
+            if enable_mrg:
+                logging.info(f"[*] Starting MRG worker for {account['name']}...")
+                active_tasks.append(asyncio.create_task(smart_tasks_worker_mrg(http_session, account, client, tg_lock)))
+            
+            # جمع العمال النشطة وتشغيلها بسلام
+            if active_tasks:
+                await asyncio.gather(*active_tasks)
 
     except Exception as e:
         logging.critical(f"[-] Master worker error for {account['name']}: {e}")
@@ -297,7 +322,7 @@ async def main():
             logging.info(f"[*] Initializing MASTER worker for account: {acc['name']}")
             tasks.append(asyncio.create_task(master_account_worker(acc)))
         else:
-            logging.info(f"[-] Account {acc['name']} is (DISABLED) skipping...")
+            logging.info(f"[-] Account {acc['name']} is (DISABLED globally) skipping...")
 
     if not tasks:
         logging.warning("[-] No active accounts configured. Exiting.")
