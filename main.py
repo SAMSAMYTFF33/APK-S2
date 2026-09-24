@@ -12,17 +12,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # 1. الإعدادات والبيانات (Configuration)
 # ==========================================
 
-# 🔴 للتحكم العام في الحساب (1 = تشغيل الحساب ككل | 0 = إيقاف الحساب بالكامل)
-ACCOUNT_1_ENABLED = 1 
-
 ACCOUNTS = [
     {
-        "enabled": ACCOUNT_1_ENABLED,
         "name": "gz",
         
-        # 🔴 أزرار التحكم المستقلة لكل بوت (True = تشغيل | False = إيقاف)
-        "enable_atf": False,   # تشغيل بوت ATF
-        "enable_mrg": True,  # إيقاف بوت MRG (حسب طلبك)
+        # 🔴 أزرار التحكم المستقلة لكل بوت (1 = تشغيل | 0 = إيقاف)
+        "enable_atf": 0,   # 1 يعني True
+        "enable_mrg": 0,   # 0 يعني False
         
         "do_boost": True,
         "api_id": 38197378,
@@ -61,7 +57,6 @@ ssl_context.verify_mode = ssl.CERT_NONE
 # ==========================================
 
 def get_headers(account: dict, token: str = None) -> dict:
-    """بناء الترويسات مع الدمج الكامل للبصمة"""
     headers = {
         "User-Agent": account['user_agent'],
         "Content-Type": "application/json",
@@ -74,17 +69,10 @@ def get_headers(account: dict, token: str = None) -> dict:
     return headers
 
 async def fetch_telegram_init_data(client: TelegramClient, bot_username: str, tg_lock: asyncio.Lock) -> str:
-    """جلب initData طازج وآمن من تيليجرام باستخدام قفل التزامن يمنع تعارض الجلسة"""
     async with tg_lock:
         try:
             if not client.is_connected():
                 await client.connect()
-            
-            # يمكنك وضع كود استخراج WebView الحقيقي الخاص بك هنا
-            # مثال:
-            # web_view = await client(RequestWebViewRequest(...))
-            # return web_view_url_parsed
-            
             logging.info(f"[+] Fresh initData generated for bot: {bot_username}")
             return f"dummy_init_data_for_{bot_username}"
         except Exception as e:
@@ -93,11 +81,10 @@ async def fetch_telegram_init_data(client: TelegramClient, bot_username: str, tg
 
 
 # ==========================================
-# 3. مدير جلسة ATF لمنع تسريب المهام (Session Manager)
+# 3. مدير جلسة ATF (Session Manager)
 # ==========================================
 
 class ATFSessionManager:
-    """يدير التوكن وعامل البوست لضمان عدم تكرار العمال واستنزاف الموارد"""
     def __init__(self, account: dict):
         self.account = account
         self.token = None
@@ -105,18 +92,15 @@ class ATFSessionManager:
 
     def update_token(self, new_token: str, session: aiohttp.ClientSession):
         self.token = new_token
-        # إلغاء مهمة البوست القديمة إن وجدت لمنع تكرار العمال
         if self.boost_task and not self.boost_task.done():
             self.boost_task.cancel()
             logging.info(f"[*] ATF ({self.account['name']}): Old boost task cancelled.")
         
-        # إطلاق عامل بوست جديد بالتوكن المحدث فقط إذا كان الحساب يملك توكن مفعل
         if self.account.get("do_boost", True) and new_token:
             self.boost_task = asyncio.create_task(self._boost_loop(session))
             logging.info(f"[+] ATF ({self.account['name']}): New boost task spawned.")
 
     async def _boost_loop(self, session: aiohttp.ClientSession):
-        """عامل التعدين والسحب الذي ينطلق كل 10 ثوانٍ"""
         headers = get_headers(self.account, self.token)
         while True:
             try:
@@ -133,7 +117,7 @@ class ATFSessionManager:
             except Exception as e:
                 logging.error(f"[-] ATF ({self.account['name']}): Boost network error: {e}")
             
-            await asyncio.sleep(10) # 🔴 التكرار كل 10 ثوانٍ كما طلبت
+            await asyncio.sleep(10)
 
 
 # ==========================================
@@ -168,7 +152,7 @@ async def execute_task_atf(session: aiohttp.ClientSession, account: dict, token:
                     logging.info(f"[+] ATF ({account['name']}): Task {task_id} started.")
                 elif resp.status == 401:
                     logging.warning(f"[-] ATF ({account['name']}): Task {task_id} failed: Unauthorized (401).")
-                    return False # التوكن غير صالح
+                    return False
                 else:
                     logging.warning(f"[-] ATF ({account['name']}): Task {task_id} status {resp.status}")
         except Exception as e:
@@ -179,12 +163,10 @@ async def execute_task_atf(session: aiohttp.ClientSession, account: dict, token:
     return True
 
 async def smart_tasks_worker_atf(session: aiohttp.ClientSession, account: dict, tg_client: TelegramClient, tg_lock: asyncio.Lock):
-    """عامل ATF الذكي بالدورات الفترية (كل ساعتين)"""
     manager = ATFSessionManager(account)
     cached_init_data = None
     
     while True:
-        # 1. تسجيل الدخول وتوليد التوكن إذا لم يكن موجواً
         if not manager.token:
             if not cached_init_data:
                 cached_init_data = await fetch_telegram_init_data(tg_client, "atf_bot_username", tg_lock)
@@ -202,7 +184,6 @@ async def smart_tasks_worker_atf(session: aiohttp.ClientSession, account: dict, 
                 await asyncio.sleep(60)
                 continue
 
-        # 2. فحص وتنفيذ المهام
         headers = get_headers(account, manager.token)
         try:
             async with session.get(TASKS_ENDPOINT_ATF, headers=headers) as resp:
@@ -233,7 +214,7 @@ async def smart_tasks_worker_atf(session: aiohttp.ClientSession, account: dict, 
             logging.error(f"[-] ATF ({account['name']}): Fetch tasks error: {e}")
             
         logging.info(f"[*] ATF ({account['name']}): Cycle complete. Sleeping for 2 hours (7200s)...")
-        await asyncio.sleep(7200) # 🔴 دورة مهام ATF كل ساعتين
+        await asyncio.sleep(7200)
 
 
 # ==========================================
@@ -241,7 +222,6 @@ async def smart_tasks_worker_atf(session: aiohttp.ClientSession, account: dict, 
 # ==========================================
 
 async def smart_tasks_worker_mrg(session: aiohttp.ClientSession, account: dict, tg_client: TelegramClient, tg_lock: asyncio.Lock):
-    """عامل MRG المستقل تماماً (كل 3 ساعات)"""
     cached_init_data = None
     
     while True:
@@ -250,11 +230,10 @@ async def smart_tasks_worker_mrg(session: aiohttp.ClientSession, account: dict, 
             
         logging.info(f"[*] MRG ({account['name']}): Starting task execution cycle...")
         
-        # يمكنك إضافة منطق طلبات MRG هنا كـ HTTP GET/POST عبر session
-        # ...
-
+        # مكان وضع طلبات MRG هنا
+        
         logging.info(f"[*] MRG ({account['name']}): Cycle complete. Sleeping for 3 hours (10800s)...")
-        await asyncio.sleep(10800) # 🔴 دورة مهام MRG كل 3 ساعات
+        await asyncio.sleep(10800)
 
 
 # ==========================================
@@ -262,15 +241,15 @@ async def smart_tasks_worker_mrg(session: aiohttp.ClientSession, account: dict, 
 # ==========================================
 
 async def master_account_worker(account: dict):
-    """مدير الحساب الموحد: يضمن تشغيل الحساب على البوتين بنفس الاتصال وبدون تعارض AuthKeyDuplicatedError"""
+    # تحويل القيم لضمان أنها منطقية (0 تعني False، و 1 تعني True)
+    enable_atf = bool(account.get("enable_atf", 1))
+    enable_mrg = bool(account.get("enable_mrg", 1))
     
-    # التأكد من أن على الأقل بوت واحد مفعل لهذا الحساب، وإلا نتوقف فوراً لتوفير الموارد
-    enable_atf = account.get("enable_atf", True)
-    enable_mrg = account.get("enable_mrg", True)
-    
+    # 🔴 إذا كان كلا البوتين = 0، لن يتوقف الكود، بل سيدخل في حالة خمول دائم للحفاظ على استمرارية تشغيل السكريبت
     if not enable_atf and not enable_mrg:
-        logging.info(f"[*] Both ATF and MRG are DISABLED for account {account['name']}. Stopping worker.")
-        return
+        logging.info(f"[*] Both ATF & MRG are 0 for account {account['name']}. Standing by in sleep mode (Code will NOT stop)...")
+        while True:
+            await asyncio.sleep(86400) # ينام لمدة يوم ويعيد اللوب دون إغلاق البرنامج
 
     client = TelegramClient(StringSession(account['session_string']), account['api_id'], account['api_hash'])
     tg_lock = asyncio.Lock()
@@ -288,17 +267,14 @@ async def master_account_worker(account: dict):
             
             active_tasks = []
             
-            # تشغيل عامل ATF فقط إذا كان مفعلاً
             if enable_atf:
                 logging.info(f"[*] Starting ATF worker for {account['name']}...")
                 active_tasks.append(asyncio.create_task(smart_tasks_worker_atf(http_session, account, client, tg_lock)))
             
-            # تشغيل عامل MRG فقط إذا كان مفعلاً
             if enable_mrg:
                 logging.info(f"[*] Starting MRG worker for {account['name']}...")
                 active_tasks.append(asyncio.create_task(smart_tasks_worker_mrg(http_session, account, client, tg_lock)))
             
-            # جمع العمال النشطة وتشغيلها بسلام
             if active_tasks:
                 await asyncio.gather(*active_tasks)
 
@@ -318,14 +294,11 @@ async def main():
     tasks = []
     
     for acc in ACCOUNTS:
-        if acc.get('enabled') == 1:
-            logging.info(f"[*] Initializing MASTER worker for account: {acc['name']}")
-            tasks.append(asyncio.create_task(master_account_worker(acc)))
-        else:
-            logging.info(f"[-] Account {acc['name']} is (DISABLED globally) skipping...")
+        logging.info(f"[*] Initializing MASTER worker for account: {acc['name']}")
+        tasks.append(asyncio.create_task(master_account_worker(acc)))
 
     if not tasks:
-        logging.warning("[-] No active accounts configured. Exiting.")
+        logging.warning("[-] No accounts configured. Exiting.")
         return
 
     logging.info("[*] System running with zero leaks and safe concurrency...")
