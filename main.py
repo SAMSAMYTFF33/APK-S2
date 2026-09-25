@@ -1,3 +1,4 @@
+import os
 import time
 import asyncio
 import json
@@ -17,11 +18,12 @@ from telethon.tl.functions.messages import RequestWebViewRequest
 
 # ==============================================================================
 # 🟥 إعدادات وثوابت MRG Claimer
-# ====================================================================
-API_ID_MRG = 38197378
-API_HASH_MRG = "1efeb1db162150616801ae759799ca97"
-# ضع كود الجلسة الخاص بك هنا
-SESSION_MRG = "1BJWap1sBu6Y6qH3gcsWqzBGu_tWsiNyuUocMj7ip_0FWRHSxrNm9pl2O3KvFmSN6lzHHHj8XbRn0Hopz1HQkuY8YfP5WlDJQv65V5LxGEanaSOIua2SQhwJshLQVqFD7-AjUkD_4x2aPjNIzwwDpoB6pn4E-_x6j2XggwD4lj9XsN05QF3l9WKG1hNTbJOcajhmN_rSUh3IIe8maH_s9G1Ax5lNRDbJQXYmNCM83jWO7MVmvCzcqXQC3PvYr3Q_sfYjVweu6XIePvX7qU-GCavgWXYgc-6len8pLUSh_doV9n4nYCx4gF3hHwQNWLbBj2m_6wVSDX-Yq0gQSO1s-mECAJJpUcsA="
+# ==============================================================================
+API_ID_MRG = int(os.environ.get("API_ID_MRG", 38197378))
+API_HASH_MRG = os.environ.get("API_HASH_MRG", "1efeb1db162150616801ae759799ca97")
+
+# قراءة الجلسة حصراً من بيئة المتغيرات دون تضمين قيمتها في الكود
+SESSION_MRG = os.environ.get("SESSION_MRG")
 
 BOT_MRG = "@mrgminerbot"
 BASE_MRG = "https://mrg.up.railway.app"
@@ -78,12 +80,12 @@ async def wv_mrg(cli, bot, url=None, sn=None, sp=None):
 
 async def get_init_mrg(cli, bot):
     full = None
-    
+
     # 1. المحاولة الأولى: طلب التطبيق مباشرة بصمت عبر الأسماء الشائعة (الأكثر أماناً)
     for sn in ["app", "start", "game"]:
         full = await wv_mrg(cli, bot, sn=sn)
         if full: break
-        
+
     # 2. المحاولة الثانية: البحث في الرسائل القديمة إذا لم ينجح الطلب المباشر
     if not full:
         async for m in cli.iter_messages(BOT_MRG, limit=5):
@@ -98,30 +100,37 @@ async def get_init_mrg(cli, bot):
                             full = await wv_mrg(cli, bot, sn=mm.group(1)); break
                 if full: break
             if full: break
-            
+
     if not full: return None
-    
+
     # استخراج initData الصحيح
     raw = full.split("#tgWebAppData=")[-1].split("&tgWebAppVersion")[0] if "#tgWebAppData=" in full \
           else full.split("tgWebAppData=")[-1].split("&tgWebAppVersion")[0]
     return urllib.parse.unquote(raw)
 
 async def get_mrg_data_and_disconnect():
+    global SESSION_MRG
+    SESSION_MRG = os.environ.get("SESSION_MRG")
+    
+    if not SESSION_MRG:
+        print(f"{Y}⚠️ لم يتم العثور على متغير البيئة SESSION_MRG. السكربت يدخل في سبات لمدة 5 دقائق...{X}")
+        return None, None
+
     cli = TelegramClient(StringSession(SESSION_MRG), API_ID_MRG, API_HASH_MRG)
     try:
         await cli.connect()
         if not await cli.is_user_authorized():
             print(f"{R}❌ الجلسة غير مصرحة. يرجى استخراج كود Session جديد.{X}")
             return None, None
-            
+
         me = await cli.get_me()
         bot = await cli.get_input_entity(BOT_MRG)
-        
+
         # ⚠️ تم حذف إرسال /start لتفادي السبام وحماية الحساب
-        
+
         init_data = await get_init_mrg(cli, bot)
         return me, init_data
-        
+
     except errors.FloodWaitError as e:
         print(f"{R}⚠️ تيليجرام يطلب الانتظار (FloodWait): {e.seconds} ثانية. حمايةً لحسابك، سيتم الانتظار.{X}")
         await asyncio.sleep(e.seconds + 5)
@@ -215,7 +224,7 @@ async def cycle_mrg(init):
             e = (body.get("error") or "?")[:60]
             print(f"   {R}❌ {e}{X}")
             if "hmac" in e.lower() or "initdata" in e.lower(): auth_fail = True; break
-        
+
         # انتظار عشوائي بين المهام كالمستخدم البشري
         if i < len(try_list): await asyncio.sleep(random.uniform(3, 6))
 
@@ -229,8 +238,8 @@ async def mrg_main_worker():
 
     me, init = await get_mrg_data_and_disconnect()
     if not init: 
-        print(f"{R}❌ فشل جلب البيانات الأولية. سيتم إعادة المحاولة لاحقاً.{X}")
-        await asyncio.sleep(60) # راحة قصيرة قبل المحاولة إذا فشل
+        print(f"{R}❌ فشل جلب البيانات الأولية أو عدم وجود الجلسة. يدخل السكربت في سبات لمدة 5 دقائق...{X}")
+        await asyncio.sleep(300) # سبات لمدة 5 دقائق
     else:
         print(f"{G}✅ الحساب: {me.first_name} (@{me.username or me.id}) - تم الاستخراج بسلام{X}")
         print(f"{G}   ✅ تم قطع الاتصال بتيليجرام بنجاح لحماية الجلسة{X}")
@@ -240,12 +249,12 @@ async def mrg_main_worker():
         while True:
             n += 1
             print(f"\n{C}{'═'*95}\n{C}🔄 [دورة #{n}] — {now().strftime('%H:%M:%S')} UTC{X}\n{C}{'═'*95}{X}")
-            
+
             if not init:
                 me, init = await get_mrg_data_and_disconnect()
                 if not init:
-                    print(f"⚠️ فشل الاتصال بتيليجرام. ننتظر 5 دقائق للحماية...")
-                    await asyncio.sleep(300)
+                    print(f"⚠️ يتعذر الاتصال (عدم وجود الجلسة أو تعذر الاتصال بتيليجرام). يدخل السكربت في السبات لمدة 5 دقائق...")
+                    await asyncio.sleep(300) # سبات لمدة 5 دقائق
                     continue
 
             try:
@@ -254,7 +263,7 @@ async def mrg_main_worker():
                 if auth_fail or res is None:
                     print(f"{Y}⚠️ انتهت صلاحية الجلسة في خوادم MRG.{X}")
                     print(f"{Y}🛡️ حماية للحساب: ننتظر 5 دقائق قبل فتح اتصال جديد مع تيليجرام...{X}")
-                    await asyncio.sleep(300) # تأخير ذكي يمنع سبام تيليجرام
+                    await asyncio.sleep(300) # تأخير ذكي يمنع سبام تيليجرام (5 دقائق)
                     init = None # تصفير المتغير لجلبه في الدورة القادمة
                     continue
 
@@ -275,7 +284,7 @@ async def mrg_main_worker():
                     hrs, mins = divmod(wait, 3600)
                     mins = mins // 60
 
-                    print(f"😴 [النوم الذكي] إراحة السكربت والاستيقاظ بعد: {int(hrs)} ساعة و {int(mins)} دقيقة ({wait} ثانية)...")
+                    print(f"😴 [النوم الذكي] إراحة السكربت واستيقاظه بعد: {int(hrs)} ساعة و {int(mins)} دقيقة ({wait} ثانية)...")
                     await asyncio.sleep(wait)
 
             except Exception as e:
