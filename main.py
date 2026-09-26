@@ -111,7 +111,7 @@ async def get_init_mrg(cli, bot):
 async def get_mrg_data_and_disconnect():
     global SESSION_MRG
     SESSION_MRG = os.environ.get("SESSION_MRG")
-    
+
     if not SESSION_MRG:
         print(f"{Y}⚠️ لم يتم العثور على متغير البيئة SESSION_MRG. السكربت يدخل في سبات لمدة 5 دقائق...{X}")
         return None, None
@@ -149,7 +149,7 @@ def cd_sec_mrg(tt):
 def remaining_mrg(task, txs):
     cd = cd_sec_mrg(task.get("taskType"))
     if not cd: return None, "—"
-    tid = task.get("taskId")
+    tid = task.get("taskId") or task.get("id") or task.get("_id")
 
     if tid in MEM_MRG:
         return max(0.0, cd - (now() - MEM_MRG[tid]).total_seconds()), "جلسة"
@@ -172,15 +172,19 @@ def show_mrg(tasks, done, txs):
     print(f"{'#':<3}{'ID':<28}{'العنوان':<36}{'MRG':<7}{'النوع':<10}{'المتبقي':<12}{'القرار'}")
     print("─"*95)
     for i, t in enumerate(tasks, 1):
-        tid = t.get("taskId"); tt = t.get("taskType","")
+        tid = str(t.get("taskId") or t.get("id") or t.get("_id"))
+        tt = t.get("taskType") or t.get("type") or ""
         rem, q = remaining_mrg(t, txs) if tt.startswith("recurring") else (None,"—")
-        if tid in done and tt == "one_time": dec = f"{G}✓ منجزة{X}"
-        elif t.get("isPaused"): dec = f"{R}✗ متوقفة{X}"
+        is_completed = tid in done or t.get("isCompleted") or t.get("status") == "COMPLETED"
+        
+        if is_completed and (tt == "one_time" or not tt.startswith("recurring")): dec = f"{G}✓ منجزة{X}"
+        elif t.get("isPaused") or t.get("status") == "PAUSED": dec = f"{R}✗ متوقفة{X}"
         elif rem and rem > 0: dec = f"{Y}⏳ {hms(rem)}{X}"
         else: dec = f"{C}▶ سيُجرَّب{X}"
+        
         rs = hms(rem) if rem and rem > 0 else "—" if rem is None else f"{G}جاهز{X}"
         ts = {"one_time":"once","recurring_1h":"1h","recurring_3h":"3h"}.get(tt, tt[:6])
-        print(f"{i:<3}{tid:<28}{(t.get('title') or '')[:34]:<36}{Y}+{t.get('reward',0):<6}{X}{ts:<10}{rs:<12}{dec}")
+        print(f"{i:<3}{tid:<28}{(t.get('title') or t.get('name') or '')[:34]:<36}{Y}+{t.get('reward',0):<6}{X}{ts:<10}{rs:<12}{dec}")
     print("─"*95)
 
 async def cycle_mrg(init):
@@ -188,37 +192,69 @@ async def cycle_mrg(init):
     if st != 200 or not data.get("success"): 
         return None, True 
 
-    tasks, done = data.get("tasks", []), set(data.get("completedTaskIds", []))
-    txs, b0 = data.get("transactions", []), data.get("user",{}).get("inAppBalance",0)
+    # استخراج كافة أنواع المهام المتاحة وقوائم الإنجاز الشاملة من الاستجابة
+    tasks = data.get("tasks") or data.get("allTasks") or []
+    
+    # دمج المعرفات من جميع مصادر المنجزات الممكنة
+    raw_done = data.get("completedTaskIds") or []
+    user_tasks = data.get("userTasks") or data.get("completedTasks") or []
+    
+    done = {str(x) for x in raw_done}
+    for ut in user_tasks:
+        if isinstance(ut, dict):
+            ut_id = ut.get("taskId") or ut.get("id") or ut.get("_id")
+            if ut_id: done.add(str(ut_id))
+        elif isinstance(ut, (str, int)):
+            done.add(str(ut))
+
+    txs = data.get("transactions") or []
+    b0 = data.get("user",{}).get("inAppBalance", 0)
+    
     show_mrg(tasks, done, txs)
 
     try_list = []
     for t in tasks:
-        tid, tt = t.get("taskId"), t.get("taskType","")
-        if tid in done and tt == "one_time": continue
-        if t.get("isPaused"): continue
+        tid = str(t.get("taskId") or t.get("id") or t.get("_id"))
+        tt = t.get("taskType") or t.get("type") or ""
+        
+        # تخطي المكتملة مسبقاً إذا كانت مهام مرة واحدة
+        if (tid in done or t.get("isCompleted") or t.get("status") == "COMPLETED") and not tt.startswith("recurring"):
+            continue
+            
+        if t.get("isPaused") or t.get("status") == "PAUSED": 
+            continue
+            
         if tt.startswith("recurring"):
             rem, _ = remaining_mrg(t, txs)
             if rem and rem > 0: continue
+            
         try_list.append(t)
 
     if try_list:
         print(f"\n{C}🎯 [MRG] محاولة {len(try_list)} مهمة{X}\n")
+    else:
+        print(f"\n{Y}ℹ️ لا يوجد مهام جديدة جاهزة للتنفيذ حالياً.{X}\n")
+
     auth_fail = False
     for i, t in enumerate(try_list, 1):
-        tid = t.get("taskId")
-        print(f"[MRG] [{i}/{len(try_list)}] {(t.get('title') or '')[:55]}")
+        tid = str(t.get("taskId") or t.get("id") or t.get("_id"))
+        title = t.get('title') or t.get('name') or ''
+        print(f"[MRG] [{i}/{len(try_list)}] {title[:55]}")
+        
         st, body = await api_mrg("/api/user/claim-task", {"initData":init, "taskId":tid})
         err = (body.get("error") or "").lower()
 
         if st == 200 and body.get("success"):
             MEM_MRG[tid] = now()
+            done.add(tid)
             print(f"   {G}✅ +{t.get('reward',0)} MRG{X}")
         elif "cooldown" in err:
             rem, _ = remaining_mrg(t, txs)
             print(f"   {Y}⏳ cooldown — متبقي {hms(rem) if rem else '?'}{X}")
         elif "region" in err: print(f"   {R}🚫 محجوبة جغرافياً{X}")
-        elif "already" in err: print(f"   {D}✓ منجزة{X}")
+        elif "already" in err: 
+            done.add(tid)
+            print(f"   {D}✓ منجزة{X}")
         elif st == 429: print(f"   {Y}⚠️ Rate limit{X}"); break
         else:
             e = (body.get("error") or "?")[:60]
@@ -230,7 +266,7 @@ async def cycle_mrg(init):
 
     await asyncio.sleep(2)
     _, f = await api_mrg("/api/auth/verify", {"initData":init, "startParam":"ref"})
-    b1 = f.get("user",{}).get("inAppBalance", b0)
+    b1 = f.get("user",{}).get("inAppBalance", b0) if f else b0
     return (b0, b1, tasks, txs), auth_fail
 
 async def mrg_main_worker():
@@ -274,7 +310,8 @@ async def mrg_main_worker():
 
                     earliest = None
                     for t in tasks:
-                        if (t.get("taskType") or "").startswith("recurring"):
+                        tt = t.get("taskType") or t.get("type") or ""
+                        if tt.startswith("recurring"):
                             rem, _ = remaining_mrg(t, txs)
                             if rem and rem > 0 and (earliest is None or rem < earliest):
                                 earliest = rem
@@ -309,7 +346,7 @@ if __name__ == "__main__":
         run_bot()
     else:
         while True:
-            print(f"{C}🚀 تشغيل المراقب الآمن לבوت MRG...{X}")
+            print(f"{C}🚀 تشغيل المراقب الآمن لبوت MRG...{X}")
             try:
                 result = subprocess.run([sys.executable, __file__, "--child"])
                 if result.returncode == 0: break
@@ -318,4 +355,3 @@ if __name__ == "__main__":
             except Exception: 
                 pass
             time.sleep(10)
-
