@@ -16,7 +16,7 @@ from telethon import TelegramClient, functions, types, errors
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import RequestWebViewRequest
 
-# ============================================================================
+# ===========================================================================
 # 🟥 إعدادات وثوابت MRG Claimer
 # ==============================================================================
 API_ID_MRG = int(os.environ.get("API_ID_MRG", 38197378))
